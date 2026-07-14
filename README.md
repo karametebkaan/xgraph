@@ -127,17 +127,14 @@ cp .env.example .env          # then fill in FALKORDB_PASSWORD etc.
 # 3. A graph engine must be reachable. For the on-prem route, start a FalkorDB container:
 #    docker run -p 6379:6379 -p 3000:3000 falkordb/falkordb:latest
 
-# 4. Run the gateway (:8090 — :8088 is taken by Kinetica Graph)
-./.venv/bin/uvicorn xgraph_gateway.app:app --port 8090
-
-# 5. Open the frontend — just open the file directly, no server needed:
-#    file:///path/to/xgraph/frontend/XGraph.html   (double-click, or File > Open)
-#    (needs internet for CDN libs; gateway.js must sit next to XGraph.html)
-#    Optional, if you prefer a served page:
-#    cd ../frontend && python3 -m http.server 8099   # http://localhost:8099/XGraph.html
+# 4. Start the gateway (one command; it also serves the UI). From the repo root:
+cd ..
+./xgraph start                  # background on :8090; ./xgraph stop to quit
 ```
 
-The frontend is a single `file://`-loadable page; the backend gateway is what must run.
+Then open **http://localhost:8090/** — the gateway serves the app itself, so there's no separate
+static server, and you can reload any time. `./xgraph stop` frees the port; `./xgraph status`/`logs`
+help too. (You can also open `frontend/XGraph.html` directly via `file://` if you prefer.)
 
 In the browser: **Setup** (pick engines, enter host/port/password) → **Connect** → **List** or
 **Load** a graph → **Query** / **Ask** / **Explain** / **Visualize**.
@@ -200,6 +197,7 @@ frontend/
   gateway.js               API client + pure transforms
 data/                      banking demo Parquet, stored zipped (unzip via scripts/)
 scripts/unzip-data.sh      extract data/*.parquet.zip
+xgraph                     start/stop control script (gateway also serves the UI)
 docs/                      design specs, plans, images
 ```
 

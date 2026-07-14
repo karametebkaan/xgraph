@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# xGraph control script — start/stop the gateway (which also serves the UI).
+#
+#   ./xgraph start     start the gateway in the background (port 8090)
+#   ./xgraph stop      stop it (frees the port)
+#   ./xgraph status    is it running?
+#   ./xgraph restart   stop then start
+#   ./xgraph logs      tail the gateway log
+#
+# Once started, open http://localhost:8090/ (the gateway serves XGraph.html) and
+# reload any time — the gateway stays up until `./xgraph stop`.
+#
+# Env: XGRAPH_PORT (default 8090). Put it on PATH with:
+#   ln -s "$(pwd)/xgraph" ~/.local/bin/xgraph      # then `xgraph start` anywhere
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PORT="${XGRAPH_PORT:-8090}"
+VENV="$ROOT/backend/.venv"
+UVICORN="$VENV/bin/uvicorn"
+RUNDIR="$ROOT/.run"
+PIDFILE="$RUNDIR/gateway-$PORT.pid"
+LOG="$RUNDIR/gateway-$PORT.log"
+URL="http://localhost:$PORT/"
+
+_port_pid() { command -v lsof >/dev/null 2>&1 && lsof -ti "tcp:$PORT" -sTCP:LISTEN 2>/dev/null || true; }
+_alive()    { [[ -f "$PIDFILE" ]] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; }
+
+start() {
+    if _alive; then echo "xGraph already running (pid $(cat "$PIDFILE")) → $URL"; return 0; fi
+    if [[ -n "$(_port_pid)" ]]; then
+        echo "port $PORT already in use by pid $(_port_pid) — not starting. Try: ./xgraph stop" >&2; return 1
+    fi
+    if [[ ! -x "$UVICORN" ]]; then
+        echo "no venv at $VENV — create it: cd backend && python3 -m venv .venv && ./.venv/bin/pip install -r requirements.txt" >&2; return 1
+    fi
+    mkdir -p "$RUNDIR"
+    # setsid → own process group so `stop` can kill uvicorn + its worker together.
+    setsid "$UVICORN" --app-dir "$ROOT/backend" xgraph_gateway.app:app \
+        --host "${XGRAPH_HOST:-127.0.0.1}" --port "$PORT" >"$LOG" 2>&1 < /dev/null &
+    echo $! > "$PIDFILE"
+    printf "starting xGraph on :%s " "$PORT"
+    for _ in $(seq 1 30); do
+        if curl -fsS "http://localhost:$PORT/engines" >/dev/null 2>&1; then
+            echo; echo "✓ running (pid $(cat "$PIDFILE")) → $URL"; return 0
+        fi
+        if ! _alive; then echo; echo "✗ gateway died on startup — last log lines:"; tail -n 20 "$LOG"; rm -f "$PIDFILE"; return 1; fi
+        printf "."; sleep 0.5
+    done
+    echo; echo "✗ timed out waiting for health. Log: $LOG"; return 1
+}
+
+stop() {
+    local stopped=0
+    if [[ -f "$PIDFILE" ]]; then
+        local pid; pid="$(cat "$PIDFILE")"
+        if kill -0 "$pid" 2>/dev/null; then
+            kill -- "-$pid" 2>/dev/null || kill "$pid" 2>/dev/null || true  # kill the group, then the pid
+            stopped=1
+        fi
+        rm -f "$PIDFILE"
+    fi
+    # Fallback: anything still holding the port.
+    local ppid; ppid="$(_port_pid)"
+    if [[ -n "$ppid" ]]; then kill $ppid 2>/dev/null || true; stopped=1; fi
+    if [[ "$stopped" == 1 ]]; then echo "xGraph stopped (port $PORT freed)"; else echo "xGraph not running"; fi
+}
+
+status() {
+    if _alive; then echo "running (pid $(cat "$PIDFILE")) → $URL"
+    elif [[ -n "$(_port_pid)" ]]; then echo "port $PORT in use by pid $(_port_pid) (not started by this script)"
+    else echo "not running"; fi
+}
+
+case "${1:-}" in
+    start)   start ;;
+    stop)    stop ;;
+    restart) stop; sleep 1; start ;;
+    status)  status ;;
+    logs)    tail -f "$LOG" ;;
+    *) echo "usage: ./xgraph {start|stop|restart|status|logs}" >&2; exit 2 ;;
+esac

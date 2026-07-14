@@ -21,3 +21,6 @@ data/*.parquet
 
 # Local scratch
 /notes
+
+# Gateway runtime (pid/log)
+.run/

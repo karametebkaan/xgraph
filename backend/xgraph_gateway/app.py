@@ -1,7 +1,9 @@
 from __future__ import annotations
+import os
 from fastapi import FastAPI, Body
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 from . import registry
 from . import nlcypher
 from .compute.duckdb_engine import ComputeEngine
@@ -215,6 +217,17 @@ def create_app(adapter_factory=registry.get_adapter, compute=None, store=None) -
             return _resolve_compute(session).run_sql(payload["sql"])
         except Exception as e:
             return _err("duckdb", e)
+
+    # Serve the single-file frontend so `http://localhost:8090/` IS the app —
+    # one process, same-origin (no CORS needed when loaded this way). Registered
+    # AFTER every API route + mounted last, so it never shadows the API.
+    _frontend = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "..", "frontend"))
+    if os.path.isdir(_frontend):
+        @app.get("/")
+        def _index():
+            return FileResponse(os.path.join(_frontend, "XGraph.html"))
+        app.mount("/", StaticFiles(directory=_frontend), name="frontend")
 
     return app
 

@@ -68,16 +68,16 @@ cd backend && ./.venv/bin/python -m pytest tests/ -v
 # Live tests (FalkorDB query→hydrate, FalkorDB↔Kinetica parity, Explain post-join) self-resolve the
 # Parquet; they SKIP if FalkorDB/Kinetica are unreachable or the Parquet is absent.
 
-# Run the gateway (:8090 — :8088 is taken by Kinetica Graph)
-cd backend && ./.venv/bin/uvicorn xgraph_gateway.app:app --port 8090
+# Start/stop the gateway (:8090 — :8088 is taken by Kinetica Graph). The gateway ALSO serves the
+# UI, so this is the only process needed; open http://localhost:8090/ and reload any time.
+./xgraph start        # background; also: ./xgraph stop | status | restart | logs
 curl -s 'localhost:8090/graphs?engine=falkordb'
+# (Manual equivalent: cd backend && ./.venv/bin/uvicorn xgraph_gateway.app:app --port 8090)
 
 # Frontend: pure-JS unit tests (gateway.js client + transforms)
 cd frontend && node tests/test_transforms.mjs && node tests/test_client.mjs
-# Open the app — no server needed: open frontend/XGraph.html directly (file://).
-# It special-cases file:// (skips the local docs HEAD probe); CDN libs need internet;
-# gateway.js must sit beside XGraph.html. Optional served page:
-cd frontend && python3 -m http.server 8099   # open http://localhost:8099/XGraph.html
+# The gateway serves frontend/XGraph.html at http://localhost:8090/ (app.py mounts frontend/ +
+# a "/" route). You can also open XGraph.html directly via file:// (it special-cases file://).
 ```
 
 ## Architecture
