@@ -1,0 +1,266 @@
+from __future__ import annotations
+from falkordb import FalkorDB
+from falkordb import Node as FalkorNode
+from falkordb import Edge as FalkorEdge
+from falkordb import Path as FalkorPath
+from xgraph_gateway import config
+from .base import GraphEngineAdapter
+from graph_loader.cli import run_build
+from graph_loader.config import EdgeSpec, Mapping, NodeSpec
+from graph_loader.duckdb_source import DuckDBSource
+from graph_loader.falkordb_sink import FalkorDBSink
+
+def _mapping_from_spec(spec: dict) -> Mapping:
+    """Pure spec (dict, from the /create request body) -> graph_loader Mapping.
+
+    No I/O -- unit-testable without a live DuckDB/FalkorDB connection. Field
+    defaults mirror graph_loader.config.load_mapping's YAML defaults.
+    """
+    nodes = [
+        NodeSpec(
+            sql=n["sql"],
+            id=n["id"],
+            id_property=n.get("id_property", "NODE"),
+            label_column=n["label_column"],
+            label_property=n.get("label_property", "LABEL"),
+            properties=list(n.get("properties", [])),
+        )
+        for n in spec.get("nodes", [])
+    ]
+    edges = [
+        EdgeSpec(
+            sql=e["sql"],
+            id=e["id"],
+            id_property=e.get("id_property", "ID"),
+            type_column=e["type_column"],
+            type_property=e.get("type_property", "LABEL"),
+            source_key=e["source_key"],
+            target_key=e["target_key"],
+            properties=list(e.get("properties", [])),
+        )
+        for e in spec.get("edges", [])
+    ]
+    return Mapping(
+        graph=spec["graph"],
+        nodes=nodes,
+        edges=edges,
+        node_key_property=spec.get("node_key_property", "NODE"),
+    )
+
+def _column_names(header) -> list[str]:
+    names = []
+    for col in header:
+        name = col[1] if isinstance(col, (list, tuple)) and len(col) > 1 else col
+        names.append(name.decode() if isinstance(name, bytes) else name)
+    return names
+
+def _dot_from_triples(triples) -> str:
+    lines = ["digraph {"]
+    for src, rel, dst in triples:
+        lines.append(f'  "{src}" -> "{dst}" [label="{rel}"];')
+    lines.append("}")
+    return "\n".join(lines)
+
+# ---------------------------------------------------------------------------
+# Graph extraction for the QueryPanel viz (path/graph rendering of raw Cypher
+# results). A `falkordb` QueryResult.result_set cell can be a scalar, a Node,
+# an Edge, a Path, or a list/map nesting any of those (e.g. `RETURN
+# collect(n)`). Edge.src_node/dest_node come back from the wire as bare
+# internal integer ids (see query_result.py's __parse_edge) -- NOT Node
+# objects -- so resolving them to the graph's own `NODE` identity property
+# requires a first pass over every Node seen anywhere in the result_set.
+# ---------------------------------------------------------------------------
+
+def _node_dict(node: FalkorNode) -> dict:
+    # Every node carries a shared `Entity` label plus its specific label
+    # (e.g. `bank`) and a `LABEL` property mirroring the specific label.
+    # Prefer the specific label so query-viz nodes read `bank`/`wire_message`/
+    # etc. instead of the generic `Entity`.
+    label = (node.properties.get("LABEL")
+             or next((l for l in (node.labels or []) if l != "Entity"), None)
+             or (node.labels or [None])[0])
+    return {"id": node.properties.get("NODE") or str(node.id),
+            "label": label,
+            "props": node.properties}
+
+def _edge_dict(edge: FalkorEdge, id_map: dict) -> dict:
+    return {"id": edge.properties.get("ID") or str(edge.id),
+            "source": id_map.get(edge.src_node, str(edge.src_node)),
+            "target": id_map.get(edge.dest_node, str(edge.dest_node)),
+            "type": edge.relation}
+
+def _walk_cells(result_set, visit) -> None:
+    """Call `visit(cell)` for every scalar cell in `result_set`, recursing into
+    lists/dicts (Cypher collections/maps can nest Node/Edge/Path values)."""
+    def _walk(cell):
+        if isinstance(cell, list):
+            for c in cell:
+                _walk(c)
+        elif isinstance(cell, dict):
+            for v in cell.values():
+                _walk(v)
+        else:
+            visit(cell)
+    for row in result_set:
+        for cell in row:
+            _walk(cell)
+
+def _collect_id_map(result_set) -> dict:
+    id_map: dict = {}
+    def _visit(cell):
+        if isinstance(cell, FalkorNode):
+            id_map[cell.id] = cell.properties.get("NODE") or str(cell.id)
+        elif isinstance(cell, FalkorPath):
+            for n in cell.nodes():
+                id_map[n.id] = n.properties.get("NODE") or str(n.id)
+    _walk_cells(result_set, _visit)
+    return id_map
+
+def extract_graph(result_set) -> dict:
+    """Best-effort: walk every Node/Edge/Path cell in a FalkorDB result_set and
+    return de-duped {"nodes": [...], "edges": [...]}. Never raises -- any
+    parse error yields an empty graph so `rows`/`columns` are unaffected."""
+    try:
+        id_map = _collect_id_map(result_set)
+        nodes: dict = {}
+        edges: dict = {}
+        def _visit(cell):
+            if isinstance(cell, FalkorNode):
+                nd = _node_dict(cell)
+                nodes[nd["id"]] = nd
+            elif isinstance(cell, FalkorEdge):
+                ed = _edge_dict(cell, id_map)
+                edges[ed["id"]] = ed
+            elif isinstance(cell, FalkorPath):
+                for n in cell.nodes():
+                    nd = _node_dict(n)
+                    nodes[nd["id"]] = nd
+                for e in cell.edges():
+                    ed = _edge_dict(e, id_map)
+                    edges[ed["id"]] = ed
+        _walk_cells(result_set, _visit)
+        return {"nodes": list(nodes.values()), "edges": list(edges.values())}
+    except Exception:
+        return {"nodes": [], "edges": []}
+
+def _serialize_cell(cell, id_map: dict):
+    """Make a result_set cell JSON-safe: Node/Edge/Path objects become compact
+    dicts (reusing the same shapes as `extract_graph`); everything else
+    (scalars, lists, maps) passes through, recursing where needed."""
+    if isinstance(cell, FalkorNode):
+        return _node_dict(cell)
+    if isinstance(cell, FalkorEdge):
+        return _edge_dict(cell, id_map)
+    if isinstance(cell, FalkorPath):
+        return {"nodes": [_node_dict(n) for n in cell.nodes()],
+                "edges": [_edge_dict(e, id_map) for e in cell.edges()]}
+    if isinstance(cell, list):
+        return [_serialize_cell(c, id_map) for c in cell]
+    if isinstance(cell, dict):
+        return {k: _serialize_cell(v, id_map) for k, v in cell.items()}
+    return cell
+
+def _graph_typed_columns(result_set, num_columns: int) -> set:
+    """Return the set of column indices whose cell value is a Node/Edge/Path
+    (checked via each column's first non-null row -- ragged/short rows are
+    guarded, never raise). These columns are excluded from the tabular
+    `columns`/`rows` output (they're rendered via `graph` instead) while a
+    pure-scalar RETURN leaves this set empty."""
+    graph_cols: set = set()
+    try:
+        for col_idx in range(num_columns):
+            for row in result_set:
+                if col_idx >= len(row):
+                    continue
+                cell = row[col_idx]
+                if cell is None:
+                    continue
+                if isinstance(cell, (FalkorNode, FalkorEdge, FalkorPath)):
+                    graph_cols.add(col_idx)
+                break  # only the first non-null cell per column matters
+    except Exception:
+        return set()
+    return graph_cols
+
+class FalkorDBAdapter(GraphEngineAdapter):
+    def __init__(self, settings=None, conn=None):
+        if conn is not None:
+            host = conn["host"]
+            port = conn["port"]
+            password = conn.get("password")
+        else:
+            host = settings.falkordb_host
+            port = settings.falkordb_port
+            password = settings.falkordb_password
+        self._host = host
+        self._port = port
+        self._password = password
+        self._db = FalkorDB(host=host, port=port, password=password)
+
+    def _graph(self, graph):
+        return self._db.select_graph(graph)
+
+    def _counts(self, g):
+        nodes = g.query("MATCH (n) RETURN count(n)", timeout=60000).result_set[0][0]
+        edges = g.query("MATCH ()-[r]->() RETURN count(r)", timeout=60000).result_set[0][0]
+        return {"nodes": nodes, "edges": edges}
+
+    def list_graphs(self):
+        return list(self._db.list_graphs())
+
+    def run_query(self, graph, cypher, timeout=60000):
+        qr = self._graph(graph).query(cypher, timeout=timeout)
+        graph_data = extract_graph(qr.result_set)
+        id_map = _collect_id_map(qr.result_set)
+        all_columns = _column_names(qr.header)
+        graph_col_idx = _graph_typed_columns(qr.result_set, len(all_columns))
+        columns = [c for i, c in enumerate(all_columns) if i not in graph_col_idx]
+        rows = [
+            [_serialize_cell(cell, id_map) for i, cell in enumerate(row) if i not in graph_col_idx]
+            for row in qr.result_set
+        ]
+        return {"columns": columns, "rows": rows, "graph": graph_data}
+
+    def get_schema(self, graph, options=None):
+        # `options` (Full/NKey/EKey display modes) is Kinetica-only -- FalkorDB
+        # always derives the DOT from actual triples, so it's accepted and ignored.
+        g = self._graph(graph)
+        labels = [r[0] for r in g.query("MATCH (n) RETURN DISTINCT n.LABEL", timeout=60000).result_set if r[0]]
+        rels = [r[0] for r in g.query("MATCH ()-[r]->() RETURN DISTINCT type(r)", timeout=60000).result_set if r[0]]
+        triples = [(r[0], r[1], r[2]) for r in g.query(
+            "MATCH (a)-[r]->(b) RETURN DISTINCT a.LABEL, type(r), b.LABEL", timeout=60000).result_set
+            if r[0] and r[2]]
+        return {"labels": labels, "rel_types": rels, "dot": _dot_from_triples(triples),
+                "counts": self._counts(g)}
+
+    def fetch_entities(self, graph, limit, offset=0):
+        g = self._graph(graph)
+        nodes = [{"id": r[0], "label": r[1], "props": r[2]} for r in g.query(
+            "MATCH (n) RETURN n.NODE, n.LABEL, properties(n) SKIP $off LIMIT $l",
+            {"l": limit, "off": offset}, timeout=60000).result_set]
+        edges = [{"id": r[0], "source": r[1], "target": r[2], "type": r[3]} for r in g.query(
+            "MATCH (a)-[r]->(b) RETURN r.ID, a.NODE, b.NODE, type(r) SKIP $off LIMIT $l",
+            {"l": limit, "off": offset}, timeout=60000).result_set]
+        return {"nodes": nodes, "edges": edges}
+
+    def get_record(self, graph, node_id):
+        rs = self._graph(graph).query(
+            "MATCH (n {NODE:$id}) RETURN n.NODE, n.LABEL, properties(n)",
+            {"id": node_id}, timeout=60000).result_set
+        if not rs:
+            return {}
+        return {"id": rs[0][0], "label": rs[0][1], "props": rs[0][2]}
+
+    def load_graph(self, spec):
+        mapping = _mapping_from_spec(spec)
+        # Resolve bare/relative table paths against the repo data dir so the
+        # Create panel can send `vertexes.parquet` without an absolute host path.
+        tables = {name: config.resolve_data_path(path)
+                  for name, path in spec["tables"].items()}
+        source = DuckDBSource.connect(tables)
+        sink = FalkorDBSink.connect(
+            spec["graph"], host=self._host, port=self._port, password=self._password)
+        return run_build(mapping, source, sink)
+
+    def graph_sizes(self):
+        return {name: self._counts(self._graph(name)) for name in self.list_graphs()}

@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+
+# Secrets / local env
+.env
+backend/.env
+
+# Banking demo data: the .zip archives ARE tracked; the unzipped Parquet is not.
+# Run ./scripts/unzip-data.sh after cloning to produce these.
+data/*.parquet
+!data/*.parquet.zip
+
+# Editor / OS
+*.swp
+*.swo
+.DS_Store
+
+# Local scratch
+/notes

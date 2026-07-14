@@ -1,0 +1,17 @@
+# xGraph gateway — self-contained backend dependencies.
+# The vendored graph_loader package (backend/graph_loader/) needs the graph/data
+# libs (falkordb, duckdb, gpudb, pyyaml); no dependency on the falkor or graphrag
+# repos remains.
+fastapi
+uvicorn
+httpx                # FastAPI TestClient
+duckdb               # OLAP / late-hydration / post-join, and Parquet/CSV reads
+falkordb             # FalkorDB graph engine (openCypher over RESP)
+gpudb                # Kinetica graph engine + OLAP route
+typeguard            # runtime dependency of gpudb; not always auto-installed
+pyyaml               # graph_loader.config mapping parse
+python-dotenv        # .env loading
+pytest
+# Optional: only needed for the Anthropic SDK LLM fallback (the `claude` CLI is
+# the default backend and needs nothing here).
+# anthropic
