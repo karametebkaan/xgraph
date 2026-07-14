@@ -74,7 +74,9 @@ curl -s 'localhost:8090/graphs?engine=falkordb'
 
 # Frontend: pure-JS unit tests (gateway.js client + transforms)
 cd frontend && node tests/test_transforms.mjs && node tests/test_client.mjs
-# Serve the app (talks to the gateway on :8090)
+# Open the app — no server needed: open frontend/XGraph.html directly (file://).
+# It special-cases file:// (skips the local docs HEAD probe); CDN libs need internet;
+# gateway.js must sit beside XGraph.html. Optional served page:
 cd frontend && python3 -m http.server 8099   # open http://localhost:8099/XGraph.html
 ```
 

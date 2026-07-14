@@ -130,10 +130,14 @@ cp .env.example .env          # then fill in FALKORDB_PASSWORD etc.
 # 4. Run the gateway (:8090 — :8088 is taken by Kinetica Graph)
 ./.venv/bin/uvicorn xgraph_gateway.app:app --port 8090
 
-# 5. Serve the frontend and open it
-cd ../frontend
-python3 -m http.server 8099    # then open http://localhost:8099/XGraph.html
+# 5. Open the frontend — just open the file directly, no server needed:
+#    file:///path/to/xgraph/frontend/XGraph.html   (double-click, or File > Open)
+#    (needs internet for CDN libs; gateway.js must sit next to XGraph.html)
+#    Optional, if you prefer a served page:
+#    cd ../frontend && python3 -m http.server 8099   # http://localhost:8099/XGraph.html
 ```
+
+The frontend is a single `file://`-loadable page; the backend gateway is what must run.
 
 In the browser: **Setup** (pick engines, enter host/port/password) → **Connect** → **List** or
 **Load** a graph → **Query** / **Ask** / **Explain** / **Visualize**.
