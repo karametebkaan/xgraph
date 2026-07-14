@@ -2553,7 +2553,7 @@ function QueryPanel(props) {
                 match: matchHelper ? { show: mhShow, solveMethod: mhSolveMethod, solutionTable: mhSolutionTable, rows: mhRows, sectionTable: mhSectionTable, sectionMode: mhSectionMode, options: mhOptions, expanded: mhExpanded, autoDrop: mhAutoDrop, resultTableIdx: mhResultTableIdx } : undefined
             }
         };
-    }, [sql, activeTab, result, stateRef, chShow, chGraphName, chDirected, chRows, chSectionTable, chOptions, chMode, chExpanded, shShow, shSolverType, shSolutionTable, shRows, shSectionTable, shSectionMode, shOptions, shExpanded, shAutoDrop, shResultTableIdx, mhShow, mhSolveMethod, mhSolutionTable, mhRows, mhSectionTable, mhSectionMode, mhOptions, mhExpanded, mhAutoDrop, mhResultTableIdx]);
+    }, [sql, activeTab, result, stateRef, srcLabels, srcEntity, tgtLabels, tgtEntity, waypoints, showHelper, chShow, chGraphName, chDirected, chRows, chSectionTable, chOptions, chMode, chExpanded, shShow, shSolverType, shSolutionTable, shRows, shSectionTable, shSectionMode, shOptions, shExpanded, shAutoDrop, shResultTableIdx, mhShow, mhSolveMethod, mhSolutionTable, mhRows, mhSectionTable, mhSectionMode, mhOptions, mhExpanded, mhAutoDrop, mhResultTableIdx]);
 
     // Execute query — supports multi-statement input (split on top-level ; after
     // stripping --line and /* block */ comments). Statements run sequentially;
@@ -7130,12 +7130,22 @@ function InteractExplainPanel(props) {
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState(null);
     const [resp, setResp] = useState(null); // {answer, join_sql, columns, rows, hydrated}
+    const [queryText, setQueryText] = useState(sql);
+    useEffect(function(){ setQueryText(props.sql || ''); }, [props.sql]);
 
     var handleExplain = async function() {
-        if (!gwClient || !result || busy) return;
+        if (!gwClient || busy) return;
+        var cypher = (queryText || '').trim();
         setBusy(true); setError(null);
         try {
-            var r = await gwClient.explain(focusText.trim() || 'Explain these results', result.columns, result.rows, sql, HYDRATE_SOURCE);
+            var cols = result && result.columns, rws = result && result.rows;
+            // No active-query result, or the user edited/pasted a different query → run it to get rows.
+            if (!rws || cypher !== (sql || '').trim()) {
+                if (!cypher) throw new Error('Enter or paste a query to explain.');
+                var qr = await gwClient.runQuery(activeGraph, cypher);
+                cols = qr.columns; rws = qr.rows;
+            }
+            var r = await gwClient.explain(focusText.trim() || 'Explain these results', cols, rws, cypher, HYDRATE_SOURCE);
             setResp(r);
         } catch (err) {
             setError((err && err.message) || String(err));
@@ -7166,14 +7176,16 @@ function InteractExplainPanel(props) {
         <div style={{ width:'100%', maxWidth:800, display:'flex', flexDirection:'column', gap:14, textAlign:'left' }}>
             <h2 style={{ fontWeight:700, fontSize:18, margin:0, color:'#2d3436' }}>Explain — results in plain English</h2>
             <div>
-                <div style={{ fontSize:11, fontWeight:700, color:'#636e72', textTransform:'uppercase', marginBottom:4 }}>Active query</div>
-                <pre style={{ margin:0, fontFamily:'monospace', fontSize:12, background:'#2d3436', color:'#dfe6e9', padding:10, borderRadius:6, overflow:'auto', maxHeight:150 }}>{sql || '(empty)'}</pre>
+                <div style={{ fontSize:11, fontWeight:700, color:'#636e72', textTransform:'uppercase', marginBottom:4 }}>Active query <span style={{ fontWeight:400, textTransform:'none', color:'#b2bec3' }}>— editable; paste one if there's no active query</span></div>
+                <textarea value={queryText} onChange={function(e){ setQueryText(e.target.value); }} spellCheck="false"
+                    onKeyDown={function(e){ if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); handleExplain(); } }}
+                    placeholder="Paste or type a query to explain…"
+                    style={{ width:'100%', boxSizing:'border-box', margin:0, fontFamily:'monospace', fontSize:12, background:'#2d3436', color:'#dfe6e9', padding:10, borderRadius:6, border:'none', minHeight:72, resize:'vertical' }} />
             </div>
-            {!result ? (
-                <p style={{ fontSize:13, color:'#b2bec3' }}>Run a query in the Query tab first.</p>
-            ) : (
-                <React.Fragment>
-                    <div style={{ fontSize:12, color:'#636e72' }}>{(result.rows || []).length} row{(result.rows || []).length === 1 ? '' : 's'} available to explain.</div>
+            <React.Fragment>
+                    {result && result.rows
+                        ? <div style={{ fontSize:12, color:'#636e72' }}>{result.rows.length} row{result.rows.length === 1 ? '' : 's'} from the active query{(queryText || '').trim() !== (sql || '').trim() ? ' — edited, will re-run.' : ' available to explain.'}</div>
+                        : <div style={{ fontSize:12, color:'#636e72' }}>No active query result — the query above will be run, then explained.</div>}
                     <div style={{ display:'flex', gap:8 }}>
                         <input type="text" value={focusText} onChange={function(e){ setFocusText(e.target.value); }}
                             placeholder="What to focus on (optional)…"
@@ -7216,7 +7228,6 @@ function InteractExplainPanel(props) {
                         </div>
                     )}
                 </React.Fragment>
-            )}
         </div>
     );
 }
@@ -7344,6 +7355,9 @@ function App() {
     // via QueryPanel's onResultChange prop (called right after it sets its
     // own local `result` state in executeQuery).
     const [queryTabResult, setQueryTabResult] = useState({});
+    // Per-tab QueryPanel stateRef (exposes live helper for session save) + initialHelper map (seeds Query-Helper widgets on load).
+    const queryTabStateRefs = useRef({});
+    const [queryTabHelper, setQueryTabHelper] = useState({});
     // `initialSql`, if given, seeds the new tab's query text (used by the
     // Interact① "Run in Query" button to hand off a generated Cypher query);
     // the "+" tab-strip button calls this with no args.
@@ -7495,7 +7509,10 @@ function App() {
                 gatewayBase: gatewayBase,
             },
             activeGraph: activeGraph,
-            queries: queryTabs.map(function(id) { return { id: id, sql: queryTabSql[id] || '' }; }),
+            queries: queryTabs.map(function(id) {
+                var st = queryTabStateRefs.current[id] && queryTabStateRefs.current[id].current;
+                return { id: id, sql: queryTabSql[id] || '', helper: (st && st.helper) || null, activeTab: (st && st.activeTab) || null };
+            }),
         };
         var blob = new Blob([JSON.stringify(session, null, 2)], { type: 'application/json' });
         var a = document.createElement('a');
@@ -7527,17 +7544,18 @@ function App() {
 
                 var queries = (s.queries && s.queries.length > 0) ? s.queries : [{ id: 'q1', sql: '' }];
                 var ids = queries.map(function(q) { return q.id; });
-                var sqlMap = {};
-                queries.forEach(function(q) { sqlMap[q.id] = q.sql || ''; });
+                var sqlMap = {}, helperMap = {};
+                queries.forEach(function(q) { sqlMap[q.id] = q.sql || ''; if (q.helper) helperMap[q.id] = q.helper; });
                 // Clear then reset on the next tick so the keyed QueryPanels
-                // actually remount (and re-seed from initialSql) even if a
-                // tab id was already mounted with different text.
+                // actually remount (and re-seed from initialSql/initialHelper).
                 setQueryTabs([]);
                 setQueryTabSql({});
+                setQueryTabHelper({});
                 setTimeout(function() {
                     setQueryTabs(ids);
                     setActiveQueryTab(ids[0]);
                     setQueryTabSql(sqlMap);
+                    setQueryTabHelper(helperMap);
                 }, 0);
 
                 setActiveAction('setup');
@@ -8897,6 +8915,7 @@ function App() {
                             the tab strip. */}
                         <div style={{ flex:1, display:'flex', flexDirection:'column', width:'100%', minHeight:0 }}>
                             {queryTabs.map(function(id) {
+                                if (!queryTabStateRefs.current[id]) queryTabStateRefs.current[id] = { current: null };
                                 return (
                                     <div key={id} style={{ display: activeQueryTab === id ? 'flex' : 'none', flex:1, flexDirection:'column', width:'100%', minHeight:0, alignSelf:'stretch' }}>
                                         <QueryPanel
@@ -8908,6 +8927,8 @@ function App() {
                                             panelIndex={0} onClose={function(){}} embedded={true}
                                             engine={engine}
                                             initialSql={queryTabSql[id] || ''}
+                                            initialHelper={queryTabHelper[id] || null}
+                                            stateRef={queryTabStateRefs.current[id]}
                                             onSqlChange={function(v){ setQueryTabSql(function(m){ var n = Object.assign({}, m); n[id] = v; return n; }); }}
                                             onResultChange={function(res){ setQueryTabResult(function(m){ var n = Object.assign({}, m); n[id] = res; return n; }); }}
                                         />
