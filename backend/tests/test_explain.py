@@ -168,3 +168,45 @@ def test_explain_endpoint_rejects_write_join_sql(tmp_path, monkeypatch):
     assert r.status_code == 400
     assert "error" in r.json()
     assert r.json()["error"]["code"]
+
+
+class _KineticaLikeCompute:
+    """Simulates KineticaComputeEngine: has hydrate/run_sql but NOT the file-based
+    describe_source/run_join. /explain must not depend on the session's compute."""
+    def hydrate(self, *a, **k):  # pragma: no cover - must not be reached
+        raise AssertionError("/explain must not use the session compute")
+    def run_sql(self, *a, **k):  # pragma: no cover
+        raise AssertionError("/explain must not use the session compute")
+
+
+class _FakeStore:
+    def __init__(self, compute):
+        self._c = compute
+    def get(self, sid):
+        return {"adapter": FakeAdapter(), "compute": self._c, "graph_engine": "kinetica"}
+
+
+def test_explain_uses_duckdb_even_when_session_olap_is_kinetica(tmp_path, monkeypatch):
+    # Regression: with OLAP/ingest = Kinetica the session compute has no
+    # describe_source/run_join; the file-based post-join must still run via DuckDB.
+    source = _wide(tmp_path)
+    columns = ["c_node"]
+    rows = [["party-A"], ["party-A"], ["party-B"]]
+
+    monkeypatch.setattr(nlcypher, "generate_join_sql",
+                        lambda focus, cyp, rc, wc, llm=None: _JOIN_SQL)
+    monkeypatch.setattr(nlcypher, "synthesize",
+                        lambda q, cols, rws, llm=None, cypher=None: "ok")
+
+    app = create_app(adapter_factory=lambda e: FakeAdapter(),
+                     store=_FakeStore(_KineticaLikeCompute()))
+    r = TestClient(app).post("/explain", json={
+        "session": "s1", "question": "who has the most SAR activity by party_name",
+        "columns": columns, "rows": rows, "cypher": "x", "source": source,
+    })
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["hydrated"] is True
+    assert body["columns"] == ["party_name", "sar_paths"]
+    assert body["rows"][0] == ["Acme", 2]

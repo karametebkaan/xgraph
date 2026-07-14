@@ -182,23 +182,25 @@ def create_app(adapter_factory=registry.get_adapter, compute=None, store=None) -
 
     @app.post("/explain")
     def explain(payload: dict = Body(...)):
-        session = payload.get("session")
         try:
             focus = (payload.get("question") or "").strip()
             source = payload.get("source")
             cols, rows, cypher = payload["columns"], payload["rows"], payload.get("cypher")
-            compute = _resolve_compute(session)
+            # File-based post-join hydration reads the Parquet/CSV hydrate file, which
+            # is intrinsically a DuckDB operation — use DuckDB here regardless of the
+            # session's OLAP engine (Kinetica compute can't post-join a local file).
+            duck = ComputeEngine()
             join_sql, hydrated = None, False
             out_cols, out_rows = cols, rows
             if focus and source:
-                wide_cols = compute.describe_source(source)
+                wide_cols = duck.describe_source(source)
                 join_sql = nlcypher.generate_join_sql(focus, cypher, cols, wide_cols) or None
                 if join_sql:
                     ok, reason = nlcypher.validate_sql(join_sql)
                     if not ok:
                         return _err("duckdb", ValueError(reason))
                     dict_rows = [dict(zip(cols, r)) for r in rows]
-                    agg = compute.run_join(dict_rows, source, join_sql)
+                    agg = duck.run_join(dict_rows, source, join_sql)
                     out_cols = list(agg[0].keys()) if agg else []
                     out_rows = [[d.get(c) for c in out_cols] for d in agg]
                     hydrated = True
