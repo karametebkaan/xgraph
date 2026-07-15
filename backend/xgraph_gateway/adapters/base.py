@@ -56,3 +56,17 @@ class GraphEngineAdapter(ABC):
         return {"kind": "graph-store",
                 "note": "This engine stores the graph itself — inspect it via Visualize / Ontology / Query.",
                 "tables": []}
+
+    def creation_statement(self, graph) -> dict:
+        """Best-effort "how was this graph created" recipe (Create panel's
+        recipe viewer). Returns {"statement": <DDL text or None>, "source":
+        <where it came from, or None>}.
+
+        Concrete, not `@abstractmethod` -- mirrors `storage`/`delete_graph`:
+        KineticaAdapter overrides this (show_graph carries the authoritative
+        CREATE GRAPH DDL), but FalkorDB has no server-side creation DDL (a
+        FalkorDB graph is built incrementally by whatever queries touched it,
+        with no stored recipe) -- so it, and any future adapter that doesn't
+        override this, inherits this default.
+        """
+        return {"statement": None, "source": None}

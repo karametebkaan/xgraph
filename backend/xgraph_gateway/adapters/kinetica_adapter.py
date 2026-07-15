@@ -80,11 +80,25 @@ def _counts_from_show_graph(resp) -> dict:
         return {"nodes": 0, "edges": 0}
     return {"nodes": nodes, "edges": edges}
 
-def _backing_tables(resp) -> tuple[str | None, str | None]:
-    """Discover the vertex/edge backing table names for a graph from
+def _creation_statement_text(resp) -> str | None:
+    """Pull the authoritative `create ... graph ...` DDL text out of
     `resp['original_request']` -- a JSON-encoded copy of the original
-    `create ... graph ...` DDL statement (`resp['original_request'][0]` is a
-    JSON string with a `"statement"` field). The statement shape is:
+    statement (`resp['original_request'][0]` is a JSON string with a
+    `"statement"` field). Returns `None` if absent/unparseable -- callers
+    must treat that as "statement unknown", never raise.
+    """
+    try:
+        raw_list = resp.get("original_request") or []
+        if not raw_list:
+            return None
+        return json.loads(raw_list[0])["statement"]
+    except (TypeError, ValueError, KeyError, IndexError):
+        return None
+
+def _backing_tables(resp) -> tuple[str | None, str | None]:
+    """Discover the vertex/edge backing table names for a graph from the
+    `create ... graph ...` DDL text (`_creation_statement_text`). The
+    statement shape is:
 
         create or replace directed graph <name> (
             nodes => INPUT_TABLES((SELECT ... FROM <vtable>)),
@@ -96,12 +110,8 @@ def _backing_tables(resp) -> tuple[str | None, str | None]:
     must treat that as "backing tables unknown" and return empty results,
     never raise.
     """
-    try:
-        raw_list = resp.get("original_request") or []
-        if not raw_list:
-            return (None, None)
-        statement = json.loads(raw_list[0])["statement"]
-    except (TypeError, ValueError, KeyError, IndexError):
+    statement = _creation_statement_text(resp)
+    if not statement:
         return (None, None)
 
     def _first_from(section_keyword: str) -> str | None:
@@ -836,6 +846,21 @@ class KineticaAdapter(GraphEngineAdapter):
             return {"kind": "kinetica", "tables": [],
                     "note": "No extract backing tables for this graph."}
         return {"kind": "kinetica", "tables": tables}
+
+    def creation_statement(self, graph):
+        """The authoritative CREATE GRAPH DDL for `graph`, straight from
+        `show_graph` (see `_creation_statement_text`) -- Kinetica keeps the
+        original creation statement server-side, unlike FalkorDB (built
+        incrementally, no stored recipe). Never raises -- any failure
+        (unreachable Kinetica, missing/malformed original_request) yields
+        `{"statement": None, ...}`.
+        """
+        try:
+            resp = self._db.show_graph(graph_name=graph, options={})
+            return {"statement": _creation_statement_text(resp),
+                    "source": "kinetica:show_graph"}
+        except Exception:
+            return {"statement": None, "source": "kinetica:show_graph"}
 
     def delete_graph(self, graph):
         # Best-effort, never raises: dropping a graph that doesn't exist (or a

@@ -132,6 +132,13 @@ def create_app(adapter_factory=registry.get_adapter, compute=None, store=None) -
         except Exception as e:
             return _err(engine, e)
 
+    @app.get("/graph_ddl")
+    def graph_ddl(graph: str, engine: str = "", session: str | None = None):
+        try:
+            return _resolve_adapter(session, engine).creation_statement(graph)
+        except Exception as e:
+            return _err(engine, e)
+
     @app.get("/source_preview")
     def source_preview(source: str, session: str | None = None):
         try:
