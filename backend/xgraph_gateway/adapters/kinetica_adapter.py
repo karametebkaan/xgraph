@@ -197,6 +197,95 @@ def _row_to_record(row: dict, node_id) -> dict:
         "props": dict(row),
     }
 
+# ---------------------------------------------------------------------------
+# ingest_elements -- upsert Extract-discovered entities/relations into a pair
+# of backing tables (<graph>_nodes/<graph>_edges) and (re)build a Kinetica
+# property graph over them. All builders below are PURE (identifiers/rows in,
+# SQL/dict out, no I/O) so they're unit-testable without a live Kinetica
+# connection. Mirrors kgr's table+graph shape, simplified to a single LABEL
+# string column (no ontology/axis tables). Identifiers are validated via
+# safe_ident before they're interpolated into any SQL string; all entity data
+# (ids, names, attrs) travels only through the insert_records_json JSON
+# payload, never string-interpolated.
+# ---------------------------------------------------------------------------
+
+def _qualified_table_name(graph: str, suffix: str) -> str:
+    # Schema-qualified graph names (e.g. "myschema.mygraph") get their backing
+    # table suffixed on the last (table) part only, e.g. "myschema.mygraph_nodes".
+    # Each dotted part is validated individually -- safe_ident rejects dots.
+    parts = [safe_ident(p) for p in str(graph).split(".")]
+    parts[-1] = parts[-1] + suffix
+    return ".".join(parts)
+
+def node_table_name(graph: str) -> str:
+    return _qualified_table_name(graph, "_nodes")
+
+def edge_table_name(graph: str) -> str:
+    return _qualified_table_name(graph, "_edges")
+
+def create_schema_sql(graph: str) -> str | None:
+    """`CREATE SCHEMA IF NOT EXISTS <schema>` for a dotted graph name, or None
+    if `graph` is unqualified (nothing to create -- the default schema is
+    used). Validates the schema part via safe_ident before interpolating it."""
+    parts = str(graph).split(".")
+    if len(parts) < 2:
+        return None
+    schema = safe_ident(parts[0])
+    return f"CREATE SCHEMA IF NOT EXISTS {schema}"
+
+def create_table_sql(table: str, kind: str) -> str:
+    """DDL for the skinny node/edge backing tables Kinetica's graph engine
+    reads. `table` must already be a validated identifier (e.g. from
+    node_table_name/edge_table_name) -- this builder does not re-validate it,
+    since it never accepts raw user input directly. `kind` is 'node' or 'edge'."""
+    if kind == "node":
+        return (
+            f"CREATE TABLE IF NOT EXISTS {table} (\n"
+            "    NODE VARCHAR(256, PRIMARY_KEY, SHARD_KEY) NOT NULL,\n"
+            "    LABEL VARCHAR(256),\n"
+            "    name VARCHAR(1024)\n"
+            ")"
+        )
+    if kind == "edge":
+        return (
+            f"CREATE TABLE IF NOT EXISTS {table} (\n"
+            "    edge_key VARCHAR(64, PRIMARY_KEY) NOT NULL,\n"
+            "    NODE1 VARCHAR(256),\n"
+            "    NODE2 VARCHAR(256),\n"
+            "    LABEL VARCHAR(256)\n"
+            ")"
+        )
+    raise ValueError(f"unknown create_table_sql kind: {kind!r}")
+
+def create_graph_sql(graph: str, node_table: str, edge_table: str) -> str:
+    """`CREATE OR REPLACE DIRECTED GRAPH` DDL over the node/edge backing
+    tables. `graph` is validated (dot-part-wise) via safe_ident before
+    interpolation; `node_table`/`edge_table` are expected pre-validated
+    (from node_table_name/edge_table_name)."""
+    graph_ident = ".".join(safe_ident(p) for p in str(graph).split("."))
+    return (
+        f"CREATE OR REPLACE DIRECTED GRAPH {graph_ident} (\n"
+        f"    NODES => INPUT_TABLES((SELECT NODE, LABEL FROM {node_table})),\n"
+        f"    EDGES => INPUT_TABLES((SELECT NODE1, NODE2, LABEL FROM {edge_table})),\n"
+        "    OPTIONS => KV_PAIRS(save_persist = 'true')\n"
+        ")"
+    )
+
+def node_rows(nodes: list[dict]) -> list[dict]:
+    """[{id,label,name,attrs}] -> insert_records_json payload dicts
+    ({NODE,LABEL,name}), dropping rows with no identity (mirrors
+    graph_loader.mapper's null-id row discard)."""
+    return [{"NODE": n["id"], "LABEL": n.get("label"), "name": n.get("name")}
+            for n in nodes if n.get("id") is not None]
+
+def edge_rows(edges: list[dict]) -> list[dict]:
+    """[{id,src,dst,label,attrs}] -> insert_records_json payload dicts
+    ({edge_key,NODE1,NODE2,LABEL}), dropping rows with a null id/src/dst
+    (an edge with a missing endpoint can never resolve)."""
+    return [{"edge_key": e["id"], "NODE1": e["src"], "NODE2": e["dst"], "LABEL": e.get("label")}
+            for e in edges
+            if e.get("id") is not None and e.get("src") is not None and e.get("dst") is not None]
+
 class KineticaAdapter(GraphEngineAdapter):
     def __init__(self, settings=None, conn=None):
         if conn is not None:
@@ -336,3 +425,40 @@ class KineticaAdapter(GraphEngineAdapter):
             return {name: {"nodes": int(n), "edges": int(e)}
                     for name, n, e in zip(names, num_nodes, num_edges)}
         return {name: {"nodes": 0, "edges": 0} for name in names}
+
+    def _execute_ddl(self, statement: str) -> None:
+        # Mirrors load_graph's execute_sql/is_ok() error-surfacing pattern.
+        resp = self._db.execute_sql(statement)
+        if not resp.is_ok():
+            info = resp.get("status_info", {}) or {}
+            raise RuntimeError(info.get("message") or "execute_sql failed")
+
+    def ingest_elements(self, graph, nodes, edges):
+        n_rows = node_rows(nodes)
+        e_rows = edge_rows(edges)
+        if not n_rows and not e_rows:
+            # Never touch Kinetica for an empty ingest -- nothing to create.
+            return {"nodes": 0, "edges": 0, "labels": {"node_labels": [], "edge_labels": []}}
+
+        node_table = node_table_name(graph)
+        edge_table = edge_table_name(graph)
+
+        schema_ddl = create_schema_sql(graph)
+        if schema_ddl:
+            self._execute_ddl(schema_ddl)
+        self._execute_ddl(create_table_sql(node_table, "node"))
+        self._execute_ddl(create_table_sql(edge_table, "edge"))
+
+        if n_rows:
+            self._db.insert_records_json(
+                json.dumps(n_rows), node_table, options={"update_on_existing_pk": "true"})
+        if e_rows:
+            self._db.insert_records_json(
+                json.dumps(e_rows), edge_table, options={"update_on_existing_pk": "true"})
+
+        self._execute_ddl(create_graph_sql(graph, node_table, edge_table))
+
+        node_labels = sorted({r["LABEL"] for r in n_rows if r.get("LABEL")})
+        edge_labels = sorted({r["LABEL"] for r in e_rows if r.get("LABEL")})
+        return {"nodes": len(n_rows), "edges": len(e_rows),
+                "labels": {"node_labels": node_labels, "edge_labels": edge_labels}}
