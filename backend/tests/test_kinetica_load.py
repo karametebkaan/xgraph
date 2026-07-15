@@ -187,3 +187,26 @@ def test_live_fetch_entities_returns_bounded_shaped_rows():
         assert "id" in n and "label" in n
     for e in out["edges"]:
         assert "id" in e and "source" in e and "target" in e and "type" in e
+
+
+class _FakeGraphApiDb:
+    """Fake GPUdb exposing only get_graph_entities (the native /get/graph/entities)."""
+    def __init__(self, node_resp, edge_resp):
+        self._n, self._e = node_resp, edge_resp
+    def get_graph_entities(self, graph_name="", offset=0, limit=-1, options=None):
+        return self._n if (options or {}).get("entity_type") == "node" else self._e
+
+
+def test_fetch_entities_decodes_get_graph_entities_native():
+    # nodes stride 2 [id, labelIdx]; edges stride 4 [edgeId, src, dst, labelIdx];
+    # labelIdx is 1-based into labels (each a JSON array string).
+    node_resp = {"entities_string": ["kaan-1", "2", "kinetica-9", "1"], "entities_int": [],
+                 "labels": ['["Organization"]', '["Person"]'], "info": {"payload_type": "string"}}
+    edge_resp = {"entities_string": ["10", "kaan-1", "kinetica-9", "3"], "entities_int": [],
+                 "labels": ['["LOCATED_IN"]', '["X"]', '["WORKS_AT"]'], "info": {"payload_type": "string"}}
+    adapter = KineticaAdapter.__new__(KineticaAdapter)
+    adapter._db = _FakeGraphApiDb(node_resp, edge_resp)
+    out = adapter.fetch_entities("g", 1000)
+    assert out["nodes"] == [{"id": "kaan-1", "label": "Person", "props": {}},
+                            {"id": "kinetica-9", "label": "Organization", "props": {}}]
+    assert out["edges"] == [{"id": "10", "source": "kaan-1", "target": "kinetica-9", "type": "WORKS_AT"}]

@@ -538,27 +538,104 @@ class KineticaAdapter(GraphEngineAdapter):
             return {}
 
     def fetch_entities(self, graph, limit, offset=0):
+        # Primary: Kinetica's native /get/graph/entities (what the Kinetica Graph
+        # Explorer uses) — the engine's own view of the graph, works for ANY graph
+        # (banking, extract, computed) regardless of backing-table shape. Fall back
+        # to reading the backing tables only if the graph API is unavailable.
         try:
-            resp = self._db.show_graph(graph_name=graph)
-            vtable, etable = _backing_tables(resp)
-            if not vtable or not etable:
-                return {"nodes": [], "edges": []}
-            _validate_table_ident(vtable)
-            _validate_table_ident(etable)
-            nodes = [{"id": r["id"], "label": r["label"], "props": {}}
-                     for r in self._src.rows(
-                         f"SELECT id, label FROM {vtable} LIMIT {int(limit)} OFFSET {int(offset)}")]
-            edges = [{"id": r["id"], "source": r["source_name"], "target": r["target_name"], "type": r["label"]}
-                     for r in self._src.rows(
-                         f"SELECT id, source_name, target_name, label FROM {etable} "
-                         f"LIMIT {int(limit)} OFFSET {int(offset)}")]
-            return {"nodes": nodes, "edges": edges}
+            return self._entities_via_graph_api(graph, limit, offset)
         except Exception:
-            # Load must succeed even if show_graph fails (network, auth), backing
-            # tables aren't discoverable, or discovered tables are unreadable
-            # (permissions, schema drift, etc.) -- ontology still renders from
-            # get_schema(); browse is simply empty.
+            pass
+        try:
+            return self._entities_via_tables(graph, limit, offset)
+        except Exception:
+            # Load must still succeed — ontology renders from get_schema(); browse
+            # is simply empty if neither path works.
             return {"nodes": [], "edges": []}
+
+    def _entities_via_graph_api(self, graph, limit, offset):
+        """Fetch nodes+edges from `/get/graph/entities` (GPUdb.get_graph_entities).
+
+        Response packs entities into a flat `entities_string`/`entities_int` list:
+        nodes as [id, labelIdx, ...] (stride 2), edges as [edgeId, src, dst,
+        labelIdx, ...] (stride 4). `labelIdx` is 1-based into `labels`, each a JSON
+        array string like '["Organization"]'. (payload_type 'double' = WKT/geo — not
+        decoded here; that's the geo/DeckGL path.)
+        """
+        nresp = self._db.get_graph_entities(
+            graph_name=graph, offset=int(offset), limit=int(limit),
+            options={"entity_type": "node"})
+        eresp = self._db.get_graph_entities(
+            graph_name=graph, offset=int(offset), limit=int(limit),
+            options={"entity_type": "edge"})
+
+        def _arr(resp):
+            return resp.get("entities_string") or resp.get("entities_int") or []
+
+        def _label(labels, idx1):
+            try:
+                raw = labels[int(idx1) - 1]
+            except (IndexError, ValueError, TypeError):
+                return None
+            try:
+                v = json.loads(raw)
+                if isinstance(v, list):
+                    return "|".join(str(x) for x in v) if v else None
+                return str(v)
+            except (ValueError, TypeError):
+                return str(raw).strip('[]"')
+
+        nlabels = nresp.get("labels") or []
+        narr = _arr(nresp)
+        nodes = [{"id": str(narr[i]), "label": _label(nlabels, narr[i + 1]), "props": {}}
+                 for i in range(0, len(narr) - 1, 2)]
+
+        elabels = eresp.get("labels") or []
+        earr = _arr(eresp)
+        edges = [{"id": str(earr[i]), "source": str(earr[i + 1]), "target": str(earr[i + 2]),
+                  "type": _label(elabels, earr[i + 3])}
+                 for i in range(0, len(earr) - 3, 4)]
+        return {"nodes": nodes, "edges": edges}
+
+    def _entities_via_tables(self, graph, limit, offset):
+        """Fallback: read the graph's backing node/edge tables directly, mapping
+        columns flexibly (extract: NODE/LABEL/name, NODE1/NODE2; banking:
+        id/label, source_name/target_name)."""
+        resp = self._db.show_graph(graph_name=graph)
+        vtable, etable = _backing_tables(resp)
+        if not vtable or not etable:
+            return {"nodes": [], "edges": []}
+        _validate_table_ident(vtable)
+        _validate_table_ident(etable)
+        ncols = {c.lower(): c for c in self._current_columns(vtable)}
+        ecols = {c.lower(): c for c in self._current_columns(etable)}
+
+        def pick(cols, *cands):
+            for c in cands:
+                if c.lower() in cols:
+                    return cols[c.lower()]
+            return cands[-1] if not cols else None
+
+        # Read by the resolved column names directly (no SQL alias) so the row
+        # dicts are keyed by the real column, regardless of engine aliasing.
+        n_id, n_lbl = pick(ncols, "NODE", "id"), pick(ncols, "LABEL", "label")
+        e_id = pick(ecols, "edge_key", "id")
+        e_src, e_tgt = pick(ecols, "NODE1", "source_name"), pick(ecols, "NODE2", "target_name")
+        e_lbl = pick(ecols, "LABEL", "label")
+        nodes = []
+        if n_id:
+            cols = [n_id] + ([n_lbl] if n_lbl else [])
+            for r in self._src.rows(f"SELECT {', '.join(cols)} FROM {vtable} "
+                                    f"LIMIT {int(limit)} OFFSET {int(offset)}"):
+                nodes.append({"id": r.get(n_id), "label": r.get(n_lbl) if n_lbl else None, "props": {}})
+        edges = []
+        if e_src and e_tgt:
+            cols = [e_src, e_tgt] + ([e_id] if e_id else []) + ([e_lbl] if e_lbl else [])
+            for r in self._src.rows(f"SELECT {', '.join(cols)} FROM {etable} "
+                                    f"LIMIT {int(limit)} OFFSET {int(offset)}"):
+                edges.append({"id": r.get(e_id) if e_id else None, "source": r.get(e_src),
+                              "target": r.get(e_tgt), "type": r.get(e_lbl) if e_lbl else None})
+        return {"nodes": nodes, "edges": edges}
 
     def get_record(self, graph, node_id):
         # The "post-join": picking a node pulls its full record from the
