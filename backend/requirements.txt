@@ -12,6 +12,7 @@ typeguard            # runtime dependency of gpudb; not always auto-installed
 pyyaml               # graph_loader.config mapping parse
 python-dotenv        # .env loading
 pypdf                # Extract: PDF text extraction (xgraph_gateway/extract.py)
+python-multipart     # FastAPI multipart/form parsing (POST /extract UploadFile+Form)
 pytest
 # Optional: only needed for the Anthropic SDK LLM fallback (the `claude` CLI is
 # the default backend and needs nothing here).

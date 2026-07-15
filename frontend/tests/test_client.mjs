@@ -74,6 +74,39 @@ const run = async () => {
   assert.deepEqual(await legacyClient.listGraphs(), ["banking_graph"]);
   assert.equal(seenUrls[seenUrls.length - 1], "http://gw/graphs?engine=fake");
 
+  // extract(): text path sends multipart FormData (no JSON content-type), carries session
+  let seenExtractUrl, seenExtractOpts;
+  const extractClient = g.makeClient("http://gw", async (url, opts) => {
+    if (url === "http://gw/connect") {
+      return { ok: true, json: async () => ({ session: "s1", graphs: ["banking_graph"] }) };
+    }
+    seenExtractUrl = url;
+    seenExtractOpts = opts;
+    return { ok: true, json: async () => ({ graph: "g1", entities: 2, relations: 1,
+      labels: { node_labels: ["Person"], edge_labels: ["KNOWS"] }, truncated: false }) };
+  });
+  await extractClient.connect({ engine: "falkordb", conn: {} }, { engine: "duckdb", conn: {} });
+  const extractResult = await extractClient.extract("g1", "some pasted text", "focus hint");
+  assert.equal(seenExtractUrl, "http://gw/extract");
+  assert.equal(seenExtractOpts.method, "POST");
+  assert.ok(seenExtractOpts.body instanceof FormData, "extract() must send FormData");
+  assert.equal(seenExtractOpts.headers, undefined, "must not set Content-Type (browser sets multipart boundary)");
+  assert.equal(seenExtractOpts.body.get("text"), "some pasted text");
+  assert.equal(seenExtractOpts.body.get("graph"), "g1");
+  assert.equal(seenExtractOpts.body.get("hint"), "focus hint");
+  assert.equal(seenExtractOpts.body.get("session"), "s1");
+  assert.equal(seenExtractOpts.body.has("file"), false);
+  assert.deepEqual(extractResult, { graph: "g1", entities: 2, relations: 1,
+    labels: { node_labels: ["Person"], edge_labels: ["KNOWS"] }, truncated: false });
+
+  // extract(): file path sends a File/Blob under "file", no "text" field
+  const fakeFile = new Blob(["hello"], { type: "text/plain" });
+  fakeFile.name = "d.txt";
+  await extractClient.extract("g1", fakeFile, null);
+  assert.ok(seenExtractOpts.body.get("file") instanceof Blob);
+  assert.equal(seenExtractOpts.body.has("text"), false);
+  assert.equal(seenExtractOpts.body.get("hint"), "");
+
   console.log("client OK");
 };
 run();

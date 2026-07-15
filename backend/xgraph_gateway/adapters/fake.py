@@ -26,3 +26,8 @@ class FakeAdapter(GraphEngineAdapter):
         return {"nodes": {"bank": 2}, "edges": {"performed": 1}}
     def graph_sizes(self):
         return {"demo_graph": {"nodes": len(_NODES), "edges": len(_EDGES)}}
+    def ingest_elements(self, graph, nodes, edges):
+        node_labels = sorted({n["label"] for n in nodes if n.get("label")})
+        edge_labels = sorted({e["label"] for e in edges if e.get("label")})
+        return {"nodes": len(nodes), "edges": len(edges),
+                "labels": {"node_labels": node_labels, "edge_labels": edge_labels}}

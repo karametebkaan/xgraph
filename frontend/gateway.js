@@ -90,6 +90,16 @@
     async function postJSONWithAuth(path, payload) {
       return postJSON(path, withSessionOrEngine(payload));
     }
+    async function postFormWithAuth(path, formData) {
+      // Multipart: do NOT set Content-Type — the browser/runtime must set the
+      // boundary itself. Session (preferred) or legacy engine, like postJSONWithAuth.
+      if (session) formData.append("session", session);
+      else if (engine) formData.append("engine", engine);
+      var res = await f(base + path, { method: "POST", body: formData });
+      var body = await res.json();
+      if (body && body.error) throw new Error(body.error.message || "gateway error");
+      return body;
+    }
 
     return {
       connect: async function (graph, compute) {
@@ -115,6 +125,15 @@
       nl2cypher: function (graph, question) { return postJSONWithAuth("/nl2cypher", { graph: graph, question: question }); },
       synthesize: function (question, columns, rows, cypher) { return postJSONWithAuth("/synthesize", { question: question, columns: columns, rows: rows, cypher: cypher }); },
       explain: function (question, columns, rows, cypher, source) { return postJSONWithAuth("/explain", { question: question, columns: columns, rows: rows, cypher: cypher, source: source }); },
+      extract: function (graph, fileOrText, hint) {
+        var formData = new FormData();
+        var isFileLike = typeof Blob !== "undefined" && fileOrText instanceof Blob;
+        if (isFileLike) formData.append("file", fileOrText, fileOrText.name || "document");
+        else formData.append("text", fileOrText || "");
+        formData.append("graph", graph);
+        formData.append("hint", hint || "");
+        return postFormWithAuth("/extract", formData);
+      },
     };
   }
 

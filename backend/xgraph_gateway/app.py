@@ -1,11 +1,12 @@
 from __future__ import annotations
 import os
-from fastapi import FastAPI, Body
+from fastapi import FastAPI, Body, File, Form, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from . import registry
 from . import nlcypher
+from . import extract
 from .compute.duckdb_engine import ComputeEngine
 from .sessions import SessionStore
 
@@ -121,6 +122,26 @@ def create_app(adapter_factory=registry.get_adapter, compute=None, store=None) -
         session = payload.get("session")
         try:
             return _resolve_adapter(session, engine).load_graph(payload["spec"])
+        except Exception as e:
+            return _err(engine, e)
+
+    @app.post("/extract")
+    async def extract_endpoint(file: UploadFile = File(None), text: str = Form(None),
+                                graph: str = Form(...), hint: str = Form(None),
+                                session: str = Form(None), engine: str = Form("")):
+        try:
+            if file is not None and file.filename:
+                content = await file.read()
+                doc = extract.read_document(file.filename, content)
+            else:
+                doc = text
+            if not doc or not doc.strip():
+                raise ValueError("extract requires a non-empty file or text")
+            res = extract.extract_document(doc, hint)
+            adapter = _resolve_adapter(session, engine)
+            out = adapter.ingest_elements(graph, res["entities"], res["relations"])
+            return {"graph": graph, "entities": out["nodes"], "relations": out["edges"],
+                    "labels": out["labels"], "truncated": res["truncated"]}
         except Exception as e:
             return _err(engine, e)
 
