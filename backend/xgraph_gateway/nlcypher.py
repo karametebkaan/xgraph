@@ -76,6 +76,10 @@ Target dialect: openCypher, as implemented by FalkorDB. Rules (MUST follow):
   flip it into a forward pattern).
 - GROUP BY is implicit: the non-aggregated columns in RETURN are the grouping keys; never
   write a GROUP BY keyword.
+- To filter or match by a human-readable value (a person/organization/place NAME, a
+  title), use the appropriate property from the per-label property list (commonly
+  `name`); use the `NODE` identity property in a filter ONLY when the question provides
+  an explicit id/key. Never reference a property that is not listed for that label.
 - Read-only ONLY: never CREATE/MERGE/DELETE/SET/REMOVE/DROP/etc.
 - Use ONLY the node labels and relationship types listed in the schema below. Add a
   sensible LIMIT (<= 100) unless the question calls for an aggregate over everything.
@@ -90,6 +94,10 @@ Target dialect: Kinetica GQL. Rules (MUST follow):
 - GROUP BY is implicit: the non-aggregated RETURN columns are the grouping keys; never
   write a GROUP BY keyword. Use ROUND(SUM(...), 0) etc. for aggregates as needed.
 - Wrap column-number ORDER BY as an alias instead (ORDER BY <alias> DESC), not ORDER BY 3.
+- To filter or match by a human-readable value (a person/organization/place NAME, a
+  title), use the appropriate property from the per-label property list (commonly
+  `name`); use the `NODE` identity property in a filter ONLY when the question provides
+  an explicit id/key. Never reference a property that is not listed for that label.
 - Read-only ONLY: never CREATE/MERGE/DELETE/SET/REMOVE/DROP/etc.
 - Use ONLY the node labels and relationship types listed in the schema below. Add a
   sensible LIMIT (<= 100) unless the question calls for an aggregate over everything.
@@ -100,10 +108,17 @@ def _schema_text(schema: dict) -> str:
     labels = schema.get("labels") or []
     rel_types = schema.get("rel_types") or []
     dot = schema.get("dot") or ""
+    properties = schema.get("properties")
     lines = [
         "NODE LABELS: " + ", ".join(labels),
         "RELATIONSHIP TYPES: " + ", ".join(rel_types),
     ]
+    if properties:
+        lines.append(
+            "NODE PROPERTIES (per label, filter on these — NOT on NODE unless the "
+            "question gives an explicit id):\n"
+            + "\n".join(f"  {lbl}: {', '.join(keys)}" for lbl, keys in properties.items())
+        )
     if dot:
         lines.append("SCHEMA GRAPH (dot, label -> label edges observed):\n" + dot)
     return "\n".join(lines)

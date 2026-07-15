@@ -281,6 +281,27 @@ class FalkorDBAdapter(GraphEngineAdapter):
         ]
         return {"columns": columns, "rows": rows, "graph": graph_data}
 
+    def _label_properties(self, g, labels: list[str]) -> dict:
+        """Best-effort per-label property keys: sample ONE node per label via
+        `keys(n) LIMIT 1` (small graphs, so per-label LIMIT 1 is cheap). Feeds
+        the NL->Cypher prompt so the LLM learns e.g. `name` exists and doesn't
+        default to filtering on the opaque `NODE` id. A label that isn't a
+        safe Cypher identifier, or whose sample query errors (e.g. no nodes
+        left with that label), is simply skipped -- never raises."""
+        properties: dict = {}
+        for label in labels:
+            try:
+                ident = safe_ident(label)
+            except Exception:
+                continue
+            try:
+                rs = g.query(f"MATCH (n:{ident}) RETURN keys(n) LIMIT 1", timeout=60000).result_set
+            except Exception:
+                continue
+            if rs and rs[0]:
+                properties[label] = sorted(rs[0][0])
+        return properties
+
     def get_schema(self, graph, options=None):
         # `options` (Full/NKey/EKey display modes) is Kinetica-only -- FalkorDB
         # always derives the DOT from actual triples, so it's accepted and ignored.
@@ -291,6 +312,7 @@ class FalkorDBAdapter(GraphEngineAdapter):
             "MATCH (a)-[r]->(b) RETURN DISTINCT a.LABEL, type(r), b.LABEL", timeout=60000).result_set
             if r[0] and r[2]]
         return {"labels": labels, "rel_types": rels, "dot": _dot_from_triples(triples),
+                "properties": self._label_properties(g, labels),
                 "counts": self._counts(g)}
 
     def fetch_entities(self, graph, limit, offset=0):

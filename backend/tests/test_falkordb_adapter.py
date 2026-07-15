@@ -37,6 +37,96 @@ def test_live_schema_has_bank_label():
     sch = a.get_schema("banking_graph")
     assert "bank" in sch["labels"]
     assert sch["dot"].startswith("digraph")
+    assert isinstance(sch["properties"], dict)
+    if "bank" in sch["properties"]:
+        assert isinstance(sch["properties"]["bank"], list)
+
+
+# ---------------------------------------------------------------------------
+# get_schema properties -- per-label `keys(n) LIMIT 1` sample, fake graph.
+# ---------------------------------------------------------------------------
+
+class _FakeSchemaGraph:
+    """Fakes just enough of falkordb.Graph.query for get_schema: distinct
+    labels/rel_types/triples plus one per-label `keys(n) LIMIT 1` sample.
+    `key_rows` maps a label -> the row `keys(n)` should return for it (a
+    missing/erroring label raises to exercise the try/except skip path)."""
+    def __init__(self, labels, rels, triples, key_rows, counts=(0, 0)):
+        self._labels = labels
+        self._rels = rels
+        self._triples = triples
+        self._key_rows = key_rows
+        self._counts = counts
+
+    def query(self, cypher, timeout=60000):
+        class _Result:
+            def __init__(self, result_set):
+                self.result_set = result_set
+        if "RETURN DISTINCT n.LABEL" in cypher:
+            return _Result([[l] for l in self._labels])
+        if "RETURN DISTINCT type(r)" in cypher:
+            return _Result([[r] for r in self._rels])
+        if "RETURN DISTINCT a.LABEL" in cypher:
+            return _Result([list(t) for t in self._triples])
+        if "count(n)" in cypher:
+            return _Result([[self._counts[0]]])
+        if "count(r)" in cypher:
+            return _Result([[self._counts[1]]])
+        if "RETURN keys(n)" in cypher:
+            for label in self._key_rows:
+                if f"(n:{label})" in cypher:
+                    if self._key_rows[label] is None:
+                        raise RuntimeError(f"boom for {label}")
+                    return _Result([[self._key_rows[label]]])
+            return _Result([])
+        raise AssertionError(f"unexpected query: {cypher}")
+
+
+def _schema_adapter(fake_graph):
+    adapter = object.__new__(FalkorDBAdapter)
+    adapter._graph = lambda graph: fake_graph
+    return adapter
+
+
+def test_get_schema_includes_properties_per_label():
+    fake = _FakeSchemaGraph(
+        labels=["Organization", "Person"],
+        rels=["works_at"],
+        triples=[("Person", "works_at", "Organization")],
+        key_rows={"Organization": ["NODE", "LABEL", "name"], "Person": ["name", "NODE", "LABEL"]},
+    )
+    adapter = _schema_adapter(fake)
+    sch = adapter.get_schema("demo_graph")
+    assert sch["properties"] == {
+        "Organization": ["LABEL", "NODE", "name"],
+        "Person": ["LABEL", "NODE", "name"],
+    }
+
+
+def test_get_schema_skips_label_when_sample_query_errors():
+    fake = _FakeSchemaGraph(
+        labels=["Organization", "Broken"],
+        rels=[],
+        triples=[],
+        key_rows={"Organization": ["NODE", "name"], "Broken": None},
+    )
+    adapter = _schema_adapter(fake)
+    sch = adapter.get_schema("demo_graph")
+    assert sch["properties"] == {"Organization": ["NODE", "name"]}
+    assert "Broken" not in sch["properties"]
+
+
+def test_get_schema_skips_label_with_unsafe_identifier():
+    fake = _FakeSchemaGraph(
+        labels=["ok_label", "bad label"],
+        rels=[],
+        triples=[],
+        key_rows={"ok_label": ["NODE", "name"]},
+    )
+    adapter = _schema_adapter(fake)
+    sch = adapter.get_schema("demo_graph")
+    assert sch["properties"] == {"ok_label": ["NODE", "name"]}
+    assert "bad label" not in sch["properties"]
 
 def test_live_query_returns_graph():
     a = _adapter_or_skip()

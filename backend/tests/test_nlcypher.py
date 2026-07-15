@@ -25,6 +25,30 @@ def test_generate_cypher_uses_injected_llm():
     assert cypher == "MATCH (n) RETURN n LIMIT 1"
 
 
+def test_generate_cypher_prompt_includes_properties_and_name_guidance():
+    captured = {}
+    def capturing_llm(prompt, *, schema=None):
+        captured["prompt"] = prompt
+        return {"cypher": "MATCH (n) RETURN n LIMIT 1"}
+    schema = dict(_SCHEMA, properties={
+        "Organization": ["LABEL", "NODE", "name"],
+        "Person": ["LABEL", "NODE", "name"],
+    })
+    nlcypher.generate_cypher(schema, "falkordb", "find Kinetica", llm=capturing_llm)
+    prompt = captured["prompt"]
+    assert "PROPERTIES" in prompt
+    assert "Organization: LABEL, NODE, name" in prompt
+    assert "Person: LABEL, NODE, name" in prompt
+    assert "NODE" in prompt and "name" in prompt
+    # Guidance phrase steering filters onto the human-readable property.
+    assert "human-readable" in prompt.lower()
+    assert "explicit id" in prompt.lower()
+
+
+def test_schema_text_omits_properties_section_when_absent():
+    assert "PROPERTIES" not in nlcypher._schema_text(_SCHEMA)
+
+
 def test_generate_cypher_kinetica_dialect_prompt_mentions_graph_clause():
     captured = {}
     def capturing_llm(prompt, *, schema=None):

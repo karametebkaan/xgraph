@@ -96,6 +96,15 @@ def test_live_get_schema_full_mode_returns_nontrivial_dot():
     assert isinstance(dot, str) and len(dot) > 20
 
 
+def test_get_schema_includes_properties_key_best_effort():
+    # Kinetica's show_graph labeljson carries label names + counts only, not
+    # column names, so `properties` is populated best-effort ({} for now) --
+    # this must not break existing get_schema callers/tests.
+    adapter, _db = _adapter_with_capturing_db()
+    schema = adapter.get_schema("expero.banking_graph")
+    assert schema["properties"] == {}
+
+
 # ---------------------------------------------------------------------------
 # graph_from_gql_result -- hop-column parser (Kinetica Graph Explorer's
 # "Visualization" transform). Canned columns shaped exactly like a live

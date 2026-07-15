@@ -353,7 +353,16 @@ class KineticaAdapter(GraphEngineAdapter):
         dot = _dot_from_show_graph(resp) or "digraph {}"
         labels, rel_types = _labels_from_show_graph(resp)
         counts = _counts_from_show_graph(resp)
-        return {"labels": labels, "rel_types": rel_types, "dot": dot, "counts": counts}
+        # Per-label property keys (for NL->Cypher grounding, see falkordb_adapter's
+        # equivalent) aren't cheaply available here: show_graph's labeljson carries
+        # only label names + counts, not column names, and the backing vertex
+        # table's columns aren't fetched by this call. Rather than add a new
+        # per-graph query (and risk stale/misleading column names for graphs not
+        # built via this adapter's ingest_elements path), leave this best-effort
+        # empty for now -- callers (nlcypher) already treat an empty/missing
+        # `properties` as "no extra grounding available".
+        return {"labels": labels, "rel_types": rel_types, "dot": dot,
+                "properties": {}, "counts": counts}
 
     def fetch_entities(self, graph, limit, offset=0):
         try:
