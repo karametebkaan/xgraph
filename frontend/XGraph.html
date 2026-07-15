@@ -6894,6 +6894,7 @@ function ExtractPanel(props) {
     var setActiveGraph = props.setActiveGraph, setActiveAction = props.setActiveAction;
     var extractSources = props.extractSources || []; var setExtractSources = props.setExtractSources;
     var onGraphUpdated = props.onGraphUpdated || function(){};
+    var graphEngine = props.graphEngine;
 
     const [file, setFile] = useState(null);
     const [pasteText, setPasteText] = useState('');
@@ -6924,7 +6925,7 @@ function ExtractPanel(props) {
         var isFile = !!file;
         var srcKey = isFile ? ('f|'+file.name+'|'+file.size+'|'+file.lastModified) : _extractKey(pasteText || '');
         var srcLabel = isFile ? file.name : ((pasteText||'').slice(0,80) + ((pasteText||'').length>80?'…':''));
-        var already = extractSources.some(function(s){ return s.graph === graphName && s.key === srcKey; });
+        var already = extractSources.some(function(s){ return s.graph === graphName && (s.engine === graphEngine || !s.engine) && s.key === srcKey; });
         if (already) {
             setError(null);
             setNoop('This source was already added to ' + graphName + ' — skipped (no new extraction).');
@@ -6940,6 +6941,7 @@ function ExtractPanel(props) {
                 setExtractSources(function(prev){
                     return prev.concat([{
                         graph: graphName, kind: isFile ? 'file' : 'text', label: srcLabel, key: srcKey,
+                        engine: graphEngine,
                         entities: res.entities, relations: res.relations, ts: new Date().toISOString(),
                     }]);
                 });
@@ -6962,15 +6964,12 @@ function ExtractPanel(props) {
         setActiveAction(action);
     };
 
-    // All sources, grouped by target graph so every built graph's extract
-    // history is visible (not just whatever the "Target graph name" input
-    // currently holds) — the CURRENT graphName group is shown first.
-    var srcByGraph = {};
-    extractSources.forEach(function(s){ (srcByGraph[s.graph] = srcByGraph[s.graph] || []).push(s); });
-    var srcGraphOrder = Object.keys(srcByGraph).sort(function(a, b){
-        if (a === graphName) return -1;
-        if (b === graphName) return 1;
-        return 0;
+    // Sources for the CURRENT (graphName, graphEngine) only — the same graph
+    // name can exist on a different engine with entirely different content,
+    // so filter by both, not just graph. Legacy entries saved before engine
+    // was recorded (no s.engine) still match via the `|| !s.engine` tolerance.
+    var currentSources = extractSources.filter(function(s){
+        return s.graph === graphName && (s.engine === graphEngine || !s.engine);
     });
 
     return (
@@ -7035,31 +7034,21 @@ function ExtractPanel(props) {
             )}
 
             <div style={{ marginTop:16 }}>
-                {extractSources.length === 0 ? (
-                    <React.Fragment>
-                        <span style={{ fontSize:10, fontWeight:700, color:'#636e72', textTransform:'uppercase' }}>Sources added to {graphName || 'this graph'}</span>
-                        <p style={{ fontSize:12, color:'#b2bec3', margin:'6px 0 0' }}>No sources added to {graphName || 'this graph'} yet.</p>
-                    </React.Fragment>
+                <span style={{ fontSize:10, fontWeight:700, color:'#636e72', textTransform:'uppercase' }}>{'SOURCES · ' + (graphName || 'this graph') + ' (' + graphEngine + ')'}</span>
+                {currentSources.length === 0 ? (
+                    <p style={{ fontSize:12, color:'#b2bec3', margin:'6px 0 0' }}>{'No sources added to ' + (graphName || 'this graph') + ' on ' + graphEngine + ' yet.'}</p>
                 ) : (
-                    srcGraphOrder.map(function(g) {
-                        var srcs = srcByGraph[g];
-                        return (
-                            <div key={'srcgrp_' + g} style={{ marginBottom:14 }}>
-                                <span style={{ fontSize:10, fontWeight:700, color:'#636e72', textTransform:'uppercase' }}>{'Sources · ' + g}</span>
-                                <div style={{ marginTop:6, display:'flex', flexDirection:'column', gap:4 }}>
-                                    {srcs.map(function(s, i) {
-                                        return (
-                                            <div key={'src_' + g + '_' + i} style={{ fontSize:12, color:'#2d3436', background:'#f7f9fb', border:'1px solid #eef2f7', borderRadius:6, padding:'6px 10px', display:'flex', alignItems:'center', gap:6 }}>
-                                                <span>{s.kind === 'file' ? '📄' : '✎'}</span>
-                                                <span style={{ flex:1, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{s.label}</span>
-                                                <span style={{ fontSize:11, color:'#636e72' }}>{'· '}{s.entities || 0} entities / {s.relations || 0} rels</span>
-                                            </div>
-                                        );
-                                    })}
+                    <div style={{ marginTop:6, display:'flex', flexDirection:'column', gap:4 }}>
+                        {currentSources.map(function(s, i) {
+                            return (
+                                <div key={'src_' + i} style={{ fontSize:12, color:'#2d3436', background:'#f7f9fb', border:'1px solid #eef2f7', borderRadius:6, padding:'6px 10px', display:'flex', alignItems:'center', gap:6 }}>
+                                    <span>{s.kind === 'file' ? '📄' : '✎'}</span>
+                                    <span style={{ flex:1, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{s.label}</span>
+                                    <span style={{ fontSize:11, color:'#636e72' }}>{'· '}{s.entities || 0} entities / {s.relations || 0} rels</span>
                                 </div>
-                            </div>
-                        );
-                    })
+                            );
+                        })}
+                    </div>
                 )}
             </div>
         </div>
@@ -7246,6 +7235,7 @@ function InteractAskPanel(props) {
     var gwClient = props.gwClient, activeGraph = props.activeGraph, labelData = props.labelData;
     var onRunInQuery = props.onRunInQuery;
     var askHistory = props.askHistory || []; var setAskHistory = props.setAskHistory;
+    var graphEngine = props.graphEngine;
     const [question, setQuestion] = useState('');
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState(null);
@@ -7263,6 +7253,7 @@ function InteractAskPanel(props) {
                 setAskHistory(function(prev){
                     var next = prev.concat([{
                         graph: activeGraph, question: question.trim(), cypher: r.cypher, answer: r.answer,
+                        engine: graphEngine,
                         rowCount: (r.rows||[]).length, ts: new Date().toISOString(),
                     }]);
                     return next.slice(-50);
@@ -7385,16 +7376,14 @@ function InteractAskPanel(props) {
         if (answerData && answerData.cypher && onRunInQuery) onRunInQuery(answerData.cypher);
     };
 
-    // Prior Q&As, grouped by graph so history for every graph stays visible
-    // (not just whatever activeGraph currently is) — each group newest-first,
-    // the CURRENT activeGraph group shown first.
-    var convoByGraph = {};
-    askHistory.forEach(function(h){ (convoByGraph[h.graph] = convoByGraph[h.graph] || []).push(h); });
-    var convoGraphOrder = Object.keys(convoByGraph).sort(function(a, b){
-        if (a === activeGraph) return -1;
-        if (b === activeGraph) return 1;
-        return 0;
-    });
+    // Prior Q&As for the CURRENT (activeGraph, graphEngine) only — the same
+    // graph name can exist on a different engine with entirely different
+    // content, so filter by both, not just graph. Newest-first. Legacy
+    // entries saved before engine was recorded (no h.engine) still match via
+    // the `|| !h.engine` tolerance.
+    var convo = askHistory.filter(function(h){
+        return h.graph === activeGraph && (h.engine === graphEngine || !h.engine);
+    }).slice().reverse();
 
     return (
         <div style={{ width:'100%', maxWidth:900, display:'flex', flexDirection:'column', gap:14, textAlign:'left' }}>
@@ -7452,33 +7441,26 @@ function InteractAskPanel(props) {
                     )}
                 </div>
             )}
-            {!!askHistory.length && (
+            {!!convo.length && (
                 <div>
-                    {convoGraphOrder.map(function(g) {
-                        var convo = convoByGraph[g].slice().reverse();
-                        return (
-                            <div key={'convo_' + g} style={{ marginBottom:14 }}>
-                                <div style={{ fontSize:11, fontWeight:700, color:'#636e72', textTransform:'uppercase', marginBottom:6 }}>{'Conversation · ' + g}</div>
-                                <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
-                                    {convo.map(function(h, idx) {
-                                        return (
-                                            <div key={idx} style={{ background:'#fafbfc', border:'1px solid #eee', borderRadius:8, padding:10 }}>
-                                                <div style={{ display:'flex', alignItems:'flex-start', justifyContent:'space-between', gap:8 }}>
-                                                    <div style={{ fontSize:13, fontWeight:700, color:'#2d3436' }}>{h.question}</div>
-                                                    <button onClick={function(){ setQuestion(h.question); }} style={{
-                                                        flex:'0 0 auto', padding:'2px 8px', border:'1px solid #dfe6e9', borderRadius:4, cursor:'pointer',
-                                                        fontSize:11, fontWeight:700, color:'#0984e3', background:'#fff',
-                                                    }}>Ask again</button>
-                                                </div>
-                                                <div style={{ fontSize:12, color:'#636e72', whiteSpace:'pre-wrap', marginTop:4 }}>{h.answer}</div>
-                                                <pre style={{ margin:'6px 0 0', fontFamily:'monospace', fontSize:11, background:'#2d3436', color:'#dfe6e9', padding:8, borderRadius:6, overflow:'auto', maxHeight:80 }}>{h.cypher}</pre>
-                                            </div>
-                                        );
-                                    })}
+                    <div style={{ fontSize:11, fontWeight:700, color:'#636e72', textTransform:'uppercase', marginBottom:6 }}>{'Conversation · ' + activeGraph}</div>
+                    <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
+                        {convo.map(function(h, idx) {
+                            return (
+                                <div key={idx} style={{ background:'#fafbfc', border:'1px solid #eee', borderRadius:8, padding:10 }}>
+                                    <div style={{ display:'flex', alignItems:'flex-start', justifyContent:'space-between', gap:8 }}>
+                                        <div style={{ fontSize:13, fontWeight:700, color:'#2d3436' }}>{h.question}</div>
+                                        <button onClick={function(){ setQuestion(h.question); }} style={{
+                                            flex:'0 0 auto', padding:'2px 8px', border:'1px solid #dfe6e9', borderRadius:4, cursor:'pointer',
+                                            fontSize:11, fontWeight:700, color:'#0984e3', background:'#fff',
+                                        }}>Ask again</button>
+                                    </div>
+                                    <div style={{ fontSize:12, color:'#636e72', whiteSpace:'pre-wrap', marginTop:4 }}>{h.answer}</div>
+                                    <pre style={{ margin:'6px 0 0', fontFamily:'monospace', fontSize:11, background:'#2d3436', color:'#dfe6e9', padding:8, borderRadius:6, overflow:'auto', maxHeight:80 }}>{h.cypher}</pre>
                                 </div>
-                            </div>
-                        );
-                    })}
+                            );
+                        })}
+                    </div>
                 </div>
             )}
         </div>
@@ -9293,6 +9275,7 @@ function App() {
                         setActiveGraph={setActiveGraph} setActiveAction={setActiveAction}
                         extractSources={extractSources} setExtractSources={setExtractSources}
                         extractGraph={extractGraph} setExtractGraph={setExtractGraph}
+                        graphEngine={graphEngine}
                         onGraphUpdated={refreshGraph}
                     />
                 )}
@@ -9311,6 +9294,7 @@ function App() {
                         gwClient={gwClient} activeGraph={activeGraph} labelData={labelData}
                         onRunInQuery={function(cypher){ addQueryTab(cypher); setActiveAction('query'); }}
                         askHistory={askHistory} setAskHistory={setAskHistory}
+                        graphEngine={graphEngine}
                     />
                 )}
                 {/* Query area — outer wrapper is a COLUMN so the tab strip
