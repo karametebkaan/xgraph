@@ -257,6 +257,21 @@ def create_table_sql(table: str, kind: str) -> str:
         )
     raise ValueError(f"unknown create_table_sql kind: {kind!r}")
 
+# Kinetica's CREATE GRAPH DDL grammar special-cases certain result-column
+# names inside the NODES INPUT_TABLES select as identity aliases: NODE (also
+# ID/WKTPOINT) is the node id, LABEL is the node's type label for `:Label`
+# MATCH -- and NAME is an alias for NODE_NAME, a SECOND node-identity column.
+# Selecting the backing table's `name` column verbatim (i.e. under that exact
+# output name) makes Kinetica silently register every node twice (NUM_NODES
+# doubles) and breaks `:Label` matching entirely (confirmed live: with `name`
+# selected as-is, `show_graph`'s labeljson reported total_unlabeled_nodes ==
+# total_labeled_nodes, and a plain `(p:Person)-[:WORKS_AT]->(o:Organization)`
+# MATCH returned zero rows even though the untyped `(p)-[:WORKS_AT]->(o)`
+# traversal found all 3 edges). Aliasing the output column to
+# `_NAME_PROPERTY` avoids the collision -- get_schema mirrors this alias so
+# the properties it reports match what's actually queryable in GQL.
+_NAME_PROPERTY = "entity_name"
+
 def create_graph_sql(graph: str, node_table: str, edge_table: str) -> str:
     """`CREATE OR REPLACE DIRECTED GRAPH` DDL over the node/edge backing
     tables. `graph` is validated (dot-part-wise) via safe_ident before
@@ -265,7 +280,7 @@ def create_graph_sql(graph: str, node_table: str, edge_table: str) -> str:
     graph_ident = ".".join(safe_ident(p) for p in str(graph).split("."))
     return (
         f"CREATE OR REPLACE DIRECTED GRAPH {graph_ident} (\n"
-        f"    NODES => INPUT_TABLES((SELECT NODE, LABEL FROM {node_table})),\n"
+        f"    NODES => INPUT_TABLES((SELECT NODE, LABEL, name AS {_NAME_PROPERTY} FROM {node_table})),\n"
         f"    EDGES => INPUT_TABLES((SELECT NODE1, NODE2, LABEL FROM {edge_table})),\n"
         "    OPTIONS => KV_PAIRS(save_persist = 'true')\n"
         ")"
@@ -353,16 +368,47 @@ class KineticaAdapter(GraphEngineAdapter):
         dot = _dot_from_show_graph(resp) or "digraph {}"
         labels, rel_types = _labels_from_show_graph(resp)
         counts = _counts_from_show_graph(resp)
-        # Per-label property keys (for NL->Cypher grounding, see falkordb_adapter's
-        # equivalent) aren't cheaply available here: show_graph's labeljson carries
-        # only label names + counts, not column names, and the backing vertex
-        # table's columns aren't fetched by this call. Rather than add a new
-        # per-graph query (and risk stale/misleading column names for graphs not
-        # built via this adapter's ingest_elements path), leave this best-effort
-        # empty for now -- callers (nlcypher) already treat an empty/missing
-        # `properties` as "no extra grounding available".
+        properties = self._extract_node_properties(graph, labels)
         return {"labels": labels, "rel_types": rel_types, "dot": dot,
-                "properties": {}, "counts": counts}
+                "properties": properties, "counts": counts}
+
+    def _extract_node_properties(self, graph, labels: list[str]) -> dict:
+        """Per-label property keys (for NL->Cypher grounding, see
+        falkordb_adapter's equivalent), for EXTRACT graphs only.
+
+        show_graph's labeljson carries only label names + counts, not column
+        names, so there is no cheap per-label property list in general.
+        However, an EXTRACT graph's backing node table (this adapter's own
+        `<graph>_nodes`, created by `ingest_elements`/`create_table_sql`) has a
+        known, uniform column set (`NODE`, `LABEL`, `name`) shared by every
+        label -- so if that table exists, every label gets the same property
+        list. Graphs built some other way (e.g. the banking graph, whose
+        backing vertex table is unrelated to `node_table_name`) simply won't
+        have this table, so `show_table` reports it missing and this returns
+        `{}` unchanged -- never an expensive per-graph query, never raises.
+
+        The table's own `name` column is reported as `_NAME_PROPERTY`
+        (`entity_name`), not literally `name` -- that's the alias
+        `create_graph_sql` gives it in the graph itself (see `_NAME_PROPERTY`'s
+        docstring), so it's the property actually filterable via GQL.
+        """
+        try:
+            table = node_table_name(graph)
+            resp = self._db.show_table(
+                table_name=table,
+                options={"get_column_info": "true", "no_error_if_not_exists": "true"})
+            if not resp.get("table_names"):
+                return {}
+            schemas = resp.get("type_schemas") or []
+            if not schemas:
+                return {}
+            cols = [f["name"] for f in json.loads(schemas[0]).get("fields", [])]
+            if not cols:
+                return {}
+            cols = [_NAME_PROPERTY if c == "name" else c for c in cols]
+            return {label: cols for label in labels}
+        except Exception:
+            return {}
 
     def fetch_entities(self, graph, limit, offset=0):
         try:
