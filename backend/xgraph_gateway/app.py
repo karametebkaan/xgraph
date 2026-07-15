@@ -141,6 +141,8 @@ def create_app(adapter_factory=registry.get_adapter, compute=None, store=None) -
             adapter = _resolve_adapter(session, engine)
             out = adapter.ingest_elements(graph, res["entities"], res["relations"])
             return {"graph": graph, "entities": out["nodes"], "relations": out["edges"],
+                    "entities_new": out.get("nodes_created", out["nodes"]),
+                    "relations_new": out.get("edges_created", out["edges"]),
                     "labels": out["labels"], "truncated": res["truncated"]}
         except Exception as e:
             return _err(engine, e)

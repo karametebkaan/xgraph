@@ -20,11 +20,14 @@ class GraphEngineAdapter(ABC):
         """MERGE extracted entities/relations into `graph` (accumulating,
         idempotent by id). `nodes`: [{id,label,name,attrs}]; `edges`:
         [{id,src,dst,label,attrs}]. Returns {"nodes": int, "edges": int,
-        "labels": {"node_labels": [...], "edge_labels": [...]}} reflecting
-        elements actually created plus the distinct labels seen in this call.
+        "nodes_created": int, "edges_created": int, "labels": {"node_labels":
+        [...], "edge_labels": [...]}} -- "nodes"/"edges" is the total ensured
+        present this call (so a repeat/overlapping Extract still reports the
+        elements as present), "nodes_created"/"edges_created" is how many were
+        newly created (vs. matched/updated) this call, and "labels" is the
+        distinct labels seen in this call.
 
-        Not `@abstractmethod`: only FalkorDBAdapter implements it so far
-        (Kinetica lands separately) and other adapters (FakeAdapter,
-        KineticaAdapter) must keep instantiating in the meantime.
+        Not `@abstractmethod`: FakeAdapter/FalkorDBAdapter/KineticaAdapter all
+        implement it, but future adapters aren't forced to.
         """
         raise NotImplementedError

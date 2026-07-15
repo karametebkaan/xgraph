@@ -226,6 +226,8 @@ def test_ingest_elements_creates_graph_with_nodes_and_edges(live_adapter):
     out = live_adapter.ingest_elements(_TEST_GRAPH, nodes, edges)
     assert out["nodes"] == 2
     assert out["edges"] == 1
+    assert out["nodes_created"] == 2
+    assert out["edges_created"] == 1
     assert out["labels"]["node_labels"] == ["Organization", "Person"]
     assert out["labels"]["edge_labels"] == ["WORKS_AT"]
 
@@ -242,13 +244,16 @@ def test_ingest_elements_accumulates_and_upserts_on_rerun(live_adapter):
     nodes = [{"id": "ing-n1", "label": "Person", "name": "Ada Lovelace", "attrs": {}}]
     live_adapter.ingest_elements(_TEST_GRAPH, nodes, [])
     # Re-running with the same id upserts (update_on_existing_pk) rather than
-    # duplicating the row.
+    # duplicating the row -- still counted in "nodes" (total present), but
+    # "nodes_created" is 0 since insert_records_json only updated it.
     out = live_adapter.ingest_elements(_TEST_GRAPH, nodes, [])
     assert out["nodes"] == 1
+    assert out["nodes_created"] == 0
     sizes = live_adapter.graph_sizes()
     matching = [v for k, v in sizes.items() if _TEST_GRAPH in k]
     assert matching[0]["nodes"] == 1
 
 def test_ingest_elements_empty_inputs_returns_zeros_without_error(live_adapter):
     out = live_adapter.ingest_elements(_TEST_GRAPH, [], [])
-    assert out == {"nodes": 0, "edges": 0, "labels": {"node_labels": [], "edge_labels": []}}
+    assert out == {"nodes": 0, "edges": 0, "nodes_created": 0, "edges_created": 0,
+                    "labels": {"node_labels": [], "edge_labels": []}}

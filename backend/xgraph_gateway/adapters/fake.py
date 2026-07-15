@@ -30,4 +30,5 @@ class FakeAdapter(GraphEngineAdapter):
         node_labels = sorted({n["label"] for n in nodes if n.get("label")})
         edge_labels = sorted({e["label"] for e in edges if e.get("label")})
         return {"nodes": len(nodes), "edges": len(edges),
+                "nodes_created": len(nodes), "edges_created": len(edges),
                 "labels": {"node_labels": node_labels, "edge_labels": edge_labels}}

@@ -135,6 +135,8 @@ def test_ingest_elements_creates_nodes_and_edges(live_adapter):
     out = live_adapter.ingest_elements(_TEST_GRAPH, nodes, edges)
     assert out["nodes"] >= 2
     assert out["edges"] >= 1
+    assert out["nodes_created"] >= 2
+    assert out["edges_created"] >= 1
     assert set(out["labels"]["node_labels"]) == {"Person", "Organization"}
     assert out["labels"]["edge_labels"] == ["WORKS_AT"]
 
@@ -149,6 +151,9 @@ def test_ingest_elements_merge_does_not_double_on_rerun(live_adapter):
     counts_before = live_adapter._counts(live_adapter._graph(_TEST_GRAPH))
     out = live_adapter.ingest_elements(_TEST_GRAPH, nodes, edges)
     counts_after = live_adapter._counts(live_adapter._graph(_TEST_GRAPH))
-    # Re-running with the same id MERGEs the existing node -- no new node created.
-    assert out["nodes"] == 0
+    # Re-running with the same id MERGEs the existing node -- it's still
+    # reported as present ("nodes"), but MERGE matched rather than created
+    # (proves accumulate/idempotent), and the graph itself doesn't double.
+    assert out["nodes"] >= 1
+    assert out["nodes_created"] == 0
     assert counts_after == counts_before

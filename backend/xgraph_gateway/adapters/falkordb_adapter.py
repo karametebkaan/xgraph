@@ -333,7 +333,14 @@ class FalkorDBAdapter(GraphEngineAdapter):
             qr = g.query(query, params, timeout=60000)
             created_nodes += qr.nodes_created
             created_edges += qr.relationships_created
-        node_labels = sorted({n["label"] for n in _valid_nodes(nodes)})
-        edge_labels = sorted({e["label"] for e in _valid_edges(edges)})
-        return {"nodes": created_nodes, "edges": created_edges,
+        valid_nodes = _valid_nodes(nodes)
+        valid_edges = _valid_edges(edges)
+        node_labels = sorted({n["label"] for n in valid_nodes})
+        edge_labels = sorted({e["label"] for e in valid_edges})
+        # "nodes"/"edges" = total ensured present (inputs are already unique by
+        # id); "nodes_created"/"edges_created" = newly created this call (MERGE
+        # deltas) -- a repeat/overlapping Extract still reports the elements as
+        # present even though nothing new was created.
+        return {"nodes": len(valid_nodes), "edges": len(valid_edges),
+                "nodes_created": created_nodes, "edges_created": created_edges,
                 "labels": {"node_labels": node_labels, "edge_labels": edge_labels}}

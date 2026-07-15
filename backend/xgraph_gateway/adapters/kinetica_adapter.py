@@ -433,12 +433,30 @@ class KineticaAdapter(GraphEngineAdapter):
             info = resp.get("status_info", {}) or {}
             raise RuntimeError(info.get("message") or "execute_sql failed")
 
+    def _insert_and_count(self, table: str, rows: list[dict]) -> int:
+        """Insert `rows` into `table` via insert_records_json (upserting on the
+        existing primary key), returning how many were newly *created* (as
+        opposed to matched-and-updated). insert_records_json returns a JSON
+        response string shaped like `{"data": {"count_inserted": ...,
+        "count_updated": ...}, ...}` (see the GPUdb.insert_records_json
+        docstring's own example: `response_object['data']['count_inserted']`).
+        Falls back to `len(rows)` if that shape isn't present for any reason
+        (never raises just to compute this count -- the ingest itself already
+        succeeded by the time this runs)."""
+        resp = self._db.insert_records_json(
+            json.dumps(rows), table, options={"update_on_existing_pk": "true"})
+        try:
+            return int(json.loads(resp)["data"]["count_inserted"])
+        except (TypeError, ValueError, KeyError):
+            return len(rows)
+
     def ingest_elements(self, graph, nodes, edges):
         n_rows = node_rows(nodes)
         e_rows = edge_rows(edges)
         if not n_rows and not e_rows:
             # Never touch Kinetica for an empty ingest -- nothing to create.
-            return {"nodes": 0, "edges": 0, "labels": {"node_labels": [], "edge_labels": []}}
+            return {"nodes": 0, "edges": 0, "nodes_created": 0, "edges_created": 0,
+                    "labels": {"node_labels": [], "edge_labels": []}}
 
         node_table = node_table_name(graph)
         edge_table = edge_table_name(graph)
@@ -449,16 +467,17 @@ class KineticaAdapter(GraphEngineAdapter):
         self._execute_ddl(create_table_sql(node_table, "node"))
         self._execute_ddl(create_table_sql(edge_table, "edge"))
 
-        if n_rows:
-            self._db.insert_records_json(
-                json.dumps(n_rows), node_table, options={"update_on_existing_pk": "true"})
-        if e_rows:
-            self._db.insert_records_json(
-                json.dumps(e_rows), edge_table, options={"update_on_existing_pk": "true"})
+        nodes_created = self._insert_and_count(node_table, n_rows) if n_rows else 0
+        edges_created = self._insert_and_count(edge_table, e_rows) if e_rows else 0
 
         self._execute_ddl(create_graph_sql(graph, node_table, edge_table))
 
         node_labels = sorted({r["LABEL"] for r in n_rows if r.get("LABEL")})
         edge_labels = sorted({r["LABEL"] for r in e_rows if r.get("LABEL")})
+        # "nodes"/"edges" = total ensured present this call; "nodes_created"/
+        # "edges_created" = newly created (vs. matched-and-updated) -- lets a
+        # repeat/overlapping Extract report elements as present even when
+        # nothing new was created.
         return {"nodes": len(n_rows), "edges": len(e_rows),
+                "nodes_created": nodes_created, "edges_created": edges_created,
                 "labels": {"node_labels": node_labels, "edge_labels": edge_labels}}

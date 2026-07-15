@@ -34,6 +34,8 @@ def test_extract_with_text_field(monkeypatch):
     assert body["graph"] == "g1"
     assert body["entities"] == 2
     assert body["relations"] == 1
+    assert body["entities_new"] == 2
+    assert body["relations_new"] == 1
     assert body["labels"] == {"node_labels": ["Organization", "Person"],
                                "edge_labels": ["WORKS_AT"]}
     assert body["truncated"] is False
@@ -50,6 +52,8 @@ def test_extract_with_file_upload(monkeypatch):
     body = r.json()
     assert body["entities"] == 2
     assert body["relations"] == 1
+    assert body["entities_new"] == 2
+    assert body["relations_new"] == 1
 
 
 def test_extract_truncated_flag_passthrough(monkeypatch):
