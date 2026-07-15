@@ -6892,10 +6892,16 @@ function ExtractPanel(props) {
     var gwClient = props.gwClient, setGraphs = props.setGraphs;
     var setActiveGraph = props.setActiveGraph, setActiveAction = props.setActiveAction;
     var extractSources = props.extractSources || []; var setExtractSources = props.setExtractSources;
+    var onGraphUpdated = props.onGraphUpdated || function(){};
 
     const [file, setFile] = useState(null);
     const [pasteText, setPasteText] = useState('');
-    const [graphName, setGraphName] = useState('extracted_graph');
+    // Target graph name is lifted into App state (props.extractGraph /
+    // props.setExtractGraph) so it survives a session load — a local
+    // useState here would reset to the default and hide sources that were
+    // saved under a different graph name.
+    var graphName = props.extractGraph || 'extracted_graph';
+    var setGraphName = props.setExtractGraph || function(){};
     const [hint, setHint] = useState('');
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState(null);
@@ -6937,6 +6943,10 @@ function ExtractPanel(props) {
                     }]);
                 });
             }
+            // Force the built graph's ontology/viz fresh immediately — covers
+            // extract-into-the-SAME-graph, where activeGraph's value doesn't
+            // change so a plain setActiveGraph wouldn't trigger a refresh.
+            onGraphUpdated(res.graph);
         } catch (err) {
             setError((err && err.message) || String(err));
         } finally {
@@ -6946,13 +6956,21 @@ function ExtractPanel(props) {
 
     var jumpTo = async function(action) {
         if (!result || !result.graph) return;
-        setActiveGraph(result.graph);
+        onGraphUpdated(result.graph);
         try { setGraphs(await gwClient.listGraphs()); } catch (e) { /* best effort */ }
         setActiveAction(action);
     };
 
-    // Sources already pushed to the CURRENT target graph name.
-    var currentGraphSources = extractSources.filter(function(s){ return s.graph === graphName; });
+    // All sources, grouped by target graph so every built graph's extract
+    // history is visible (not just whatever the "Target graph name" input
+    // currently holds) — the CURRENT graphName group is shown first.
+    var srcByGraph = {};
+    extractSources.forEach(function(s){ (srcByGraph[s.graph] = srcByGraph[s.graph] || []).push(s); });
+    var srcGraphOrder = Object.keys(srcByGraph).sort(function(a, b){
+        if (a === graphName) return -1;
+        if (b === graphName) return 1;
+        return 0;
+    });
 
     return (
         <div style={{ width:680, maxWidth:'100%', textAlign:'left', background:'#fff', border:'1px solid #dfe6e9', borderRadius:10, padding:24, boxShadow:'0 2px 8px rgba(0,0,0,0.04)' }}>
@@ -7016,21 +7034,31 @@ function ExtractPanel(props) {
             )}
 
             <div style={{ marginTop:16 }}>
-                <span style={{ fontSize:10, fontWeight:700, color:'#636e72', textTransform:'uppercase' }}>Sources added to {graphName || 'this graph'}</span>
-                {currentGraphSources.length === 0 ? (
-                    <p style={{ fontSize:12, color:'#b2bec3', margin:'6px 0 0' }}>No sources added to {graphName || 'this graph'} yet.</p>
+                {extractSources.length === 0 ? (
+                    <React.Fragment>
+                        <span style={{ fontSize:10, fontWeight:700, color:'#636e72', textTransform:'uppercase' }}>Sources added to {graphName || 'this graph'}</span>
+                        <p style={{ fontSize:12, color:'#b2bec3', margin:'6px 0 0' }}>No sources added to {graphName || 'this graph'} yet.</p>
+                    </React.Fragment>
                 ) : (
-                    <div style={{ marginTop:6, display:'flex', flexDirection:'column', gap:4 }}>
-                        {currentGraphSources.map(function(s, i) {
-                            return (
-                                <div key={'src_' + i} style={{ fontSize:12, color:'#2d3436', background:'#f7f9fb', border:'1px solid #eef2f7', borderRadius:6, padding:'6px 10px', display:'flex', alignItems:'center', gap:6 }}>
-                                    <span>{s.kind === 'file' ? '📄' : '✎'}</span>
-                                    <span style={{ flex:1, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{s.label}</span>
-                                    <span style={{ fontSize:11, color:'#636e72' }}>{'· '}{s.entities || 0} entities / {s.relations || 0} rels</span>
+                    srcGraphOrder.map(function(g) {
+                        var srcs = srcByGraph[g];
+                        return (
+                            <div key={'srcgrp_' + g} style={{ marginBottom:14 }}>
+                                <span style={{ fontSize:10, fontWeight:700, color:'#636e72', textTransform:'uppercase' }}>{'Sources · ' + g}</span>
+                                <div style={{ marginTop:6, display:'flex', flexDirection:'column', gap:4 }}>
+                                    {srcs.map(function(s, i) {
+                                        return (
+                                            <div key={'src_' + g + '_' + i} style={{ fontSize:12, color:'#2d3436', background:'#f7f9fb', border:'1px solid #eef2f7', borderRadius:6, padding:'6px 10px', display:'flex', alignItems:'center', gap:6 }}>
+                                                <span>{s.kind === 'file' ? '📄' : '✎'}</span>
+                                                <span style={{ flex:1, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{s.label}</span>
+                                                <span style={{ fontSize:11, color:'#636e72' }}>{'· '}{s.entities || 0} entities / {s.relations || 0} rels</span>
+                                            </div>
+                                        );
+                                    })}
                                 </div>
-                            );
-                        })}
-                    </div>
+                            </div>
+                        );
+                    })
                 )}
             </div>
         </div>
@@ -7229,8 +7257,16 @@ function InteractAskPanel(props) {
         if (answerData && answerData.cypher && onRunInQuery) onRunInQuery(answerData.cypher);
     };
 
-    // Prior Q&As for the CURRENT graph, newest first.
-    var convo = askHistory.filter(function(h){ return h.graph === activeGraph; }).slice().reverse();
+    // Prior Q&As, grouped by graph so history for every graph stays visible
+    // (not just whatever activeGraph currently is) — each group newest-first,
+    // the CURRENT activeGraph group shown first.
+    var convoByGraph = {};
+    askHistory.forEach(function(h){ (convoByGraph[h.graph] = convoByGraph[h.graph] || []).push(h); });
+    var convoGraphOrder = Object.keys(convoByGraph).sort(function(a, b){
+        if (a === activeGraph) return -1;
+        if (b === activeGraph) return 1;
+        return 0;
+    });
 
     return (
         <div style={{ width:'100%', maxWidth:900, display:'flex', flexDirection:'column', gap:14, textAlign:'left' }}>
@@ -7288,26 +7324,33 @@ function InteractAskPanel(props) {
                     )}
                 </div>
             )}
-            {!!convo.length && (
+            {!!askHistory.length && (
                 <div>
-                    <div style={{ fontSize:11, fontWeight:700, color:'#636e72', textTransform:'uppercase', marginBottom:6 }}>Conversation</div>
-                    <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
-                        {convo.map(function(h, idx) {
-                            return (
-                                <div key={idx} style={{ background:'#fafbfc', border:'1px solid #eee', borderRadius:8, padding:10 }}>
-                                    <div style={{ display:'flex', alignItems:'flex-start', justifyContent:'space-between', gap:8 }}>
-                                        <div style={{ fontSize:13, fontWeight:700, color:'#2d3436' }}>{h.question}</div>
-                                        <button onClick={function(){ setQuestion(h.question); }} style={{
-                                            flex:'0 0 auto', padding:'2px 8px', border:'1px solid #dfe6e9', borderRadius:4, cursor:'pointer',
-                                            fontSize:11, fontWeight:700, color:'#0984e3', background:'#fff',
-                                        }}>Ask again</button>
-                                    </div>
-                                    <div style={{ fontSize:12, color:'#636e72', whiteSpace:'pre-wrap', marginTop:4 }}>{h.answer}</div>
-                                    <pre style={{ margin:'6px 0 0', fontFamily:'monospace', fontSize:11, background:'#2d3436', color:'#dfe6e9', padding:8, borderRadius:6, overflow:'auto', maxHeight:80 }}>{h.cypher}</pre>
+                    {convoGraphOrder.map(function(g) {
+                        var convo = convoByGraph[g].slice().reverse();
+                        return (
+                            <div key={'convo_' + g} style={{ marginBottom:14 }}>
+                                <div style={{ fontSize:11, fontWeight:700, color:'#636e72', textTransform:'uppercase', marginBottom:6 }}>{'Conversation · ' + g}</div>
+                                <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
+                                    {convo.map(function(h, idx) {
+                                        return (
+                                            <div key={idx} style={{ background:'#fafbfc', border:'1px solid #eee', borderRadius:8, padding:10 }}>
+                                                <div style={{ display:'flex', alignItems:'flex-start', justifyContent:'space-between', gap:8 }}>
+                                                    <div style={{ fontSize:13, fontWeight:700, color:'#2d3436' }}>{h.question}</div>
+                                                    <button onClick={function(){ setQuestion(h.question); }} style={{
+                                                        flex:'0 0 auto', padding:'2px 8px', border:'1px solid #dfe6e9', borderRadius:4, cursor:'pointer',
+                                                        fontSize:11, fontWeight:700, color:'#0984e3', background:'#fff',
+                                                    }}>Ask again</button>
+                                                </div>
+                                                <div style={{ fontSize:12, color:'#636e72', whiteSpace:'pre-wrap', marginTop:4 }}>{h.answer}</div>
+                                                <pre style={{ margin:'6px 0 0', fontFamily:'monospace', fontSize:11, background:'#2d3436', color:'#dfe6e9', padding:8, borderRadius:6, overflow:'auto', maxHeight:80 }}>{h.cypher}</pre>
+                                            </div>
+                                        );
+                                    })}
                                 </div>
-                            );
-                        })}
-                    </div>
+                            </div>
+                        );
+                    })}
                 </div>
             )}
         </div>
@@ -7558,6 +7601,10 @@ function App() {
     const [extractSources, setExtractSources] = useState([]);
     // Ask conversation history: [{graph, question, cypher, answer, rowCount, ts}] — newest last. Capped.
     const [askHistory, setAskHistory] = useState([]);
+    // Extract panel's target graph name — lifted out of ExtractPanel so it
+    // survives a session load (a local useState there would reset to the
+    // default and hide sources saved under a different graph name).
+    const [extractGraph, setExtractGraph] = useState('extracted_graph');
     // `initialSql`, if given, seeds the new tab's query text (used by the
     // Interact① "Run in Query" button to hand off a generated Cypher query);
     // the "+" tab-strip button calls this with no args.
@@ -7715,6 +7762,7 @@ function App() {
             }),
             extractSources: extractSources,
             askHistory: askHistory,
+            extractGraph: extractGraph,
         };
         var blob = new Blob([JSON.stringify(session, null, 2)], { type: 'application/json' });
         var a = document.createElement('a');
@@ -7745,6 +7793,7 @@ function App() {
                 setActiveGraph(s.activeGraph || '');
                 setExtractSources(s.extractSources || []);
                 setAskHistory(s.askHistory || []);
+                setExtractGraph(s.extractGraph || 'extracted_graph');
 
                 var queries = (s.queries && s.queries.length > 0) ? s.queries : [{ id: 'q1', sql: '' }];
                 var ids = queries.map(function(q) { return q.id; });
@@ -8217,6 +8266,41 @@ function App() {
         }
     }, [gwClient, schemaFullSearch, schemaNodeLabelkeys, schemaEdgeLabelkeys]);
 
+    // Tracks which graph's schema was most recently loaded — a ref (not
+    // state) so setting it never itself triggers a re-render/re-run. Lets
+    // the activeGraph-effect below tell "already refreshed for this graph"
+    // (e.g. refreshGraph just did it synchronously) apart from a genuine
+    // graph switch, so schema never double-fetches.
+    const _schemaGraphRef = useRef(null);
+
+    // Force ontology + Visualize to refresh for a given graph, even when
+    // activeGraph's value isn't changing (e.g. extracting into the graph
+    // that's already active) — a plain setActiveGraph() in that case is a
+    // same-value no-op and the activeGraph-effect below wouldn't fire.
+    const refreshGraph = useCallback(function(g){
+        if (!g) return;
+        setActiveGraph(g);
+        _schemaGraphRef.current = g;
+        loadSchema(g);
+        setGraphTableData(null); setShowForceGraph(false);
+        setSelectedNodeLabels([]); setSelectedEdgeLabels([]);
+    }, [loadSchema]);
+
+    // ANY activeGraph change — graph switch, session load, or a same-value
+    // refreshGraph() call that already stamped _schemaGraphRef — refreshes
+    // ontology and clears stale Visualize state exactly once, with no
+    // double-fetch (guarded by _schemaGraphRef instead of always firing).
+    useEffect(function(){
+        if (activeGraph && activeGraph !== _schemaGraphRef.current) {
+            _schemaGraphRef.current = activeGraph;
+            loadSchema(activeGraph);
+            setGraphTableData(null); setShowForceGraph(false);
+            setSelectedNodeLabels([]); setSelectedEdgeLabels([]);
+        } else if (!activeGraph) {
+            _schemaGraphRef.current = null;
+        }
+    }, [activeGraph, loadSchema]);
+
     /* Load label counts (fast refresh) */
     var loadGraphDetails = useCallback(async function(graphName, loadOpts) {
         if (!graphName || !credentials.url) return;
@@ -8255,7 +8339,10 @@ function App() {
         // Schema (labels, rel types, ontology DOT) now comes from the gateway —
         // it replaces the old Kinetica `/show/graph?export_graph_schema=true`
         // fetch, which also no longer exists as a route on the gateway.
-        await loadSchema(graphName);
+        // Not fetched directly here: the setActiveGraph(graphName) call above
+        // is picked up by the activeGraph-keyed effect (guarded by
+        // _schemaGraphRef), which loads it exactly once — an explicit call
+        // here would double-fetch.
         setLastRefresh(Date.now());
         return null;
     }, [credentials, activeGraph, loadSchema]);
@@ -8283,21 +8370,14 @@ function App() {
         }
     }, [activeAction, connected, gwClient]);
 
-    // Schema (labels/rel types/DOT/counts) is independent of entity loading:
-    // fetch it the moment a graph becomes active — not gated on which action
-    // tab is open — so Query's label pulldowns and the summary bar are
-    // populated immediately, before the user ever visits Ontology/Visualize.
-    useEffect(function() {
-        if (activeGraph) loadSchema(activeGraph);
-    }, [activeGraph, loadSchema]);
-
-    // Entity data (graphTableData) is scoped to one graph; drop it (and the
-    // label selection) when the active graph changes so Visualize doesn't
-    // show a stale previous graph's nodes/edges until the user re-loads.
-    useEffect(function() {
-        setGraphTableData(null);
-        setSelectedNodeLabels([]); setSelectedEdgeLabels([]);
-    }, [activeGraph]);
+    // NOTE: schema-load-on-activeGraph-change and the graphTableData/label-
+    // selection clear used to be two separate effects here. Both are now
+    // handled by the single _schemaGraphRef-guarded effect defined right
+    // after loadSchema/refreshGraph above (it also clears showForceGraph,
+    // which neither of the old effects did) — fetching it the moment a
+    // graph becomes active, not gated on which action tab is open, so
+    // Query's label pulldowns and the summary bar populate immediately,
+    // and Visualize never shows a stale previous graph's nodes/edges.
 
     /* Fetch graph table data (edges + nodes) using columnar /get/records/bycolumn for speed */
     const [fetchProgress, setFetchProgress] = useState(null);
@@ -9062,6 +9142,8 @@ function App() {
                         gwClient={gwClient} setGraphs={setGraphs}
                         setActiveGraph={setActiveGraph} setActiveAction={setActiveAction}
                         extractSources={extractSources} setExtractSources={setExtractSources}
+                        extractGraph={extractGraph} setExtractGraph={setExtractGraph}
+                        onGraphUpdated={refreshGraph}
                     />
                 )}
                 {activeAction === 'list' && (
