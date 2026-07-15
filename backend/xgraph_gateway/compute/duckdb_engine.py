@@ -3,7 +3,7 @@ import duckdb
 from xgraph_gateway.config import resolve_data_path
 from graph_loader.hydrate import hydrate as _falkor_hydrate
 from graph_loader.hydrate import _register_rows, _REL_RE
-from graph_loader.duckdb_source import coerce_row
+from graph_loader.duckdb_source import coerce_row, coerce_value
 
 class DuckDBComputeEngine:
     def hydrate(self, rows, source, key="NODE", columns="*"):
@@ -26,6 +26,24 @@ class DuckDBComputeEngine:
         try:
             cur = con.execute(f"DESCRIBE SELECT * FROM '{source}'")
             return [row[0] for row in cur.fetchall()]
+        finally:
+            con.close()
+
+    def preview_source(self, source, limit=25):
+        """Storage viewer's "DuckDB source preview": columns + up to `limit`
+        sample rows of the resolved source file. Same path-resolution +
+        single-quote guard as `describe_source` -- `source` is untrusted
+        (frontend-supplied), so it goes through `resolve_data_path` and is
+        never string-interpolated raw."""
+        source = resolve_data_path(source)
+        if "'" in str(source):
+            raise ValueError(f"unsafe source path: {source!r}")
+        con = duckdb.connect()
+        try:
+            cur = con.execute(f"SELECT * FROM '{source}' LIMIT {int(limit)}")
+            cols = [d[0] for d in cur.description]
+            rows = [[coerce_value(v) for v in r] for r in cur.fetchall()]
+            return {"columns": cols, "rows": rows}
         finally:
             con.close()
 

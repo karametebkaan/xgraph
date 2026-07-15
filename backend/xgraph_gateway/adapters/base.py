@@ -39,3 +39,20 @@ class GraphEngineAdapter(ABC):
         implement it, but future adapters aren't forced to.
         """
         raise NotImplementedError
+
+    def storage(self, graph: str) -> dict:
+        """Best-effort inspection of the storage backing `graph` (Storage
+        viewer action). Default -- used by any adapter that stores the graph
+        itself rather than in separate inspectable tables (FalkorDB, and
+        FakeAdapter by inheritance): there is nothing to preview beyond the
+        graph, so point the caller at the existing Visualize/Ontology/Query
+        actions.
+
+        Concrete, not `@abstractmethod` -- mirrors `ingest_elements`/
+        `delete_graph`: KineticaAdapter overrides this (its Extract backing
+        tables ARE separately inspectable), but future adapters aren't forced
+        to.
+        """
+        return {"kind": "graph-store",
+                "note": "This engine stores the graph itself — inspect it via Visualize / Ontology / Query.",
+                "tables": []}

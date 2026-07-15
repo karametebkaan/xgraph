@@ -125,6 +125,20 @@ def create_app(adapter_factory=registry.get_adapter, compute=None, store=None) -
         except Exception as e:
             return _err(engine, e)
 
+    @app.get("/storage")
+    def storage(graph: str, engine: str = "", session: str | None = None):
+        try:
+            return _resolve_adapter(session, engine).storage(graph)
+        except Exception as e:
+            return _err(engine, e)
+
+    @app.get("/source_preview")
+    def source_preview(source: str, session: str | None = None):
+        try:
+            return _resolve_compute(session).preview_source(source)
+        except Exception as e:
+            return _err("duckdb", e)
+
     @app.post("/delete_graph")
     def delete_graph(payload: dict = Body(...)):
         engine = payload.get("engine", "")

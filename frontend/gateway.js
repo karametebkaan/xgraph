@@ -122,6 +122,8 @@
       hydrate: function (rows, source, key, columns) { return postJSONWithAuth("/hydrate", { rows: rows, source: source, key: key || "NODE", columns: columns || "*" }); },
       create: function (spec) { return postJSONWithAuth("/create", { spec: spec }); },
       deleteGraph: function (graph) { return postJSONWithAuth("/delete_graph", { graph: graph }); },
+      storage: function (graph) { return getJSON(q("/storage?graph=" + encodeURIComponent(graph))); },
+      sourcePreview: function (source) { return getJSON(q("/source_preview?source=" + encodeURIComponent(source))); },
       ask: function (graph, question) { return postJSONWithAuth("/ask", { graph: graph, question: question }); },
       nl2cypher: function (graph, question) { return postJSONWithAuth("/nl2cypher", { graph: graph, question: question }); },
       synthesize: function (question, columns, rows, cypher) { return postJSONWithAuth("/synthesize", { question: question, columns: columns, rows: rows, cypher: cypher }); },

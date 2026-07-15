@@ -729,6 +729,37 @@ class KineticaAdapter(GraphEngineAdapter):
                 "nodes_created": nodes_created, "edges_created": edges_created,
                 "labels": {"node_labels": node_labels, "edge_labels": edge_labels}}
 
+    def storage(self, graph):
+        """Storage viewer for an Extract graph: columns + up to 25 sample rows
+        from each backing table (`node_table_name`/`edge_table_name`) that
+        actually exists. A graph built some other way (e.g. the banking
+        graph, whose backing vertex table is unrelated to `node_table_name`)
+        has neither table, so this returns an empty `tables` list with a
+        note -- never raises, per table or overall (a bad `graph` name that
+        `safe_ident` would reject, an unreachable table, a read error -- all
+        degrade to "skip this table", mirroring `_extract_node_properties`'s
+        best-effort shape).
+        """
+        try:
+            candidate_tables = [node_table_name(graph), edge_table_name(graph)]
+        except Exception:
+            candidate_tables = []
+        tables = []
+        for table in candidate_tables:
+            try:
+                cols = self._current_columns(table)
+                if not cols:
+                    continue
+                rows = [[r.get(c) for c in cols]
+                        for r in self._src.rows(f"SELECT * FROM {table} LIMIT 25")]
+                tables.append({"name": table, "columns": cols, "rows": rows})
+            except Exception:
+                continue
+        if not tables:
+            return {"kind": "kinetica", "tables": [],
+                    "note": "No extract backing tables for this graph."}
+        return {"kind": "kinetica", "tables": tables}
+
     def delete_graph(self, graph):
         # Best-effort, never raises: dropping a graph that doesn't exist (or a
         # backing table an EXTRACT never created) is still a successful delete

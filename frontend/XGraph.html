@@ -6541,6 +6541,7 @@ const ACTIONS = [
     { key: 'interact2', label: 'Explain',  reachable: function(s) { return !!s.activeGraph; } },
     { key: 'visualize', label: 'Visualize', reachable: function(s) { return !!s.activeGraph; } },
     { key: 'ontology',  label: 'Ontology',  reachable: function(s) { return !!s.activeGraph; } },
+    { key: 'storage',   label: 'Storage',   reachable: function(s) { return !!s.activeGraph; } },
 ];
 
 function ActionBar(props) {
@@ -7099,6 +7100,131 @@ function ListPanel(props) {
                     })}
                 </div>
             )}
+        </div>
+    );
+}
+
+/* ═══════════════════ StoragePanel ════════════════════════════════════════
+   Storage viewer: inspects the underlying storage backing the active graph —
+   Kinetica extract tables (columns + up to 25 sample rows, via
+   gwClient.storage) or the engine's own graph-store note (FalkorDB — see
+   base.py's ABC default) — plus a DuckDB source preview (gwClient.sourcePreview)
+   of HYDRATE_SOURCE. DuckDB is stateless: a query layer over files, nothing
+   persistent, so that second box previews the source Parquet file itself, not
+   a persisted table. Both fetches auto-run on mount and whenever the active
+   graph / client change. ═══ */
+function StorageTable(props) {
+    var name = props.name, columns = props.columns || [], rows = props.rows || [];
+    return (
+        <div style={{ marginBottom:16 }}>
+            <div style={{ fontSize:13, fontWeight:700, color:'#2d3436', marginBottom:6, fontFamily:'monospace' }}>{name}</div>
+            <div style={{ overflow:'auto', maxHeight:280, border:'1px solid #dfe6e9', borderRadius:6 }}>
+                <table style={{ borderCollapse:'collapse', fontSize:12, width:'100%' }}>
+                    <thead>
+                        <tr>
+                            {columns.map(function(c, i) {
+                                return (
+                                    <th key={i} style={{ textAlign:'left', padding:'6px 10px', background:'#f8f9fa', borderBottom:'1px solid #dfe6e9', position:'sticky', top:0, color:'#636e72', fontWeight:600, whiteSpace:'nowrap' }}>{c}</th>
+                                );
+                            })}
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {rows.map(function(r, ri) {
+                            return (
+                                <tr key={ri}>
+                                    {r.map(function(v, ci) {
+                                        return (
+                                            <td key={ci} style={{ padding:'5px 10px', borderBottom:'1px solid #f1f2f6', color:'#2d3436', whiteSpace:'nowrap' }}>
+                                                {v === null || v === undefined ? <span style={{ color:'#b2bec3' }}>{'null'}</span> : String(v)}
+                                            </td>
+                                        );
+                                    })}
+                                </tr>
+                            );
+                        })}
+                    </tbody>
+                </table>
+            </div>
+            <div style={{ fontSize:11, color:'#b2bec3', marginTop:4 }}>{rows.length} row{rows.length === 1 ? '' : 's'} shown (max 25)</div>
+        </div>
+    );
+}
+
+function StoragePanel(props) {
+    var gwClient = props.gwClient, activeGraph = props.activeGraph;
+    const [storageData, setStorageData] = useState(null);
+    const [storageBusy, setStorageBusy] = useState(false);
+    const [storageError, setStorageError] = useState(null);
+    const [sourceData, setSourceData] = useState(null);
+    const [sourceBusy, setSourceBusy] = useState(false);
+    const [sourceError, setSourceError] = useState(null);
+
+    useEffect(function() {
+        if (!gwClient || !activeGraph) { setStorageData(null); return; }
+        var cancelled = false;
+        (async function() {
+            setStorageBusy(true); setStorageError(null);
+            try {
+                var r = await gwClient.storage(activeGraph);
+                if (!cancelled) setStorageData(r);
+            } catch (err) {
+                if (!cancelled) { setStorageError((err && err.message) || String(err)); setStorageData(null); }
+            } finally {
+                if (!cancelled) setStorageBusy(false);
+            }
+        })();
+        return function(){ cancelled = true; };
+    }, [gwClient, activeGraph]);
+
+    useEffect(function() {
+        if (!gwClient) { setSourceData(null); return; }
+        var cancelled = false;
+        (async function() {
+            setSourceBusy(true); setSourceError(null);
+            try {
+                var r = await gwClient.sourcePreview(HYDRATE_SOURCE);
+                if (!cancelled) setSourceData(r);
+            } catch (err) {
+                if (!cancelled) { setSourceError((err && err.message) || String(err)); setSourceData(null); }
+            } finally {
+                if (!cancelled) setSourceBusy(false);
+            }
+        })();
+        return function(){ cancelled = true; };
+    }, [gwClient]);
+
+    return (
+        <div style={{ width:'100%', maxWidth:900, textAlign:'left', display:'flex', flexDirection:'column', gap:20, margin:'0 auto', overflow:'auto', padding:'0 4px' }}>
+            <div style={{ background:'#fff', border:'1px solid #dfe6e9', borderRadius:10, padding:24, boxShadow:'0 2px 8px rgba(0,0,0,0.04)' }}>
+                <h2 style={{ fontWeight:700, fontSize:18, margin:'0 0 4px', color:'#2d3436' }}>Storage</h2>
+                <p style={{ fontSize:12, color:'#b2bec3', margin:'0 0 16px' }}>
+                    Inspect the underlying storage backing <strong>{activeGraph}</strong>.
+                </p>
+                {storageBusy && <p style={{ fontSize:13, color:'#636e72' }}>{'Loading storage…'}</p>}
+                {storageError && <p style={{ fontSize:13, color:'#d63031' }}>{storageError}</p>}
+                {!storageBusy && !storageError && storageData && (
+                    storageData.tables && storageData.tables.length > 0 ? (
+                        storageData.tables.map(function(t) {
+                            return <StorageTable key={t.name} name={t.name} columns={t.columns} rows={t.rows} />;
+                        })
+                    ) : (
+                        <p style={{ fontSize:13, color:'#636e72', margin:0 }}>{storageData.note || 'No backing tables to show.'}</p>
+                    )
+                )}
+            </div>
+            <div style={{ background:'#fff', border:'1px solid #dfe6e9', borderRadius:10, padding:24, boxShadow:'0 2px 8px rgba(0,0,0,0.04)' }}>
+                <h2 style={{ fontWeight:700, fontSize:18, margin:'0 0 4px', color:'#2d3436' }}>DuckDB source preview</h2>
+                <p style={{ fontSize:12, color:'#b2bec3', margin:'0 0 16px' }}>
+                    DuckDB is stateless — a query layer over files, not a persisted store — so this
+                    previews the source file (<code>{HYDRATE_SOURCE}</code>) itself, not a table.
+                </p>
+                {sourceBusy && <p style={{ fontSize:13, color:'#636e72' }}>{'Loading source preview…'}</p>}
+                {sourceError && <p style={{ fontSize:13, color:'#d63031' }}>{sourceError}</p>}
+                {!sourceBusy && !sourceError && sourceData && (
+                    <StorageTable name={HYDRATE_SOURCE} columns={sourceData.columns} rows={sourceData.rows} />
+                )}
+            </div>
         </div>
     );
 }
@@ -9176,6 +9302,9 @@ function App() {
                         onSelectGraph={function(name){ setActiveGraph(name); setActiveAction('ontology'); }}
                         onDeleteGraph={handleDeleteGraph}
                     />
+                )}
+                {activeAction === 'storage' && (
+                    <StoragePanel gwClient={gwClient} activeGraph={activeGraph} />
                 )}
                 {activeAction === 'interact1' && (
                     <InteractAskPanel
