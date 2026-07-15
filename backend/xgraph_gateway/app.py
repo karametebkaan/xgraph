@@ -125,6 +125,15 @@ def create_app(adapter_factory=registry.get_adapter, compute=None, store=None) -
         except Exception as e:
             return _err(engine, e)
 
+    @app.post("/delete_graph")
+    def delete_graph(payload: dict = Body(...)):
+        engine = payload.get("engine", "")
+        session = payload.get("session")
+        try:
+            return _resolve_adapter(session, engine).delete_graph(payload["graph"])
+        except Exception as e:
+            return _err(engine, e)
+
     @app.post("/extract")
     async def extract_endpoint(file: UploadFile = File(None), text: str = Form(None),
                                 graph: str = Form(...), hint: str = Form(None),

@@ -31,3 +31,11 @@ class GraphEngineAdapter(ABC):
         implement it, but future adapters aren't forced to.
         """
         raise NotImplementedError
+
+    def delete_graph(self, graph: str) -> dict:
+        """Delete/drop the named graph. Returns {'deleted': <graph>}.
+
+        Not `@abstractmethod`: FakeAdapter/FalkorDBAdapter/KineticaAdapter all
+        implement it, but future adapters aren't forced to.
+        """
+        raise NotImplementedError

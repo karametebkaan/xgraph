@@ -32,3 +32,5 @@ class FakeAdapter(GraphEngineAdapter):
         return {"nodes": len(nodes), "edges": len(edges),
                 "nodes_created": len(nodes), "edges_created": len(edges),
                 "labels": {"node_labels": node_labels, "edge_labels": edge_labels}}
+    def delete_graph(self, graph):
+        return {"deleted": graph}

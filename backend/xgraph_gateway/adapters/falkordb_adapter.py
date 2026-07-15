@@ -3,6 +3,7 @@ from falkordb import FalkorDB
 from falkordb import Node as FalkorNode
 from falkordb import Edge as FalkorEdge
 from falkordb import Path as FalkorPath
+from redis.exceptions import ConnectionError as RedisConnectionError, TimeoutError as RedisTimeoutError
 from xgraph_gateway import config
 from .base import GraphEngineAdapter
 from graph_loader.cli import run_build
@@ -366,3 +367,16 @@ class FalkorDBAdapter(GraphEngineAdapter):
         return {"nodes": len(valid_nodes), "edges": len(valid_edges),
                 "nodes_created": created_nodes, "edges_created": created_edges,
                 "labels": {"node_labels": node_labels, "edge_labels": edge_labels}}
+
+    def delete_graph(self, graph):
+        # Best-effort on a missing graph (delete is idempotent from the
+        # caller's point of view) -- but a real connection/timeout error
+        # against FalkorDB itself still propagates so it surfaces as a 502/504,
+        # not a false "deleted" success.
+        try:
+            self._graph(graph).delete()
+        except (RedisConnectionError, RedisTimeoutError):
+            raise
+        except Exception:
+            pass
+        return {"deleted": graph}

@@ -536,3 +536,22 @@ class KineticaAdapter(GraphEngineAdapter):
         return {"nodes": len(n_rows), "edges": len(e_rows),
                 "nodes_created": nodes_created, "edges_created": edges_created,
                 "labels": {"node_labels": node_labels, "edge_labels": edge_labels}}
+
+    def delete_graph(self, graph):
+        # Best-effort, never raises: dropping a graph that doesn't exist (or a
+        # backing table an EXTRACT never created) is still a successful delete
+        # from the caller's point of view.
+        try:
+            self._db.delete_graph(graph_name=graph)
+        except Exception:
+            try:
+                graph_ident = ".".join(safe_ident(p) for p in str(graph).split("."))
+                self._src.rows(f'DROP GRAPH "{graph_ident}"')
+            except Exception:
+                pass
+        for table in (node_table_name(graph), edge_table_name(graph)):
+            try:
+                self._db.clear_table(table_name=table, options={})
+            except Exception:
+                pass
+        return {"deleted": graph}
