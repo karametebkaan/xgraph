@@ -206,3 +206,30 @@ def test_ask_endpoint_rejects_write_query(monkeypatch):
     r = c.post("/ask", json={"engine": "fake", "graph": "demo_graph", "question": "delete everything"})
     assert r.status_code == 400
     assert "error" in r.json()
+
+
+def _capture_prompt(engine):
+    """Run generate_cypher with a fake llm and return the prompt it built."""
+    captured = {}
+    def fake(prompt, *, schema=None):
+        captured["p"] = prompt
+        return {"cypher": "MATCH (n) RETURN n LIMIT 1"}
+    schema = {"labels": ["Person"], "rel_types": ["WORKS_AT"],
+              "properties": {"Person": ["NODE", "name"]}}
+    nlcypher.generate_cypher(schema, engine, "who is not working at Kinetica?",
+                             graph="g", llm=fake)
+    return captured["p"]
+
+
+def test_falkordb_prompt_has_negation_pattern_guidance():
+    p = _capture_prompt("falkordb")
+    assert "WHERE NOT (p)-[:WORKS_AT]" in p       # supported form
+    assert "EXISTS { MATCH" in p                  # named as unsupported
+
+
+def test_kinetica_prompt_has_scalar_negation_guidance_and_formats():
+    # Also guards the .format(graph=...) brace-escaping: any stray unescaped
+    # brace in the Kinetica dialect would raise here.
+    p = _capture_prompt("kinetica")
+    assert "<> 'Kinetica'" in p                   # supported scalar-negation form
+    assert "EXISTS { ... }" in p                  # named as unsupported (escaped in source)

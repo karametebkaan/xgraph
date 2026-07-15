@@ -74,6 +74,9 @@ Target dialect: openCypher, as implemented by FalkorDB. Rules (MUST follow):
   label/type in the pattern (:bank, -[:performed]->) over filtering on the LABEL property.
 - Reversed edges are kept verbatim: (e)<-[:manages]-(g) stays exactly like that (do not
   flip it into a forward pattern).
+- For NEGATION ("who is NOT related to X"), use a pattern predicate in WHERE, e.g.:
+    MATCH (p:Person) WHERE NOT (p)-[:WORKS_AT]->(:Organization {name:'Kinetica'}) RETURN p.name
+  Do NOT use `EXISTS { MATCH ... }` subquery blocks or `NOT EXISTS((...))` — FalkorDB rejects both.
 - GROUP BY is implicit: the non-aggregated columns in RETURN are the grouping keys; never
   write a GROUP BY keyword.
 - To filter or match by a human-readable value (a person/organization/place NAME, a
@@ -94,6 +97,11 @@ Target dialect: Kinetica GQL. Rules (MUST follow):
 - GROUP BY is implicit: the non-aggregated RETURN columns are the grouping keys; never
   write a GROUP BY keyword. Use ROUND(SUM(...), 0) etc. for aggregates as needed.
 - Wrap column-number ORDER BY as an alias instead (ORDER BY <alias> DESC), not ORDER BY 3.
+- Kinetica GQL does NOT support `EXISTS {{ ... }}` subquery blocks or negated path patterns
+  (`WHERE NOT (a)-[...]->(...)`). For a "NOT related to X" question, match the relationship and
+  negate a SCALAR predicate instead, e.g.:
+    GRAPH "{graph}" MATCH (p:Person)-[:WORKS_AT]->(o:Organization) WHERE o.entity_name <> 'Kinetica' RETURN p.entity_name
+  (this returns nodes linked to a DIFFERENT value; it cannot express "linked to nothing").
 - To filter or match by a human-readable value (a person/organization/place NAME, a
   title), use the appropriate property from the per-label property list (commonly
   `name`); use the `NODE` identity property in a filter ONLY when the question provides
