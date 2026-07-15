@@ -5,7 +5,7 @@ from gpudb import GPUdb
 from xgraph_gateway import config
 from .base import GraphEngineAdapter
 from graph_loader.kinetica_source import KineticaSource
-from graph_loader.mapper import safe_ident
+from graph_loader.mapper import safe_ident, MappingError
 
 def _rows_to_result(rows: list[dict]) -> dict:
     cols = list(rows[0].keys()) if rows else []
@@ -272,16 +272,29 @@ def create_table_sql(table: str, kind: str) -> str:
 # the properties it reports match what's actually queryable in GQL.
 _NAME_PROPERTY = "entity_name"
 
-def create_graph_sql(graph: str, node_table: str, edge_table: str) -> str:
+def create_graph_sql(graph: str, node_table: str, edge_table: str,
+                      node_attr_cols: list[str] | None = None,
+                      edge_attr_cols: list[str] | None = None) -> str:
     """`CREATE OR REPLACE DIRECTED GRAPH` DDL over the node/edge backing
     tables. `graph` is validated (dot-part-wise) via safe_ident before
     interpolation; `node_table`/`edge_table` are expected pre-validated
-    (from node_table_name/edge_table_name)."""
+    (from node_table_name/edge_table_name). `node_attr_cols`/`edge_attr_cols`
+    are the extra evolved attribute columns (see `discover_attr_columns`) to
+    add to the respective NODES/EDGES select -- each is re-validated via
+    safe_ident here too (defense in depth: this builder never trusts a
+    caller-supplied column list blindly), and only appended if present, so
+    the base 3-/4-column shape (and the `name AS entity_name` alias -- see
+    `_NAME_PROPERTY`) is unchanged when there are no attrs yet.
+    """
     graph_ident = ".".join(safe_ident(p) for p in str(graph).split("."))
+    node_cols = [safe_ident(c) for c in (node_attr_cols or [])]
+    edge_cols = [safe_ident(c) for c in (edge_attr_cols or [])]
+    node_select = ", ".join(["NODE", "LABEL", f"name AS {_NAME_PROPERTY}"] + node_cols)
+    edge_select = ", ".join(["NODE1", "NODE2", "LABEL"] + edge_cols)
     return (
         f"CREATE OR REPLACE DIRECTED GRAPH {graph_ident} (\n"
-        f"    NODES => INPUT_TABLES((SELECT NODE, LABEL, name AS {_NAME_PROPERTY} FROM {node_table})),\n"
-        f"    EDGES => INPUT_TABLES((SELECT NODE1, NODE2, LABEL FROM {edge_table})),\n"
+        f"    NODES => INPUT_TABLES((SELECT {node_select} FROM {node_table})),\n"
+        f"    EDGES => INPUT_TABLES((SELECT {edge_select} FROM {edge_table})),\n"
         "    OPTIONS => KV_PAIRS(save_persist = 'true')\n"
         ")"
     )
@@ -300,6 +313,128 @@ def edge_rows(edges: list[dict]) -> list[dict]:
     return [{"edge_key": e["id"], "NODE1": e["src"], "NODE2": e["dst"], "LABEL": e.get("label")}
             for e in edges
             if e.get("id") is not None and e.get("src") is not None and e.get("dst") is not None]
+
+# ---------------------------------------------------------------------------
+# Attribute-column evolution -- extracted `attrs` become real, typed columns
+# on the node/edge backing tables (kgr-style ALTER TABLE ADD COLUMN), so
+# they're queryable in GQL rather than only visible via hydration. All
+# builders here are PURE; the live ALTER/read-columns work happens in
+# KineticaAdapter (below), which calls these.
+# ---------------------------------------------------------------------------
+
+_NODE_BASE_COLS = {"NODE", "LABEL", "name", _NAME_PROPERTY}
+_EDGE_BASE_COLS = {"edge_key", "NODE1", "NODE2", "LABEL"}
+
+def _infer_col_type(value) -> str:
+    """First-non-null-value type inference for an evolved attr column.
+    `bool` is checked before `int` -- `bool` is an `int` subclass in Python,
+    so `isinstance(True, int)` is also True."""
+    if isinstance(value, bool):
+        return "BOOLEAN"
+    if isinstance(value, int):
+        return "BIGINT"
+    if isinstance(value, float):
+        return "DOUBLE"
+    return "VARCHAR(1024)"
+
+def discover_attr_columns(elements: list[dict], base_cols: set[str]) -> dict[str, str]:
+    """Union the `attrs` keys across `elements` ([{...,"attrs":{...}}, ...] --
+    nodes and edges are discovered separately, in separate calls) into
+    {col_name: sql_type}, insertion-ordered by first appearance.
+
+    - A key colliding with `base_cols` (already a real column: NODE/LABEL/
+      name/entity_name for nodes, edge_key/NODE1/NODE2/LABEL for edges) is
+      skipped -- it's not a new attribute.
+    - A key that isn't a safe SQL identifier (`safe_ident`) is skipped too --
+      `attrs` are untrusted extraction data, so a stray key name (spaces,
+      punctuation) must never crash ingest; it's silently dropped rather than
+      raised, mirroring how `mapper`/`node_rows`/`edge_rows` drop bad rows
+      instead of raising.
+    - The type is inferred (`_infer_col_type`) from the first NON-NULL value
+      seen for that key across every element; a key seen only with None
+      values so far defaults to VARCHAR(1024) until/unless a later ingest
+      call sees a real value (kgr rule: a column's type, once declared by
+      ALTER TABLE, never changes -- so once the live column exists this
+      discovery step doesn't matter for it, see `KineticaAdapter._evolve_columns`).
+    """
+    cols: dict[str, str | None] = {}
+    for el in elements:
+        attrs = el.get("attrs") or {}
+        for key, value in attrs.items():
+            if key in base_cols:
+                continue
+            try:
+                safe_ident(key)
+            except MappingError:
+                continue
+            if key not in cols:
+                cols[key] = _infer_col_type(value) if value is not None else None
+            elif cols[key] is None and value is not None:
+                cols[key] = _infer_col_type(value)
+    return {k: (v if v is not None else "VARCHAR(1024)") for k, v in cols.items()}
+
+def add_column_sql(table: str, column: str, col_type: str) -> str:
+    """`ALTER TABLE <table> ADD COLUMN <column> <col_type>` for evolving a new
+    attr column onto a backing table. `column` is validated via safe_ident
+    before interpolation (defense in depth -- `discover_attr_columns` already
+    filters bad keys, but this builder doesn't trust that blindly either).
+    `table` is expected pre-validated (from node_table_name/edge_table_name);
+    `col_type` is one of `_infer_col_type`'s fixed set, never user data."""
+    safe_ident(column)
+    return f"ALTER TABLE {table} ADD COLUMN {column} {col_type}"
+
+def _coerce_attr_value(value, col_type: str):
+    """Best-effort coercion of an extracted attr value to its evolved
+    column's declared SQL type (int()/float()/bool()/str()) -- an
+    unconvertible value becomes None (null) rather than raising, since a
+    column's type never changes once declared (kgr rule) and a single bad
+    value must not fail the whole upsert."""
+    if value is None:
+        return None
+    try:
+        if col_type == "BOOLEAN":
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, str):
+                return value.strip().lower() in ("true", "t", "1", "yes")
+            return bool(value)
+        if col_type == "BIGINT":
+            return int(value)
+        if col_type == "DOUBLE":
+            return float(value)
+        return str(value)
+    except (TypeError, ValueError):
+        return None
+
+def _node_rows_with_attrs(nodes: list[dict], attr_cols: dict[str, str]) -> list[dict]:
+    """Like `node_rows`, but each row also carries one field per evolved attr
+    column (`attr_cols`: {col_name: sql_type}), coerced via
+    `_coerce_attr_value`. Kept separate from `node_rows` (rather than changing
+    it) so the base row shape stays exactly what the existing tests assert;
+    this is the payload `KineticaAdapter.ingest_elements` actually upserts."""
+    rows = []
+    for n in nodes:
+        if n.get("id") is None:
+            continue
+        row = {"NODE": n["id"], "LABEL": n.get("label"), "name": n.get("name")}
+        attrs = n.get("attrs") or {}
+        for col, col_type in attr_cols.items():
+            row[col] = _coerce_attr_value(attrs.get(col), col_type)
+        rows.append(row)
+    return rows
+
+def _edge_rows_with_attrs(edges: list[dict], attr_cols: dict[str, str]) -> list[dict]:
+    """Edge counterpart of `_node_rows_with_attrs` -- see its docstring."""
+    rows = []
+    for e in edges:
+        if e.get("id") is None or e.get("src") is None or e.get("dst") is None:
+            continue
+        row = {"edge_key": e["id"], "NODE1": e["src"], "NODE2": e["dst"], "LABEL": e.get("label")}
+        attrs = e.get("attrs") or {}
+        for col, col_type in attr_cols.items():
+            row[col] = _coerce_attr_value(attrs.get(col), col_type)
+        rows.append(row)
+    return rows
 
 class KineticaAdapter(GraphEngineAdapter):
     def __init__(self, settings=None, conn=None):
@@ -394,15 +529,7 @@ class KineticaAdapter(GraphEngineAdapter):
         """
         try:
             table = node_table_name(graph)
-            resp = self._db.show_table(
-                table_name=table,
-                options={"get_column_info": "true", "no_error_if_not_exists": "true"})
-            if not resp.get("table_names"):
-                return {}
-            schemas = resp.get("type_schemas") or []
-            if not schemas:
-                return {}
-            cols = [f["name"] for f in json.loads(schemas[0]).get("fields", [])]
+            cols = self._current_columns(table)
             if not cols:
                 return {}
             cols = [_NAME_PROPERTY if c == "name" else c for c in cols]
@@ -505,6 +632,44 @@ class KineticaAdapter(GraphEngineAdapter):
         except (TypeError, ValueError, KeyError):
             return len(rows)
 
+    def _current_columns(self, table: str) -> list[str]:
+        """Current column names of `table` via `show_table`'s column-info
+        response (same shape `_extract_node_properties` reads). Returns []
+        if the table doesn't exist yet or the response is unreadable for any
+        reason -- never raises (callers treat that as "no columns yet")."""
+        try:
+            resp = self._db.show_table(
+                table_name=table,
+                options={"get_column_info": "true", "no_error_if_not_exists": "true"})
+            if not resp.get("table_names"):
+                return []
+            schemas = resp.get("type_schemas") or []
+            if not schemas:
+                return []
+            return [f["name"] for f in json.loads(schemas[0]).get("fields", [])]
+        except Exception:
+            return []
+
+    def _evolve_columns(self, table: str, attr_cols: dict[str, str]) -> None:
+        """ALTER TABLE ADD COLUMN for each key in `attr_cols` not already
+        present on `table`. Column types never change once declared (kgr
+        rule) -- a key already present is left untouched even if this call's
+        inferred type would differ."""
+        if not attr_cols:
+            return
+        existing = set(self._current_columns(table))
+        for col, col_type in attr_cols.items():
+            if col not in existing:
+                self._execute_ddl(add_column_sql(table, col, col_type))
+
+    def _all_attr_columns(self, table: str, base_cols: set[str]) -> list[str]:
+        """Every non-base column currently on `table` -- used to rebuild
+        CREATE GRAPH's select list from the table's actual, accumulated
+        state (not just this call's discovered attrs), so a prior ingest's
+        attr columns (e.g. `population` added last run) stay queryable even
+        on a run that only adds a different new attr (e.g. `country`)."""
+        return [c for c in self._current_columns(table) if c not in base_cols]
+
     def ingest_elements(self, graph, nodes, edges):
         n_rows = node_rows(nodes)
         e_rows = edge_rows(edges)
@@ -519,13 +684,40 @@ class KineticaAdapter(GraphEngineAdapter):
         schema_ddl = create_schema_sql(graph)
         if schema_ddl:
             self._execute_ddl(schema_ddl)
-        self._execute_ddl(create_table_sql(node_table, "node"))
-        self._execute_ddl(create_table_sql(edge_table, "edge"))
+        # `CREATE TABLE IF NOT EXISTS` is NOT a no-op once a prior ingest has
+        # evolved extra columns onto the table: Kinetica errors ("already
+        # exists with type id X not type id Y") if the existing table's type
+        # doesn't match the statement's declared columns, even under
+        # IF NOT EXISTS. So only run it when the table doesn't exist yet --
+        # `_current_columns` returns [] for both "table missing" and "read
+        # failed", either of which means "safe to (re-)issue CREATE TABLE".
+        if not self._current_columns(node_table):
+            self._execute_ddl(create_table_sql(node_table, "node"))
+        if not self._current_columns(edge_table):
+            self._execute_ddl(create_table_sql(edge_table, "edge"))
 
-        nodes_created = self._insert_and_count(node_table, n_rows) if n_rows else 0
-        edges_created = self._insert_and_count(edge_table, e_rows) if e_rows else 0
+        # Evolve: discover this call's new attr columns and ALTER them in
+        # before upserting so the payload's extra fields have somewhere to
+        # land.
+        node_attr_cols = discover_attr_columns(nodes, _NODE_BASE_COLS)
+        edge_attr_cols = discover_attr_columns(edges, _EDGE_BASE_COLS)
+        self._evolve_columns(node_table, node_attr_cols)
+        self._evolve_columns(edge_table, edge_attr_cols)
 
-        self._execute_ddl(create_graph_sql(graph, node_table, edge_table))
+        n_payload = _node_rows_with_attrs(nodes, node_attr_cols)
+        e_payload = _edge_rows_with_attrs(edges, edge_attr_cols)
+
+        nodes_created = self._insert_and_count(node_table, n_payload) if n_payload else 0
+        edges_created = self._insert_and_count(edge_table, e_payload) if e_payload else 0
+
+        # Rebuild CREATE GRAPH from the table's actual current columns (not
+        # just this call's discovered attrs) so previously-evolved columns
+        # from an earlier ingest stay in the graph even if this call's rows
+        # don't mention them.
+        all_node_attr_cols = self._all_attr_columns(node_table, _NODE_BASE_COLS)
+        all_edge_attr_cols = self._all_attr_columns(edge_table, _EDGE_BASE_COLS)
+        self._execute_ddl(create_graph_sql(
+            graph, node_table, edge_table, all_node_attr_cols, all_edge_attr_cols))
 
         node_labels = sorted({r["LABEL"] for r in n_rows if r.get("LABEL")})
         edge_labels = sorted({r["LABEL"] for r in e_rows if r.get("LABEL")})
