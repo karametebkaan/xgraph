@@ -7658,11 +7658,12 @@ function App() {
     // Create panel state, pre-seeded (editable) with the banking demo mapping
     // so the FalkorDB/DuckDB-over-Parquet route works immediately against the
     // demo Parquet files.
+    // Create is the "build a graph from Parquet tables" tool, pre-seeded with the
+    // banking demo mapping — so its default name matches that mapping's content.
+    // It is intentionally NOT tied to the active graph: an extraction-built graph
+    // (or any graph not built from THIS mapping) has no relation to this form, so
+    // stamping the active graph's name onto the banking mapping would mislead.
     const [createGraphName, setCreateGraphName]     = useState('banking_graph_duckdb');
-    // Keep the Create panel's default graph name in sync with whichever graph
-    // is currently active, so re-opening Create after selecting a graph
-    // doesn't show the stale 'banking_graph_duckdb' seed value.
-    useEffect(function(){ if (activeGraph) setCreateGraphName(activeGraph); }, [activeGraph]);
     const [createNodeTable, setCreateNodeTable]     = useState('expero.vertexes');
     const [createNodeFile, setCreateNodeFile]       = useState('vertexes.parquet');
     const [createNodeSql, setCreateNodeSql]         = useState(
