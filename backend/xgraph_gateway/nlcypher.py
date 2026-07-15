@@ -66,9 +66,16 @@ Target dialect: openCypher, as implemented by FalkorDB. Rules (MUST follow):
   syntax). Instead, write the whole MATCH first, then a single WHERE clause after it,
   AND-joining every hop's predicates, e.g.:
     MATCH p=(a:bank)-[:performed]->(b:wire_message) WHERE a.NODE = 'b1' AND b.risk > 20 RETURN a, b, p
-- To make the result visualizable, bind the traversal to a path variable with
-  `MATCH p=(...)-...-(...)` and include `p` in the RETURN list, in addition to any
-  scalar columns the question asks for.
+- ALWAYS include, as SCALAR columns in RETURN, the human-readable identity of every entity the
+  question is about — its name property AND its label — e.g. `RETURN b.name AS name, b.LABEL AS type`.
+  NEVER return a bare node/relationship/path object (`RETURN b`, `RETURN p`) as the ONLY output: the
+  English answer is built from the scalar columns and cannot read raw graph objects.
+- To make the result visualizable, ALSO bind the traversal to a path variable
+  (`MATCH p=(...)-...-(...)`) and include `p` in the RETURN list — IN ADDITION TO the scalar
+  name/type columns above, never instead of them.
+- For "who/what is related to / connected to / neighbours of X" questions that do NOT name a
+  specific relationship, use an UNTYPED relationship `(a)-[r]-(b)` (both directions) so ALL
+  relationship types are captured — do not pick a single named type.
 - Node/edge identity properties are `NODE` and `ID` respectively; a node/edge's Cypher
   label/relationship type also exists as a `LABEL` property, but prefer matching via the
   label/type in the pattern (:bank, -[:performed]->) over filtering on the LABEL property.
@@ -93,6 +100,12 @@ Target dialect: Kinetica GQL. Rules (MUST follow):
 - Start the query with: GRAPH "{graph}" MATCH ... RETURN ...  (the graph name IS quoted).
 - Predicates may be written inline in the node pattern, e.g. (a:bank WHERE a.NODE = '...'),
   or as a trailing WHERE after the MATCH — either is fine.
+- ALWAYS RETURN the human-readable identity of every entity the question is about as SCALAR columns —
+  its name property AND its label, e.g. `RETURN b.entity_name AS name, b.LABEL AS type`. Do NOT return
+  a bare node object; the English answer is built from the scalar columns.
+- For "who/what is related to / connected to / neighbours of X" questions that do NOT name a specific
+  relationship, use an UNTYPED relationship `(a)-[r]-(b)` (both directions) so ALL relationship types
+  are captured — do not pick a single named type.
 - Reversed edges are kept verbatim: (e)<-[:manages]-(g) stays exactly like that.
 - GROUP BY is implicit: the non-aggregated RETURN columns are the grouping keys; never
   write a GROUP BY keyword. Use ROUND(SUM(...), 0) etc. for aggregates as needed.

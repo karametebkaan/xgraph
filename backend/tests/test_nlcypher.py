@@ -233,3 +233,15 @@ def test_kinetica_prompt_has_scalar_negation_guidance_and_formats():
     p = _capture_prompt("kinetica")
     assert "<> 'Kinetica'" in p                   # supported scalar-negation form
     assert "EXISTS { ... }" in p                  # named as unsupported (escaped in source)
+
+
+def test_prompts_require_scalar_identity_return_and_untyped_related():
+    fp = _capture_prompt("falkordb")
+    kp = _capture_prompt("kinetica")
+    # scalar name/type return (not bare node objects)
+    assert "b.name AS name, b.LABEL AS type" in fp
+    assert "b.entity_name AS name, b.LABEL AS type" in kp
+    assert "NEVER return a bare node" in fp
+    # untyped relationship for "related to" questions
+    assert "(a)-[r]-(b)" in fp
+    assert "(a)-[r]-(b)" in kp
