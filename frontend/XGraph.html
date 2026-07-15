@@ -6534,6 +6534,7 @@ const ACTIONS = [
     { key: 'setup',     label: 'Setup',     reachable: function(s) { return true; } },
     { key: 'connect',   label: 'Connect',   reachable: function(s) { return true; } },
     { key: 'create',    label: 'Create',    reachable: function(s) { return !!(s.connected || (s.graphs && s.graphs.length > 0)); } },
+    { key: 'extract',   label: 'Extract',   reachable: function(s) { return !!(s.connected || (s.graphs && s.graphs.length > 0)); } },
     { key: 'list',      label: 'List',      reachable: function(s) { return !!(s.graphs && s.graphs.length > 0); } },
     { key: 'interact1', label: 'Ask',  reachable: function(s) { return !!s.activeGraph; } },
     { key: 'query',     label: 'Query',     reachable: function(s) { return !!s.activeGraph; } },
@@ -6872,6 +6873,115 @@ function CreatePanel(props) {
             }}>{status.loading ? 'Creating…' : 'Create / Replace graph'}</button>
             {status.loading && <p style={{ marginTop:10, fontSize:12, color:'#636e72' }}>Creating… (this can take ~30s for a large graph)</p>}
             {!status.loading && status.text && <p style={{ marginTop:10, fontSize:12, color: status.error ? '#d63031' : '#00b894', fontWeight:600 }}>{status.text}</p>}
+        </div>
+    );
+}
+
+/* ═══════════════════ ExtractPanel ═════════════════════════
+   PDF/text → LLM entity+relationship extraction → MERGE into a named graph
+   (gwClient.extract → POST /extract, multipart). File input wins over the
+   paste textarea when both are present. On success, offers one-click
+   handoff into Visualize/Ontology on the freshly-built graph (mirrors
+   ListPanel's onSelectGraph handoff: setActiveGraph + refresh the graph
+   list + setActiveAction). */
+function ExtractPanel(props) {
+    var gwClient = props.gwClient, setGraphs = props.setGraphs;
+    var setActiveGraph = props.setActiveGraph, setActiveAction = props.setActiveAction;
+
+    const [file, setFile] = useState(null);
+    const [pasteText, setPasteText] = useState('');
+    const [graphName, setGraphName] = useState('extracted_graph');
+    const [hint, setHint] = useState('');
+    const [busy, setBusy] = useState(false);
+    const [error, setError] = useState(null);
+    const [result, setResult] = useState(null); // {graph, entities, relations, labels, truncated}
+
+    var inp = { width:'100%', padding:'9px 11px', border:'1px solid #dfe6e9', borderRadius:6, boxSizing:'border-box', fontSize:13, marginBottom:10, background:'#fff', outline:'none', fontFamily:'inherit' };
+    var textBox = Object.assign({}, inp, { fontFamily:'inherit', fontSize:13, minHeight:120, resize:'vertical' });
+    var chip = { display:'inline-flex', alignItems:'center', padding:'3px 10px', borderRadius:12, fontSize:11, fontWeight:700, background:'#eef2f7', color:'#2d3436', marginRight:6, marginBottom:6 };
+
+    var handleExtract = async function() {
+        if (!gwClient || !graphName || busy) return;
+        var payload = file || pasteText;
+        if (!payload) return;
+        setBusy(true); setError(null); setResult(null);
+        try {
+            var res = await gwClient.extract(graphName, payload, hint);
+            if (res && res.status === 'error') throw new Error(res.message || 'extract failed');
+            setResult(res);
+        } catch (err) {
+            setError((err && err.message) || String(err));
+        } finally {
+            setBusy(false);
+        }
+    };
+
+    var jumpTo = async function(action) {
+        if (!result || !result.graph) return;
+        setActiveGraph(result.graph);
+        try { setGraphs(await gwClient.listGraphs()); } catch (e) { /* best effort */ }
+        setActiveAction(action);
+    };
+
+    return (
+        <div style={{ width:680, maxWidth:'100%', textAlign:'left', background:'#fff', border:'1px solid #dfe6e9', borderRadius:10, padding:24, boxShadow:'0 2px 8px rgba(0,0,0,0.04)' }}>
+            <h2 style={{ fontWeight:700, fontSize:18, margin:'0 0 4px', color:'#2d3436' }}>Extract</h2>
+            <p style={{ fontSize:12, color:'#b2bec3', margin:'0 0 16px' }}>PDF/text → LLM entity+relationship extraction → MERGE into a graph.</p>
+
+            <Label>File (.pdf, .txt, .md)</Label>
+            <input type="file" accept=".pdf,.txt,.md,.markdown" onChange={function(e){ setFile((e.target.files && e.target.files[0]) || null); }} style={{ marginBottom:10, fontSize:13 }} />
+
+            <Label>Or paste text</Label>
+            <textarea style={textBox} value={pasteText} onChange={function(e){ setPasteText(e.target.value); }} placeholder="Paste document text here (used only if no file is chosen)…" spellCheck="false" disabled={!!file} />
+            {!!file && <p style={{ fontSize:11, color:'#b2bec3', margin:'-6px 0 10px' }}>File selected ({file.name}) — it takes priority over pasted text.</p>}
+
+            <Label>Target graph name</Label>
+            <input style={inp} value={graphName} onChange={function(e){ setGraphName(e.target.value); }} placeholder="extracted_graph" />
+
+            <Label>Focus / hint (optional)</Label>
+            <input style={inp} value={hint} onChange={function(e){ setHint(e.target.value); }} placeholder="e.g. focus on organizations and people" />
+
+            <button onClick={handleExtract} disabled={busy || !graphName || !(file || pasteText.trim())} style={{
+                marginTop:6, padding:'11px 22px', border:'none', borderRadius:6,
+                cursor: (busy || !graphName || !(file || pasteText.trim())) ? 'not-allowed' : 'pointer',
+                fontWeight:700, color:'#fff', fontSize:13, fontFamily:'inherit',
+                background: (busy || !graphName || !(file || pasteText.trim())) ? '#74b9ff' : 'linear-gradient(135deg,#0984e3,#0872c4)', transition:'0.2s',
+            }}>{busy ? 'Extracting…' : 'Extract & Build'}</button>
+            {busy && <p style={{ marginTop:10, fontSize:12, color:'#636e72' }}>Extracting… this can take a while (LLM pass per chunk).</p>}
+            {!busy && error && <p style={{ marginTop:10, fontSize:12, color:'#d63031', fontWeight:600 }}>{error}</p>}
+
+            {!busy && result && (
+                <div style={{ marginTop:16, background:'#eef7ff', border:'1px solid #cbe4fb', borderRadius:8, padding:14 }}>
+                    <div style={{ fontSize:13, fontWeight:700, color:'#2d3436', marginBottom:8 }}>
+                        Built <b>{result.graph}</b> — {result.entities || 0} entities, {result.relations || 0} relationships
+                    </div>
+                    {!!(result.labels && result.labels.node_labels && result.labels.node_labels.length) && (
+                        <div style={{ marginBottom:6 }}>
+                            <span style={{ fontSize:10, fontWeight:700, color:'#636e72', textTransform:'uppercase', marginRight:6 }}>Node labels:</span>
+                            {result.labels.node_labels.map(function(l, i) { return <span key={'nl_' + i} style={chip}>{l}</span>; })}
+                        </div>
+                    )}
+                    {!!(result.labels && result.labels.edge_labels && result.labels.edge_labels.length) && (
+                        <div style={{ marginBottom:6 }}>
+                            <span style={{ fontSize:10, fontWeight:700, color:'#636e72', textTransform:'uppercase', marginRight:6 }}>Edge labels:</span>
+                            {result.labels.edge_labels.map(function(l, i) { return <span key={'el_' + i} style={Object.assign({}, chip, { background:'#dff9f2', color:'#00895c' })}>{l}</span>; })}
+                        </div>
+                    )}
+                    {result.truncated && (
+                        <p style={{ fontSize:12, color:'#e17055', fontWeight:600, margin:'6px 0' }}>{'⚠'} truncated — only the first chunks were processed.</p>
+                    )}
+                    <div style={{ display:'flex', gap:8, marginTop:10 }}>
+                        <button onClick={function(){ jumpTo('visualize'); }} style={{
+                            padding:'8px 16px', border:'none', borderRadius:6, cursor:'pointer',
+                            fontWeight:700, color:'#fff', fontSize:12, fontFamily:'inherit', background:'#0984e3',
+                        }}>Visualize</button>
+                        <button onClick={function(){ jumpTo('ontology'); }} style={{
+                            padding:'8px 16px', border:'none', borderRadius:6, cursor:'pointer',
+                            fontWeight:700, color:'#fff', fontSize:12, fontFamily:'inherit', background:'#6c5ce7',
+                        }}>Ontology</button>
+                    </div>
+                </div>
+            )}
         </div>
     );
 }
@@ -8851,6 +8961,12 @@ function App() {
                         createEdgeTgtCol={createEdgeTgtCol} setCreateEdgeTgtCol={setCreateEdgeTgtCol}
                         createEdgeTypeCol={createEdgeTypeCol} setCreateEdgeTypeCol={setCreateEdgeTypeCol}
                         createDdl={createDdl} setCreateDdl={setCreateDdl}
+                    />
+                )}
+                {activeAction === 'extract' && (
+                    <ExtractPanel
+                        gwClient={gwClient} setGraphs={setGraphs}
+                        setActiveGraph={setActiveGraph} setActiveAction={setActiveAction}
                     />
                 )}
                 {activeAction === 'list' && (
