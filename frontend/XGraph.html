@@ -6884,9 +6884,14 @@ function CreatePanel(props) {
    handoff into Visualize/Ontology on the freshly-built graph (mirrors
    ListPanel's onSelectGraph handoff: setActiveGraph + refresh the graph
    list + setActiveAction). */
+// Stable string hash (djb2 variant) — used to key pasted-text extract
+// sources so re-pasting identical text is recognized as a no-op.
+function _extractKey(s){ var h=5381, i=s.length; while(i){ h=(h*33)^s.charCodeAt(--i); } return 'h'+(h>>>0).toString(16); }
+
 function ExtractPanel(props) {
     var gwClient = props.gwClient, setGraphs = props.setGraphs;
     var setActiveGraph = props.setActiveGraph, setActiveAction = props.setActiveAction;
+    var extractSources = props.extractSources || []; var setExtractSources = props.setExtractSources;
 
     const [file, setFile] = useState(null);
     const [pasteText, setPasteText] = useState('');
@@ -6894,7 +6899,8 @@ function ExtractPanel(props) {
     const [hint, setHint] = useState('');
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState(null);
-    const [result, setResult] = useState(null); // {graph, entities, relations, labels, truncated}
+    const [noop, setNoop] = useState(null);
+    const [result, setResult] = useState(null); // {graph, entities, relations, entities_new, relations_new, labels, truncated}
 
     var inp = { width:'100%', padding:'9px 11px', border:'1px solid #dfe6e9', borderRadius:6, boxSizing:'border-box', fontSize:13, marginBottom:10, background:'#fff', outline:'none', fontFamily:'inherit' };
     var textBox = Object.assign({}, inp, { fontFamily:'inherit', fontSize:13, minHeight:120, resize:'vertical' });
@@ -6904,11 +6910,33 @@ function ExtractPanel(props) {
         if (!gwClient || !graphName || busy) return;
         var payload = file || pasteText;
         if (!payload) return;
+        setNoop(null);
+
+        // Identify this source so an identical re-push (same graph, same
+        // file/text) is a no-op — skip the network/LLM call entirely.
+        var isFile = !!file;
+        var srcKey = isFile ? ('f|'+file.name+'|'+file.size+'|'+file.lastModified) : _extractKey(pasteText || '');
+        var srcLabel = isFile ? file.name : ((pasteText||'').slice(0,80) + ((pasteText||'').length>80?'…':''));
+        var already = extractSources.some(function(s){ return s.graph === graphName && s.key === srcKey; });
+        if (already) {
+            setError(null);
+            setNoop('This source was already added to ' + graphName + ' — skipped (no new extraction).');
+            return;
+        }
+
         setBusy(true); setError(null); setResult(null);
         try {
             var res = await gwClient.extract(graphName, payload, hint);
             if (res && res.status === 'error') throw new Error(res.message || 'extract failed');
             setResult(res);
+            if (setExtractSources) {
+                setExtractSources(function(prev){
+                    return prev.concat([{
+                        graph: graphName, kind: isFile ? 'file' : 'text', label: srcLabel, key: srcKey,
+                        entities: res.entities, relations: res.relations, ts: new Date().toISOString(),
+                    }]);
+                });
+            }
         } catch (err) {
             setError((err && err.message) || String(err));
         } finally {
@@ -6922,6 +6950,9 @@ function ExtractPanel(props) {
         try { setGraphs(await gwClient.listGraphs()); } catch (e) { /* best effort */ }
         setActiveAction(action);
     };
+
+    // Sources already pushed to the CURRENT target graph name.
+    var currentGraphSources = extractSources.filter(function(s){ return s.graph === graphName; });
 
     return (
         <div style={{ width:680, maxWidth:'100%', textAlign:'left', background:'#fff', border:'1px solid #dfe6e9', borderRadius:10, padding:24, boxShadow:'0 2px 8px rgba(0,0,0,0.04)' }}>
@@ -6949,11 +6980,12 @@ function ExtractPanel(props) {
             }}>{busy ? 'Extracting…' : 'Extract & Build'}</button>
             {busy && <p style={{ marginTop:10, fontSize:12, color:'#636e72' }}>Extracting… this can take a while (LLM pass per chunk).</p>}
             {!busy && error && <p style={{ marginTop:10, fontSize:12, color:'#d63031', fontWeight:600 }}>{error}</p>}
+            {!busy && !error && noop && <p style={{ marginTop:10, fontSize:12, color:'#636e72', fontWeight:600 }}>{noop}</p>}
 
             {!busy && result && (
                 <div style={{ marginTop:16, background:'#eef7ff', border:'1px solid #cbe4fb', borderRadius:8, padding:14 }}>
                     <div style={{ fontSize:13, fontWeight:700, color:'#2d3436', marginBottom:8 }}>
-                        Built <b>{result.graph}</b> — {result.entities || 0} entities, {result.relations || 0} relationships
+                        Built <b>{result.graph}</b> — {result.entities || 0} entities{result.entities_new != null ? ' (' + result.entities_new + ' new)' : ''}, {result.relations || 0} relationships{result.relations_new != null ? ' (' + result.relations_new + ' new)' : ''}
                     </div>
                     {!!(result.labels && result.labels.node_labels && result.labels.node_labels.length) && (
                         <div style={{ marginBottom:6 }}>
@@ -6982,6 +7014,25 @@ function ExtractPanel(props) {
                     </div>
                 </div>
             )}
+
+            <div style={{ marginTop:16 }}>
+                <span style={{ fontSize:10, fontWeight:700, color:'#636e72', textTransform:'uppercase' }}>Sources added to {graphName || 'this graph'}</span>
+                {currentGraphSources.length === 0 ? (
+                    <p style={{ fontSize:12, color:'#b2bec3', margin:'6px 0 0' }}>No sources added to {graphName || 'this graph'} yet.</p>
+                ) : (
+                    <div style={{ marginTop:6, display:'flex', flexDirection:'column', gap:4 }}>
+                        {currentGraphSources.map(function(s, i) {
+                            return (
+                                <div key={'src_' + i} style={{ fontSize:12, color:'#2d3436', background:'#f7f9fb', border:'1px solid #eef2f7', borderRadius:6, padding:'6px 10px', display:'flex', alignItems:'center', gap:6 }}>
+                                    <span>{s.kind === 'file' ? '📄' : '✎'}</span>
+                                    <span style={{ flex:1, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{s.label}</span>
+                                    <span style={{ fontSize:11, color:'#636e72' }}>{'· '}{s.entities || 0} entities / {s.relations || 0} rels</span>
+                                </div>
+                            );
+                        })}
+                    </div>
+                )}
+            </div>
         </div>
     );
 }
@@ -7468,6 +7519,8 @@ function App() {
     // Per-tab QueryPanel stateRef (exposes live helper for session save) + initialHelper map (seeds Query-Helper widgets on load).
     const queryTabStateRefs = useRef({});
     const [queryTabHelper, setQueryTabHelper] = useState({});
+    // Extract source memory: list of {graph, kind:'text'|'file', label, key, entities, relations, ts}
+    const [extractSources, setExtractSources] = useState([]);
     // `initialSql`, if given, seeds the new tab's query text (used by the
     // Interact① "Run in Query" button to hand off a generated Cypher query);
     // the "+" tab-strip button calls this with no args.
@@ -7623,6 +7676,7 @@ function App() {
                 var st = queryTabStateRefs.current[id] && queryTabStateRefs.current[id].current;
                 return { id: id, sql: queryTabSql[id] || '', helper: (st && st.helper) || null, activeTab: (st && st.activeTab) || null };
             }),
+            extractSources: extractSources,
         };
         var blob = new Blob([JSON.stringify(session, null, 2)], { type: 'application/json' });
         var a = document.createElement('a');
@@ -7651,6 +7705,7 @@ function App() {
                 }
                 setGatewayBase(s.setup.gatewayBase || GATEWAY_BASE);
                 setActiveGraph(s.activeGraph || '');
+                setExtractSources(s.extractSources || []);
 
                 var queries = (s.queries && s.queries.length > 0) ? s.queries : [{ id: 'q1', sql: '' }];
                 var ids = queries.map(function(q) { return q.id; });
@@ -8967,6 +9022,7 @@ function App() {
                     <ExtractPanel
                         gwClient={gwClient} setGraphs={setGraphs}
                         setActiveGraph={setActiveGraph} setActiveAction={setActiveAction}
+                        extractSources={extractSources} setExtractSources={setExtractSources}
                     />
                 )}
                 {activeAction === 'list' && (
