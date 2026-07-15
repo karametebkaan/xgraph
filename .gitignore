@@ -24,3 +24,6 @@ data/*.parquet
 
 # Gateway runtime (pid/log)
 .run/
+
+# SDD scratch
+.superpowers/
