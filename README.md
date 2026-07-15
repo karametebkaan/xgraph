@@ -43,17 +43,24 @@ one API, so the frontend and every query stay engine-agnostic.
 
 The action bar runs left to right:
 
-**Setup · Connect · Create · List · Load · Ask · Query · Explain · Visualize · Ontology**
+**Setup · Connect · Create · Extract · List · Load · Ask · Query · Explain · Visualize · Ontology**
 
 - **Create** — `CREATE OR REPLACE GRAPH`: build a FalkorDB graph from Parquet/CSV via falkor's
-  loader, or run a Kinetica graph DDL.
-- **Ask** — natural-language question → generated query → run → English answer.
+  loader, or run a Kinetica graph DDL. The target-graph name defaults to the active graph.
+- **Extract** — build a graph **from documents**: upload a PDF/text file (or paste text) and the LLM
+  extracts entities + relationships (open-ended ontology) that MERGE into a named graph on either
+  engine. Re-running is idempotent, and the pushed sources are remembered per graph (see below).
+- **List** — the graphs on the connected engine with node/edge counts; click to make one active, or
+  **delete** it (🗑).
+- **Ask** — natural-language question → generated query → run → English answer, kept as a per-graph
+  **conversation history**.
 - **Query** — write GQL/Cypher directly, in stacked tabs (`q1`, `q2`, …).
 - **Explain** — turn a query's results into a plain-English, domain-relevant summary, with an
   optional focus that triggers a **post-join** (below).
 - **Visualize** — progressive-paged graph render, colored by node `LABEL`, with label-selection
   and donut breakdowns.
-- **Ontology** — the live label/relationship schema, which updates as entities change.
+- **Ontology** — the live label/relationship schema, refreshed automatically when the graph changes
+  or a session loads.
 
 A query and its path visualization, colored by node `LABEL`, with the **Hydrate attributes** button
 that pulls wide columns (here `party_name`, `party_risk_score`) onto the returned ids:
@@ -112,6 +119,22 @@ returns a small set of ids, the post-join fetches just those rows' wide columns 
 the results. Any column used in a `MATCH`/`WHERE` must still be a graph property; only pure
 attributes live in the hydrate file.
 
+## Building a graph from documents (Extract)
+
+**Extract** turns unstructured text into a graph. Upload a PDF/text file (or paste text); the LLM
+extracts entities and relationships with an **open-ended ontology** (it discovers labels like
+`Person`, `Organization`, `WORKS_AT`), and they MERGE into the named graph on the session's engine —
+FalkorDB (Cypher `MERGE`) or Kinetica (table upsert + `CREATE GRAPH`). Feeding more documents
+**accumulates** one graph; re-feeding the same text is a no-op (deduped by entity id). The pushed
+sources are remembered **per graph** in the session and saved with it, so you can see what built each
+graph and return to it later.
+
+Because entity ids are canonical slugs (not the display name), the human value lives in a `name`
+property (FalkorDB) / `entity_name` node attribute (Kinetica). The NL→Cypher grounding knows this, so
+**Ask** on an extracted graph filters on the right property — e.g. *"Who works at Kinetica?"* becomes
+`… WHERE org.name = 'Kinetica'`, and *"Who is not working at Kinetica?"* uses each engine's supported
+negation form.
+
 ## Quickstart
 
 ```bash
@@ -155,6 +178,8 @@ The gateway exposes one uniform JSON API; the frontend uses only this.
 | `GET /schema`, `GET /entities`, `GET /record` | ontology + entity browse |
 | `POST /query` | run GQL/Cypher → `{columns, rows, graph}` |
 | `POST /create` | `CREATE OR REPLACE GRAPH` (DuckDB→FalkorDB build, or Kinetica DDL) |
+| `POST /extract` | document (multipart file or text) → LLM entities/relationships → MERGE into a graph |
+| `POST /delete_graph` | drop a graph (both engines; also clears Kinetica extract backing tables) |
 | `POST /ask` | NL question → generate query → run → answer |
 | `POST /nl2cypher`, `POST /synthesize` | the round-trip steps individually |
 | `POST /explain` | results → English, with optional focus-driven post-join |
@@ -163,13 +188,13 @@ The gateway exposes one uniform JSON API; the frontend uses only this.
 ## Testing
 
 ```bash
-# Backend (153 tests; live tests SKIP if FalkorDB/Kinetica are down)
+# Backend (227 tests; live tests SKIP if FalkorDB/Kinetica are down)
 cd backend && ./.venv/bin/python -m pytest tests/ -v
 
-# The featured use case is a regression test:
-#   tests/test_explain_postjoin_banking.py  — post-join ranks parties by path count
-#   over the real vertexes.parquet, and /explain returns the aggregated ranked table.
-#   (SKIPs if the hydrate Parquet is absent.)
+# Regression tests worth knowing:
+#   tests/test_explain_postjoin_banking.py  — post-join ranks parties by path count.
+#   tests/test_extract_ask_live.py           — extract→ask across BOTH engines: "Who works at
+#     Kinetica?" returns the right people (real DB + real LLM; SKIPs if unavailable).
 
 # Frontend (pure-JS client + transforms)
 cd frontend && node tests/test_transforms.mjs && node tests/test_client.mjs
@@ -184,6 +209,7 @@ backend/
     registry.py            engine → adapter resolution
     sessions.py            session store (adapters cached per connection)
     nlcypher.py            NL→query, NL→SQL, read-only guards, synthesize
+    extract.py             document → LLM entity/relationship extraction (PDF/text)
     llm.py                 self-contained _llm backend (claude CLI / SDK)
     config.py              settings + portable data-path resolution
     adapters/              kinetica_adapter, falkordb_adapter, fake, base
@@ -203,8 +229,9 @@ docs/                      design specs, plans, images
 
 ## Status & constraints
 
-- The backend and the action-bar frontend are built and live-verified. The Explain post-join
-  round-trip above works end to end against the banking graph.
+- The backend and the action-bar frontend are built and live-verified — including Explain post-join,
+  document **Extract** into a graph, graph **delete**, and property-grounded **Ask** (name filters,
+  negation, and "related to" traversals) on both engines.
 - **Self-contained:** no runtime dependency on the `falkor` or `graphrag` repos. `graph_loader` is
   vendored and the LLM backend is a local module; the backend has its own venv and
   `requirements.txt`. The one tradeoff is that the vendored `graph_loader` is a fork that can drift
