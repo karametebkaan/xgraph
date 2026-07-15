@@ -9,6 +9,7 @@ from graph_loader.cli import run_build
 from graph_loader.config import EdgeSpec, Mapping, NodeSpec
 from graph_loader.duckdb_source import DuckDBSource
 from graph_loader.falkordb_sink import FalkorDBSink
+from graph_loader.mapper import safe_ident
 
 def _mapping_from_spec(spec: dict) -> Mapping:
     """Pure spec (dict, from the /create request body) -> graph_loader Mapping.
@@ -182,6 +183,65 @@ def _graph_typed_columns(result_set, num_columns: int) -> set:
         return set()
     return graph_cols
 
+# ---------------------------------------------------------------------------
+# ingest_elements -- MERGE Extract-discovered entities/relations into a named
+# graph. build_ingest_cypher is PURE (rows in, Cypher+params out, no I/O) so
+# it's unit-testable without a live FalkorDB connection, mirroring
+# graph_loader.mapper's node_batches/edge_batches shape: same `:Entity(NODE)`
+# + `LABEL` conventions, labels/types validated via safe_ident before they're
+# interpolated (Cypher can't parameterize a label/type), all data (ids,
+# names, attrs) passed as query params.
+# ---------------------------------------------------------------------------
+
+def _valid_nodes(nodes: list[dict]) -> list[dict]:
+    # A null/missing id can't be MERGEd on, so drop it up front (mirrors
+    # graph_loader.mapper.node_batches).
+    return [n for n in nodes if n.get("id") is not None]
+
+def _valid_edges(edges: list[dict]) -> list[dict]:
+    # A null id/src/dst edge could never resolve its endpoints -- discard
+    # rather than emit a no-op MERGE (mirrors graph_loader.mapper.edge_batches).
+    return [e for e in edges
+            if e.get("id") is not None and e.get("src") is not None and e.get("dst") is not None]
+
+def build_ingest_cypher(nodes: list[dict], edges: list[dict]) -> list[tuple[str, dict]]:
+    """Group `nodes` by label and `edges` by label into one UNWIND/MERGE
+    Cypher statement each (label/type via safe_ident); returns
+    [(cypher, params), ...]. All entity data (ids, names, attrs) travels in
+    `params["rows"]`, never interpolated into the Cypher string."""
+    statements: list[tuple[str, dict]] = []
+
+    node_groups: dict[str, list[dict]] = {}
+    for n in _valid_nodes(nodes):
+        label = safe_ident(n.get("label"))
+        node_groups.setdefault(label, []).append(n)
+    for label, rows in node_groups.items():
+        query = (
+            "UNWIND $rows AS r "
+            f"MERGE (n:Entity {{NODE: r.id}}) "
+            f"SET n:{label}, n.LABEL = $label, n.name = r.name, n += r.attrs"
+        )
+        payload = [{"id": r["id"], "name": r.get("name"), "attrs": r.get("attrs") or {}}
+                   for r in rows]
+        statements.append((query, {"rows": payload, "label": label}))
+
+    edge_groups: dict[str, list[dict]] = {}
+    for e in _valid_edges(edges):
+        label = safe_ident(e.get("label"))
+        edge_groups.setdefault(label, []).append(e)
+    for label, rows in edge_groups.items():
+        query = (
+            "UNWIND $rows AS e "
+            "MATCH (a:Entity {NODE: e.src}), (b:Entity {NODE: e.dst}) "
+            f"MERGE (a)-[x:{label} {{ID: e.id}}]->(b) "
+            f"SET x.LABEL = $label, x += e.attrs"
+        )
+        payload = [{"id": r["id"], "src": r["src"], "dst": r["dst"], "attrs": r.get("attrs") or {}}
+                   for r in rows]
+        statements.append((query, {"rows": payload, "label": label}))
+
+    return statements
+
 class FalkorDBAdapter(GraphEngineAdapter):
     def __init__(self, settings=None, conn=None):
         if conn is not None:
@@ -264,3 +324,16 @@ class FalkorDBAdapter(GraphEngineAdapter):
 
     def graph_sizes(self):
         return {name: self._counts(self._graph(name)) for name in self.list_graphs()}
+
+    def ingest_elements(self, graph, nodes, edges):
+        g = self._graph(graph)
+        created_nodes = 0
+        created_edges = 0
+        for query, params in build_ingest_cypher(nodes, edges):
+            qr = g.query(query, params, timeout=60000)
+            created_nodes += qr.nodes_created
+            created_edges += qr.relationships_created
+        node_labels = sorted({n["label"] for n in _valid_nodes(nodes)})
+        edge_labels = sorted({e["label"] for e in _valid_edges(edges)})
+        return {"nodes": created_nodes, "edges": created_edges,
+                "labels": {"node_labels": node_labels, "edge_labels": edge_labels}}

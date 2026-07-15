@@ -16,3 +16,15 @@ class GraphEngineAdapter(ABC):
     def load_graph(self, spec: dict) -> dict: ...
     @abstractmethod
     def graph_sizes(self) -> dict: ...
+    def ingest_elements(self, graph: str, nodes: list[dict], edges: list[dict]) -> dict:
+        """MERGE extracted entities/relations into `graph` (accumulating,
+        idempotent by id). `nodes`: [{id,label,name,attrs}]; `edges`:
+        [{id,src,dst,label,attrs}]. Returns {"nodes": int, "edges": int,
+        "labels": {"node_labels": [...], "edge_labels": [...]}} reflecting
+        elements actually created plus the distinct labels seen in this call.
+
+        Not `@abstractmethod`: only FalkorDBAdapter implements it so far
+        (Kinetica lands separately) and other adapters (FakeAdapter,
+        KineticaAdapter) must keep instantiating in the meantime.
+        """
+        raise NotImplementedError
