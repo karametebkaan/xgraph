@@ -7089,6 +7089,7 @@ function ListPanel(props) {
 function InteractAskPanel(props) {
     var gwClient = props.gwClient, activeGraph = props.activeGraph, labelData = props.labelData;
     var onRunInQuery = props.onRunInQuery;
+    var askHistory = props.askHistory || []; var setAskHistory = props.setAskHistory;
     const [question, setQuestion] = useState('');
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState(null);
@@ -7102,6 +7103,15 @@ function InteractAskPanel(props) {
         try {
             var r = await gwClient.ask(activeGraph, question.trim());
             setAnswerData(r);
+            if (setAskHistory) {
+                setAskHistory(function(prev){
+                    var next = prev.concat([{
+                        graph: activeGraph, question: question.trim(), cypher: r.cypher, answer: r.answer,
+                        rowCount: (r.rows||[]).length, ts: new Date().toISOString(),
+                    }]);
+                    return next.slice(-50);
+                });
+            }
         } catch (err) {
             setError((err && err.message) || String(err));
             setAnswerData(null);
@@ -7219,6 +7229,9 @@ function InteractAskPanel(props) {
         if (answerData && answerData.cypher && onRunInQuery) onRunInQuery(answerData.cypher);
     };
 
+    // Prior Q&As for the CURRENT graph, newest first.
+    var convo = askHistory.filter(function(h){ return h.graph === activeGraph; }).slice().reverse();
+
     return (
         <div style={{ width:'100%', maxWidth:900, display:'flex', flexDirection:'column', gap:14, textAlign:'left' }}>
             <h2 style={{ fontWeight:700, fontSize:18, margin:0, color:'#2d3436' }}>Ask — plain English to Cypher</h2>
@@ -7273,6 +7286,28 @@ function InteractAskPanel(props) {
                             <div ref={graphContainerRef} style={{ width:'100%', height:360, borderRadius:8, overflow:'hidden' }} />
                         </div>
                     )}
+                </div>
+            )}
+            {!!convo.length && (
+                <div>
+                    <div style={{ fontSize:11, fontWeight:700, color:'#636e72', textTransform:'uppercase', marginBottom:6 }}>Conversation</div>
+                    <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
+                        {convo.map(function(h, idx) {
+                            return (
+                                <div key={idx} style={{ background:'#fafbfc', border:'1px solid #eee', borderRadius:8, padding:10 }}>
+                                    <div style={{ display:'flex', alignItems:'flex-start', justifyContent:'space-between', gap:8 }}>
+                                        <div style={{ fontSize:13, fontWeight:700, color:'#2d3436' }}>{h.question}</div>
+                                        <button onClick={function(){ setQuestion(h.question); }} style={{
+                                            flex:'0 0 auto', padding:'2px 8px', border:'1px solid #dfe6e9', borderRadius:4, cursor:'pointer',
+                                            fontSize:11, fontWeight:700, color:'#0984e3', background:'#fff',
+                                        }}>Ask again</button>
+                                    </div>
+                                    <div style={{ fontSize:12, color:'#636e72', whiteSpace:'pre-wrap', marginTop:4 }}>{h.answer}</div>
+                                    <pre style={{ margin:'6px 0 0', fontFamily:'monospace', fontSize:11, background:'#2d3436', color:'#dfe6e9', padding:8, borderRadius:6, overflow:'auto', maxHeight:80 }}>{h.cypher}</pre>
+                                </div>
+                            );
+                        })}
+                    </div>
                 </div>
             )}
         </div>
@@ -7521,6 +7556,8 @@ function App() {
     const [queryTabHelper, setQueryTabHelper] = useState({});
     // Extract source memory: list of {graph, kind:'text'|'file', label, key, entities, relations, ts}
     const [extractSources, setExtractSources] = useState([]);
+    // Ask conversation history: [{graph, question, cypher, answer, rowCount, ts}] — newest last. Capped.
+    const [askHistory, setAskHistory] = useState([]);
     // `initialSql`, if given, seeds the new tab's query text (used by the
     // Interact① "Run in Query" button to hand off a generated Cypher query);
     // the "+" tab-strip button calls this with no args.
@@ -7677,6 +7714,7 @@ function App() {
                 return { id: id, sql: queryTabSql[id] || '', helper: (st && st.helper) || null, activeTab: (st && st.activeTab) || null };
             }),
             extractSources: extractSources,
+            askHistory: askHistory,
         };
         var blob = new Blob([JSON.stringify(session, null, 2)], { type: 'application/json' });
         var a = document.createElement('a');
@@ -7706,6 +7744,7 @@ function App() {
                 setGatewayBase(s.setup.gatewayBase || GATEWAY_BASE);
                 setActiveGraph(s.activeGraph || '');
                 setExtractSources(s.extractSources || []);
+                setAskHistory(s.askHistory || []);
 
                 var queries = (s.queries && s.queries.length > 0) ? s.queries : [{ id: 'q1', sql: '' }];
                 var ids = queries.map(function(q) { return q.id; });
@@ -9035,6 +9074,7 @@ function App() {
                     <InteractAskPanel
                         gwClient={gwClient} activeGraph={activeGraph} labelData={labelData}
                         onRunInQuery={function(cypher){ addQueryTab(cypher); setActiveAction('query'); }}
+                        askHistory={askHistory} setAskHistory={setAskHistory}
                     />
                 )}
                 {/* Query area — outer wrapper is a COLUMN so the tab strip
