@@ -6744,8 +6744,18 @@ function CreatePanel(props) {
     var createEdgeTgtCol = props.createEdgeTgtCol, setCreateEdgeTgtCol = props.setCreateEdgeTgtCol;
     var createEdgeTypeCol = props.createEdgeTypeCol, setCreateEdgeTypeCol = props.setCreateEdgeTypeCol;
     var createDdl = props.createDdl, setCreateDdl = props.setCreateDdl;
+    var activeGraph = props.activeGraph, extractSources = props.extractSources || [], createHistory = props.createHistory || {}, onCreated = props.onCreated;
 
     const [status, setStatus] = useState({ loading:false, error:null, text:null });
+    // Kinetica's show_graph-derived DDL for the active graph (authoritative
+    // "how was this created"). FalkorDB has none — graphDdl resolves to
+    // {statement:null} there and the render below falls back to createHistory
+    // / extractSources.
+    const [activeDdl, setActiveDdl] = useState(null);
+    useEffect(function() {
+        if (!gwClient || !activeGraph) { setActiveDdl(null); return; }
+        gwClient.graphDdl(activeGraph).then(setActiveDdl).catch(function(){ setActiveDdl(null); });
+    }, [activeGraph, graphEngine]);
 
     var inp = { width:'100%', padding:'9px 11px', border:'1px solid #dfe6e9', borderRadius:6, boxSizing:'border-box', fontSize:13, marginBottom:10, background:'#fff', outline:'none', fontFamily:'inherit' };
     var sqlBox = Object.assign({}, inp, { fontFamily:'monospace', fontSize:12, minHeight:70, resize:'vertical' });
@@ -6796,6 +6806,19 @@ function CreatePanel(props) {
             // {status:'error', message:...} instead of the gateway's usual
             // {error:{...}} envelope, so gwClient.create() won't have thrown.
             if (res && res.status === 'error') throw new Error(res.message || 'create failed');
+            // res.error would mean a gateway {error:{...}} envelope, which
+            // gwClient already throws on — this guard is belt-and-suspenders
+            // so we never record a recipe for a create that didn't happen.
+            if (res && !res.error && onCreated) {
+                onCreated(createGraphName, graphEngine, {
+                    graphName: createGraphName,
+                    nodeTable: createNodeTable, nodeFile: createNodeFile, nodeSql: createNodeSql,
+                    nodeIdCol: createNodeIdCol, nodeLabelCol: createNodeLabelCol, nodeProps: createNodeProps,
+                    edgeTable: createEdgeTable, edgeFile: createEdgeFile, edgeSql: createEdgeSql,
+                    edgeIdCol: createEdgeIdCol, edgeSrcCol: createEdgeSrcCol, edgeTgtCol: createEdgeTgtCol,
+                    edgeTypeCol: createEdgeTypeCol, ddl: createDdl,
+                });
+            }
             var names = await gwClient.listGraphs();
             setGraphs(names);
             var text;
@@ -6815,6 +6838,35 @@ function CreatePanel(props) {
         <div style={{ width:680, maxWidth:'100%', textAlign:'left', background:'#fff', border:'1px solid #dfe6e9', borderRadius:10, padding:24, boxShadow:'0 2px 8px rgba(0,0,0,0.04)' }}>
             <h2 style={{ fontWeight:700, fontSize:18, margin:'0 0 4px', color:'#2d3436' }}>Create</h2>
             <p style={{ fontSize:12, color:'#b2bec3', margin:'0 0 16px' }}>CREATE OR REPLACE GRAPH — graph engine: <b>{graphEngine}</b></p>
+
+            {activeGraph && (function(){
+                var recorded = createHistory[activeGraph + " " + graphEngine];
+                var extractSrcs = extractSources.filter(function(s){ return s.graph === activeGraph && (s.engine === graphEngine || !s.engine); });
+                var preStyle = { margin:'6px 0 0', fontFamily:'monospace', fontSize:11, background:'#2d3436', color:'#dfe6e9', padding:10, borderRadius:6, overflow:'auto', maxHeight:220, whiteSpace:'pre-wrap' };
+                var capStyle = { fontSize:10, color:'#b2bec3', margin:'4px 0 0' };
+                var body;
+                if (activeDdl && activeDdl.statement) {
+                    body = (<div><pre style={preStyle}>{activeDdl.statement}</pre><p style={capStyle}>from Kinetica show_graph</p></div>);
+                } else if (recorded && recorded.ddl && graphEngine === 'kinetica') {
+                    body = (<div><pre style={preStyle}>{recorded.ddl}</pre><p style={capStyle}>recorded when built via Create this session</p></div>);
+                } else if (recorded) {
+                    body = (<div><pre style={preStyle}>{'NODES  ' + recorded.nodeTable + '  ←  ' + recorded.nodeFile + '\n' + (recorded.nodeSql || '') + '\n\nEDGES  ' + recorded.edgeTable + '  ←  ' + recorded.edgeFile + '\n' + (recorded.edgeSql || '')}</pre><p style={capStyle}>recorded when built via Create this session</p></div>);
+                } else if (extractSrcs.length) {
+                    body = (<div>
+                        <p style={{ fontSize:12, color:'#2d3436', margin:'6px 0 4px' }}>Built via <b>Extract</b> from {extractSrcs.length} document{extractSrcs.length === 1 ? '' : 's'}:</p>
+                        {extractSrcs.map(function(s, i){ return <div key={i} style={{ fontSize:12, color:'#636e72' }}>{(s.kind === 'file' ? '📄 ' : '✎ ') + s.label}</div>; })}
+                        <p style={capStyle}>see the Extract tab</p>
+                    </div>);
+                } else {
+                    body = (<p style={{ fontSize:12, color:'#b2bec3', margin:'6px 0 0' }}>No recorded creation recipe for <b>{activeGraph}</b> (built externally or before tracking). See Ontology for its structure.</p>);
+                }
+                return (
+                    <div style={{ border:'1px solid #eef2f7', background:'#f7f9fb', borderRadius:8, padding:'10px 12px', marginBottom:16 }}>
+                        <div style={{ fontSize:11, fontWeight:700, color:'#636e72', textTransform:'uppercase', letterSpacing:0.5 }}>How <span style={{ textTransform:'none', color:'#0984e3' }}>{activeGraph}</span> was created</div>
+                        {body}
+                    </div>
+                );
+            })()}
 
             <Label>Graph name</Label>
             <input style={inp} value={createGraphName} onChange={function(e){ setCreateGraphName(e.target.value); }} placeholder="banking_graph_duckdb" />
@@ -7711,6 +7763,10 @@ function App() {
     const [extractSources, setExtractSources] = useState([]);
     // Ask conversation history: [{graph, question, cypher, answer, rowCount, ts}] — newest last. Capped.
     const [askHistory, setAskHistory] = useState([]);
+    // Create recipe memory: (graph + " " + engine) → the CreatePanel spec that
+    // last built it this session — the FalkorDB fallback for "how was this
+    // graph created" since FalkorDB has no server-side creation DDL to ask for.
+    const [createHistory, setCreateHistory] = useState({});
     // Extract panel's target graph name — lifted out of ExtractPanel so it
     // survives a session load (a local useState there would reset to the
     // default and hide sources saved under a different graph name).
@@ -7868,6 +7924,16 @@ function App() {
         if (graphEngine === 'kinetica' && olapEngine === 'duckdb')  return 'blend';
         return 'session';
     };
+    // Records the spec CreatePanel used to (re)build a graph, keyed by
+    // "graph engine" — the FalkorDB fallback for depicting "how was this
+    // graph created" since FalkorDB returns no server-side creation DDL.
+    var recordCreate = function(graph, engine, spec) {
+        setCreateHistory(function(prev) {
+            var n = Object.assign({}, prev);
+            n[graph + " " + engine] = spec;
+            return n;
+        });
+    };
     var sessionBaseName = function() {
         var pad = function(n) { return String(n).padStart(2, '0'); };
         var now = new Date();
@@ -7895,6 +7961,7 @@ function App() {
             extractSources: extractSources,
             askHistory: askHistory,
             extractGraph: extractGraph,
+            createHistory: createHistory,
         };
         var blob = new Blob([JSON.stringify(session, null, 2)], { type: 'application/json' });
         var a = document.createElement('a');
@@ -7926,6 +7993,7 @@ function App() {
                 setExtractSources(s.extractSources || []);
                 setAskHistory(s.askHistory || []);
                 setExtractGraph(s.extractGraph || 'extracted_graph');
+                setCreateHistory(s.createHistory || {});
 
                 var queries = (s.queries && s.queries.length > 0) ? s.queries : [{ id: 'q1', sql: '' }];
                 var ids = queries.map(function(q) { return q.id; });
@@ -9267,6 +9335,8 @@ function App() {
                         createEdgeTgtCol={createEdgeTgtCol} setCreateEdgeTgtCol={setCreateEdgeTgtCol}
                         createEdgeTypeCol={createEdgeTypeCol} setCreateEdgeTypeCol={setCreateEdgeTypeCol}
                         createDdl={createDdl} setCreateDdl={setCreateDdl}
+                        activeGraph={activeGraph} extractSources={extractSources}
+                        createHistory={createHistory} onCreated={recordCreate}
                     />
                 )}
                 {activeAction === 'extract' && (
