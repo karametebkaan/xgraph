@@ -27,14 +27,18 @@ def test_build_ingest_cypher_groups_by_label():
     assert len(statements) == 3
 
 def test_build_ingest_cypher_node_statement_shape():
+    # Node statements are now keyed by their full label vector (Task 7) --
+    # single-label nodes fall back to a one-element vector, so there's no
+    # scalar "label" param anymore; identify the group via the row payload.
     statements = build_ingest_cypher(_nodes(), [])
-    by_label = {params["label"]: (cypher, params) for cypher, params in statements}
-    assert set(by_label) == {"Person", "Organization"}
-    cypher, params = by_label["Person"]
+    by_labels = {tuple(params["rows"][0]["labels"]): (cypher, params)
+                 for cypher, params in statements}
+    assert set(by_labels) == {("Person",), ("Organization",)}
+    cypher, params = by_labels[("Person",)]
     assert "UNWIND $rows AS r" in cypher
     assert "MERGE (n:Entity {NODE: r.id})" in cypher
     assert "SET n:Person" in cypher
-    assert "n.LABEL = $label" in cypher
+    assert "n.LABEL = r.labels" in cypher
     assert "n.name = r.name" in cypher
     assert "n += r.attrs" in cypher
     ids = {row["id"] for row in params["rows"]}
@@ -56,7 +60,13 @@ def test_build_ingest_cypher_labels_pass_through_safe_ident():
     statements = build_ingest_cypher(_nodes(), _edges())
     for cypher, params in statements:
         # Every interpolated label is a bare safe_ident token (alnum/underscore).
-        assert params["label"].replace("_", "").isalnum()
+        # Edge statements still key by scalar "label"; node statements key by
+        # the full label vector carried in the row payload (Task 7).
+        if "label" in params:
+            assert params["label"].replace("_", "").isalnum()
+        else:
+            for lbl in params["rows"][0]["labels"]:
+                assert lbl.replace("_", "").isalnum()
 
 def test_build_ingest_cypher_no_entity_data_in_cypher_string():
     statements = build_ingest_cypher(_nodes(), _edges())
@@ -79,9 +89,13 @@ def test_build_ingest_cypher_skips_rows_with_null_identity():
         {"id": "e2", "src": "n1", "dst": "n1", "label": "REL", "attrs": {}},
     ]
     statements = build_ingest_cypher(nodes, edges)
-    node_stmt = next(p for c, p in statements if p["label"] == "Person")
-    assert node_stmt["rows"] == [{"id": "n1", "name": "Real", "attrs": {}}]
-    edge_stmt = next(p for c, p in statements if p["label"] == "REL")
+    # Node statements no longer carry a scalar "label" param (Task 7 keys
+    # them by label vector) -- identify by the absence of edge-only "src".
+    node_stmt = next(p for c, p in statements if "src" not in p["rows"][0])
+    assert node_stmt["rows"] == [
+        {"id": "n1", "name": "Real", "labels": ["Person"], "label_raw": ["Person"], "attrs": {}}
+    ]
+    edge_stmt = next(p for c, p in statements if p.get("label") == "REL")
     assert edge_stmt["rows"] == [{"id": "e2", "src": "n1", "dst": "n1", "attrs": {}}]
 
 def test_build_ingest_cypher_empty_inputs_yield_no_statements():
@@ -142,7 +156,8 @@ def test_ingest_elements_creates_nodes_and_edges(live_adapter):
 
     result = live_adapter.run_query(
         _TEST_GRAPH, "MATCH (n:Entity {NODE: 'ing-n1'}) RETURN n.NODE, n.LABEL, n.name")
-    assert result["rows"] == [["ing-n1", "Person", "Ada Lovelace"]]
+    # n.LABEL is now the full label vector (array), not a scalar (Task 7).
+    assert result["rows"] == [["ing-n1", ["Person"], "Ada Lovelace"]]
 
 def test_ingest_elements_merge_does_not_double_on_rerun(live_adapter):
     nodes = [{"id": "ing-n1", "label": "Person", "name": "Ada Lovelace", "attrs": {}}]

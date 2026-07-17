@@ -295,3 +295,31 @@ def test_graph_typed_columns_guards_ragged_rows():
     # Second row is short (missing the 2nd column) -- must not raise.
     result_set = [[None, bank], ["scalar"]]
     assert _graph_typed_columns(result_set, 2) == {1}
+
+
+# ---------------------------------------------------------------------------
+# build_ingest_cypher -- multi-label vector + label_raw provenance (Task 7).
+# Pure builder tests: no live FalkorDB needed.
+# ---------------------------------------------------------------------------
+
+from xgraph_gateway.adapters.falkordb_adapter import build_ingest_cypher
+
+
+def test_build_ingest_cypher_sets_multiple_labels():
+    nodes = [{"id": "n1", "name": "Anthropic", "label": "Company",
+              "labels": ["Company", "AI"], "label_raw": ["Firm", "AI"], "attrs": {}}]
+    stmts = build_ingest_cypher(nodes, [])
+    query, params = stmts[0]
+    # Both labels applied.
+    assert ":Company" in query and ":AI" in query
+    # Vector + provenance stored as node properties.
+    assert "n.LABEL = $labels" in query or "n.LABEL = r.labels" in query
+    assert "label_raw" in query
+    assert "first_seen_ts" in query and "last_seen_ts" in query
+
+
+def test_build_ingest_cypher_falls_back_to_single_label():
+    nodes = [{"id": "n1", "name": "Bob", "label": "Person", "attrs": {}}]
+    stmts = build_ingest_cypher(nodes, [])
+    query, _ = stmts[0]
+    assert ":Person" in query

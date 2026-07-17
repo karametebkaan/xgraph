@@ -206,25 +206,44 @@ def _valid_edges(edges: list[dict]) -> list[dict]:
             if e.get("id") is not None and e.get("src") is not None and e.get("dst") is not None]
 
 def build_ingest_cypher(nodes: list[dict], edges: list[dict]) -> list[tuple[str, dict]]:
-    """Group `nodes` by label and `edges` by label into one UNWIND/MERGE
-    Cypher statement each (label/type via safe_ident); returns
+    """Group `nodes` by their full label vector and `edges` by label into one
+    UNWIND/MERGE Cypher statement each (labels/type via safe_ident); returns
     [(cypher, params), ...]. All entity data (ids, names, attrs) travels in
-    `params["rows"]`, never interpolated into the Cypher string."""
+    `params["rows"]`, never interpolated into the Cypher string.
+
+    Nodes carry a canonical `labels: list[str]` + `label_raw: list[str]`
+    (Task 6 provenance); older callers that only send a single `label` still
+    work -- `labels`/`label_raw` fall back to `[label]`. Every node/edge also
+    gets `last_seen_ts` set on every MERGE and `first_seen_ts` set only
+    `ON CREATE` (first ingest)."""
+    from datetime import datetime, timezone
+    now_iso = datetime.now(timezone.utc).isoformat()
+
     statements: list[tuple[str, dict]] = []
 
-    node_groups: dict[str, list[dict]] = {}
+    node_groups: dict[tuple, list[dict]] = {}
     for n in _valid_nodes(nodes):
-        label = safe_ident(n.get("label"))
-        node_groups.setdefault(label, []).append(n)
-    for label, rows in node_groups.items():
+        labels = n.get("labels") or [n.get("label")]
+        labels = tuple(safe_ident(l) for l in labels if l)
+        node_groups.setdefault(labels, []).append(n)
+    for labels, rows in node_groups.items():
+        label_clause = "".join(f":{l}" for l in labels)
+        # FalkorDB requires ON CREATE SET to appear directly after the MERGE
+        # it qualifies, before any other SET clause on the same variable --
+        # so first_seen_ts is set there, and the label/vector/name/attrs/
+        # last_seen_ts SET is a second, unconditional clause right after.
         query = (
             "UNWIND $rows AS r "
             f"MERGE (n:Entity {{NODE: r.id}}) "
-            f"SET n:{label}, n.LABEL = $label, n.name = r.name, n += r.attrs"
+            "ON CREATE SET n.first_seen_ts = $now "
+            f"SET n{label_clause}, n.LABEL = r.labels, n.label_raw = r.label_raw, "
+            "n.name = r.name, n += r.attrs, n.last_seen_ts = $now"
         )
-        payload = [{"id": r["id"], "name": r.get("name"), "attrs": r.get("attrs") or {}}
-                   for r in rows]
-        statements.append((query, {"rows": payload, "label": label}))
+        payload = [{"id": r["id"], "name": r.get("name"),
+                    "labels": list(labels),
+                    "label_raw": r.get("label_raw") or list(labels),
+                    "attrs": r.get("attrs") or {}} for r in rows]
+        statements.append((query, {"rows": payload, "now": now_iso}))
 
     edge_groups: dict[str, list[dict]] = {}
     for e in _valid_edges(edges):
@@ -235,11 +254,12 @@ def build_ingest_cypher(nodes: list[dict], edges: list[dict]) -> list[tuple[str,
             "UNWIND $rows AS e "
             "MATCH (a:Entity {NODE: e.src}), (b:Entity {NODE: e.dst}) "
             f"MERGE (a)-[x:{label} {{ID: e.id}}]->(b) "
-            f"SET x.LABEL = $label, x += e.attrs"
+            "ON CREATE SET x.first_seen_ts = $now "
+            f"SET x.LABEL = $label, x += e.attrs, x.last_seen_ts = $now"
         )
         payload = [{"id": r["id"], "src": r["src"], "dst": r["dst"], "attrs": r.get("attrs") or {}}
                    for r in rows]
-        statements.append((query, {"rows": payload, "label": label}))
+        statements.append((query, {"rows": payload, "label": label, "now": now_iso}))
 
     return statements
 
