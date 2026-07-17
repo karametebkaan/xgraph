@@ -1,4 +1,5 @@
 from __future__ import annotations
+import hashlib
 import os
 from fastapi import FastAPI, Body, File, Form, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -7,6 +8,7 @@ from fastapi.staticfiles import StaticFiles
 from . import registry
 from . import nlcypher
 from . import extract
+from . import extract_fold
 from .compute.duckdb_engine import ComputeEngine
 from .sessions import SessionStore
 
@@ -163,17 +165,40 @@ def create_app(adapter_factory=registry.get_adapter, compute=None, store=None) -
             if file is not None and file.filename:
                 content = await file.read()
                 doc = extract.read_document(file.filename, content)
+                doc_uri, source_type = file.filename, "file"
             else:
                 doc = text
+                doc_uri, source_type = None, "text"
             if not doc or not doc.strip():
                 raise ValueError("extract requires a non-empty file or text")
+
+            sha = hashlib.sha256(doc.encode("utf-8")).hexdigest()
+            if doc_uri is None:
+                doc_uri = f"text:{sha[:12]}"
+
+            store = _resolve_compute(session)
+            record = store.record_document(graph, doc_uri, sha, source_type)
+            doc_info = {"doc_uri": doc_uri, "sha256": sha, **record}
+
+            # Idempotent short-circuit: identical bytes already ingested.
+            if record["status"] == "unchanged":
+                return {"graph": graph, "entities": 0, "relations": 0,
+                        "entities_new": 0, "relations_new": 0,
+                        "labels": {"node_labels": [], "edge_labels": []},
+                        "truncated": False, "folded": [],
+                        "document": {**doc_info, "reused": True}}
+
             res = extract.extract_document(doc, hint)
+            folded = extract_fold.fold_labels(store, graph, res["entities"],
+                                              res["relations"], doc_uri)
             adapter = _resolve_adapter(session, engine)
             out = adapter.ingest_elements(graph, res["entities"], res["relations"])
             return {"graph": graph, "entities": out["nodes"], "relations": out["edges"],
                     "entities_new": out.get("nodes_created", out["nodes"]),
                     "relations_new": out.get("edges_created", out["edges"]),
-                    "labels": out["labels"], "truncated": res["truncated"]}
+                    "labels": out["labels"], "truncated": res["truncated"],
+                    "folded": folded,
+                    "document": {**doc_info, "reused": False}}
         except Exception as e:
             return _err(engine, e)
 
