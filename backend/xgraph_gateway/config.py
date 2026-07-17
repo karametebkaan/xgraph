@@ -35,6 +35,16 @@ def load_settings() -> Settings:
     )
 
 
+def resolve_meta_path() -> str:
+    """Absolute path to the persistent DuckDB metadata database (documents
+    ledger + ontology). Override with XGRAPH_META_DB; defaults to
+    `<data_dir>/xgraph_meta.duckdb`."""
+    override = os.environ.get("XGRAPH_META_DB")
+    if override:
+        return os.path.abspath(override)
+    return os.path.join(load_settings().data_dir, "xgraph_meta.duckdb")
+
+
 def resolve_data_path(path: str) -> str:
     """Resolve a data-file path portably.
 

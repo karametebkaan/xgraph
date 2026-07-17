@@ -1,11 +1,86 @@
 from __future__ import annotations
 import duckdb
+from datetime import datetime, timezone
+from xgraph_gateway import config
 from xgraph_gateway.config import resolve_data_path
 from graph_loader.hydrate import hydrate as _falkor_hydrate
 from graph_loader.hydrate import _register_rows, _REL_RE
 from graph_loader.duckdb_source import coerce_row, coerce_value
 
+
+def _iso(ts):
+    """DuckDB TIMESTAMP (datetime) or datetime -> ISO string (stable, comparable)."""
+    return ts.isoformat() if hasattr(ts, "isoformat") else str(ts)
+
+
 class DuckDBComputeEngine:
+    def __init__(self, meta_path: str | None = None):
+        self._meta_path = meta_path or config.resolve_meta_path()
+        self._meta_ready = False
+
+    def _meta_con(self):
+        con = duckdb.connect(self._meta_path)
+        if not self._meta_ready:
+            con.execute(
+                "CREATE TABLE IF NOT EXISTS xgraph_documents ("
+                " graph VARCHAR, doc_uri VARCHAR, sha256 VARCHAR,"
+                " source_type VARCHAR, first_ingested_ts TIMESTAMP,"
+                " last_ingested_ts TIMESTAMP, status VARCHAR,"
+                " PRIMARY KEY (graph, doc_uri))")
+            con.execute(
+                "CREATE TABLE IF NOT EXISTS xgraph_ontology ("
+                " graph VARCHAR, type_kind VARCHAR, type_name VARCHAR,"
+                " canonical_name VARCHAR, axis VARCHAR,"
+                " first_seen_uri VARCHAR, first_seen_ts TIMESTAMP,"
+                " PRIMARY KEY (graph, type_kind, type_name))")
+            self._meta_ready = True
+        return con
+
+    def record_document(self, graph, doc_uri, sha256, source_type):
+        # Naive UTC: DuckDB TIMESTAMP is tz-naive and converts+drops tzinfo on
+        # readback, so a tz-aware value wouldn't round-trip equal. Store naive
+        # UTC so first_ingested_ts read back == the value we returned on insert.
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        con = self._meta_con()
+        try:
+            existing = con.execute(
+                "SELECT sha256, first_ingested_ts FROM xgraph_documents"
+                " WHERE graph = ? AND doc_uri = ?", [graph, doc_uri]).fetchone()
+            if existing is None:
+                con.execute(
+                    "INSERT INTO xgraph_documents VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    [graph, doc_uri, sha256, source_type, now, now, "ingested"])
+                status, first_ts = "new", now
+            elif existing[0] == sha256:
+                con.execute(
+                    "UPDATE xgraph_documents SET last_ingested_ts = ?"
+                    " WHERE graph = ? AND doc_uri = ?", [now, graph, doc_uri])
+                status, first_ts = "unchanged", existing[1]
+            else:
+                con.execute(
+                    "UPDATE xgraph_documents SET sha256 = ?, last_ingested_ts = ?,"
+                    " status = ? WHERE graph = ? AND doc_uri = ?",
+                    [sha256, now, "ingested", graph, doc_uri])
+                status, first_ts = "updated", existing[1]
+            return {"status": status,
+                    "first_ingested_ts": _iso(first_ts),
+                    "last_ingested_ts": _iso(now)}
+        finally:
+            con.close()
+
+    def list_documents(self, graph):
+        con = self._meta_con()
+        try:
+            cols = ["graph", "doc_uri", "sha256", "source_type",
+                    "first_ingested_ts", "last_ingested_ts", "status"]
+            rows = con.execute(
+                f"SELECT {', '.join(cols)} FROM xgraph_documents WHERE graph = ?",
+                [graph]).fetchall()
+            return [dict(zip(cols, [_iso(v) if hasattr(v, 'isoformat') else v
+                                    for v in r])) for r in rows]
+        finally:
+            con.close()
+
     def hydrate(self, rows, source, key="NODE", columns="*"):
         return _falkor_hydrate(rows, resolve_data_path(source), key=key, columns=columns)
 
