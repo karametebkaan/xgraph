@@ -39,3 +39,73 @@ def test_list_documents(tmp_path):
     docs = eng.list_documents("g1")
     assert {d["doc_uri"] for d in docs} == {"doc:a", "doc:b"}
     assert all(d["graph"] == "g1" for d in docs)
+
+
+def test_ontology_record_and_resolve(tmp_path):
+    eng = _engine(tmp_path)
+    # Canonical: type_name == canonical_name.
+    eng.record_type("g1", "entity", "Company", "Company", "EntityType", "doc:a")
+    # Alias: Firm folds to Company.
+    eng.record_type("g1", "entity", "Firm", "Company", "EntityType", "doc:a")
+
+    assert eng.resolve_canonical("g1", "entity", "Company") == "Company"
+    assert eng.resolve_canonical("g1", "entity", "Firm") == "Company"
+    # Case-insensitive normalized hit.
+    assert eng.resolve_canonical("g1", "entity", "company") == "Company"
+    # Unknown => None.
+    assert eng.resolve_canonical("g1", "entity", "Planet") is None
+    # Kind- and graph-scoped.
+    assert eng.resolve_canonical("g1", "relation", "Company") is None
+    assert eng.resolve_canonical("g2", "entity", "Company") is None
+
+
+def test_get_canonicals_and_axis_map(tmp_path):
+    eng = _engine(tmp_path)
+    eng.record_type("g1", "entity", "Company", "Company", "EntityType", "doc:a")
+    eng.record_type("g1", "entity", "AI", "AI", "Industry", "doc:a")
+    eng.record_type("g1", "entity", "Firm", "Company", "EntityType", "doc:a")
+
+    assert set(eng.get_canonicals("g1", "entity")) == {"Company", "AI"}
+    amap = eng.axis_map("g1", "entity")
+    assert amap["Company"] == "EntityType"
+    assert amap["AI"] == "Industry"
+    assert amap["Firm"] == "EntityType"  # aliases resolve to their axis too
+
+
+def test_record_type_first_seen_wins(tmp_path):
+    eng = _engine(tmp_path)
+    eng.record_type("g1", "entity", "Company", "Company", "EntityType", "doc:a")
+    # A second record for the same (graph,kind,name) must not overwrite.
+    eng.record_type("g1", "entity", "Company", "SOMETHING_ELSE", "OtherAxis", "doc:b")
+    assert eng.resolve_canonical("g1", "entity", "Company") == "Company"
+
+
+def test_resolve_canonical_prefers_exact_match(tmp_path):
+    eng = _engine(tmp_path)
+    # Two distinct type_name rows differing only by case, each with its own
+    # canonical_name. An exact-casing lookup must resolve to its own row,
+    # not whichever row happens to be returned first without ordering.
+    eng.record_type("g1", "entity", "Company", "Company", "EntityType", "d")
+    eng.record_type("g1", "entity", "COMPANY", "ShoutCo", "EntityType", "d")
+
+    assert eng.resolve_canonical("g1", "entity", "Company") == "Company"
+    assert eng.resolve_canonical("g1", "entity", "COMPANY") == "ShoutCo"
+
+
+def test_record_type_first_seen_ts_is_naive_utc(tmp_path):
+    eng = _engine(tmp_path)
+    eng.record_type("g1", "entity", "Company", "Company", "EntityType", "doc:a")
+
+    # Read the raw column back via a fresh connection on the same meta_path
+    # to confirm no tz-aware value ever slipped into the tz-naive TIMESTAMP
+    # column (which would silently shift on readback).
+    con = DuckDBComputeEngine(meta_path=eng._meta_path)._meta_con()
+    try:
+        row = con.execute(
+            "SELECT first_seen_ts FROM xgraph_ontology"
+            " WHERE graph = ? AND type_kind = ? AND type_name = ?",
+            ["g1", "entity", "Company"]).fetchone()
+    finally:
+        con.close()
+    assert row is not None
+    assert row[0].tzinfo is None

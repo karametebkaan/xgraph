@@ -81,6 +81,57 @@ class DuckDBComputeEngine:
         finally:
             con.close()
 
+    def record_type(self, graph, kind, type_name, canonical_name, axis, source_uri):
+        # Naive UTC, matching record_document's convention: DuckDB TIMESTAMP is
+        # tz-naive, so a tz-aware value would get silently shifted to local
+        # time on readback.
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        con = self._meta_con()
+        try:
+            # First-seen wins: ON CONFLICT DO NOTHING preserves the original row.
+            con.execute(
+                "INSERT INTO xgraph_ontology VALUES (?, ?, ?, ?, ?, ?, ?)"
+                " ON CONFLICT (graph, type_kind, type_name) DO NOTHING",
+                [graph, kind, type_name, canonical_name, axis, source_uri, now])
+        finally:
+            con.close()
+
+    def resolve_canonical(self, graph, kind, type_name):
+        con = self._meta_con()
+        try:
+            # Deterministic tie-break: an exact type_name match always wins over
+            # a case-insensitive-only match (DuckDB orders booleans TRUE last,
+            # so DESC puts the exact match -- TRUE -- first).
+            row = con.execute(
+                "SELECT canonical_name FROM xgraph_ontology"
+                " WHERE graph = ? AND type_kind = ?"
+                " AND (type_name = ? OR lower(type_name) = lower(?))"
+                " ORDER BY (type_name = ?) DESC LIMIT 1",
+                [graph, kind, type_name, type_name, type_name]).fetchone()
+            return row[0] if row else None
+        finally:
+            con.close()
+
+    def get_canonicals(self, graph, kind):
+        con = self._meta_con()
+        try:
+            rows = con.execute(
+                "SELECT DISTINCT canonical_name FROM xgraph_ontology"
+                " WHERE graph = ? AND type_kind = ?", [graph, kind]).fetchall()
+            return [r[0] for r in rows]
+        finally:
+            con.close()
+
+    def axis_map(self, graph, kind):
+        con = self._meta_con()
+        try:
+            rows = con.execute(
+                "SELECT type_name, axis FROM xgraph_ontology"
+                " WHERE graph = ? AND type_kind = ?", [graph, kind]).fetchall()
+            return {name: axis for name, axis in rows}
+        finally:
+            con.close()
+
     def hydrate(self, rows, source, key="NODE", columns="*"):
         return _falkor_hydrate(rows, resolve_data_path(source), key=key, columns=columns)
 
