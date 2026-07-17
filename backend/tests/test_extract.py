@@ -161,6 +161,32 @@ def test_extract_document_shallow_merges_attrs_first_wins():
     assert x["attrs"]["size"] == "big"
 
 
+def test_extract_document_carries_facets():
+    from xgraph_gateway import extract
+
+    def fake_llm(prompt, *, schema=None):
+        return {"entities": [{"name": "Anthropic", "label": "Company",
+                              "facets": [{"name": "AI", "axis": "Industry"}],
+                              "attrs": {}}],
+                "relations": []}
+
+    out = extract.extract_document("Anthropic is an AI company.", llm=fake_llm)
+    ent = out["entities"][0]
+    assert ent["label"] == "Company"
+    assert ent["facets"] == [{"name": "AI", "axis": "Industry"}]
+
+
+def test_extract_document_defaults_facets_to_empty():
+    from xgraph_gateway import extract
+
+    def fake_llm(prompt, *, schema=None):
+        return {"entities": [{"name": "Bob", "label": "Person", "attrs": {}}],
+                "relations": []}
+
+    out = extract.extract_document("Bob exists.", llm=fake_llm)
+    assert out["entities"][0]["facets"] == []
+
+
 # --- read_document -----------------------------------------------------------
 
 def test_read_document_txt():

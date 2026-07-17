@@ -101,6 +101,21 @@ _EXTRACT_SCHEMA = {
                     "name": {"type": "string", "description": "The entity's name, spelled consistently across mentions."},
                     "label": {"type": "string", "description": "Concise Title-Case entity type, e.g. Person, Organization, Location."},
                     "attrs": {"type": "object", "description": "Optional extra attributes about the entity."},
+                    "facets": {
+                        "type": "array",
+                        "description": "Optional classifying facets, each a {name, axis} pair "
+                                       "(e.g. {\"name\":\"AI\",\"axis\":\"Industry\"}). The primary "
+                                       "structural type stays in `label`.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string"},
+                                "axis": {"type": "string"},
+                            },
+                            "required": ["name", "axis"],
+                            "additionalProperties": False,
+                        },
+                    },
                 },
                 "required": ["name", "label"],
                 "additionalProperties": False,
@@ -137,13 +152,16 @@ def _prompt(chunk_text: str, hint: Optional[str]) -> str:
         "Location, Event) that names its type.\n"
         "- Give each relationship an UPPER_SNAKE `label` (e.g. WORKS_AT, LOCATED_IN, "
         "FOUNDED_BY) describing how the two entities relate.\n"
+        "- Optionally add `facets`: classifying dimensions of an entity beyond its "
+        "structural type, each `{name, axis}` (e.g. a Company with "
+        "`{\"name\":\"AI\",\"axis\":\"Industry\"}`). Keep the structural type in `label`.\n"
         "- Use the exact same `name` spelling every time the same real-world entity is "
         "mentioned (so mentions of the same thing merge together).\n"
         "- Every relation's `source` and `target` MUST equal the `name` of an entity you "
         "also returned in `entities` for this same passage.\n"
         f"{hint_block}\n"
         "Return JSON only (no markdown fences, no commentary) with `entities` "
-        "(each `{name, label, attrs?}`) and `relations` (each "
+        "(each `{name, label, facets?, attrs?}`) and `relations` (each "
         "`{source, target, label, attrs?}`).\n\n"
         f"Passage:\n{chunk_text}"
     )
@@ -161,7 +179,7 @@ def extract_document(text: str, hint: Optional[str] = None, llm: Optional[LLMFun
     of that chunk's entities is dropped as dangling), `id = sha1(src|dst|label)
     [:16]`, deduped by that id.
 
-    Returns `{"entities": [{id,label,name,attrs}], "relations":
+    Returns `{"entities": [{id,label,name,facets,attrs}], "relations":
     [{id,src,dst,label,attrs}], "truncated": bool}`.
     """
     call = llm or _get_llm()
@@ -185,6 +203,7 @@ def extract_document(text: str, hint: Optional[str] = None, llm: Optional[LLMFun
                 continue
             label = (e.get("label") or "").strip()
             attrs = e.get("attrs") or {}
+            facets = e.get("facets") or []
             eid = canonical_id(name)
             name_to_id[name] = eid
             if eid in entities:
@@ -193,9 +212,12 @@ def extract_document(text: str, hint: Optional[str] = None, llm: Optional[LLMFun
                     existing["label"] = label
                 if not existing.get("name"):
                     existing["name"] = name
+                if not existing.get("facets"):
+                    existing["facets"] = facets
                 existing["attrs"] = {**attrs, **existing["attrs"]}
             else:
-                entities[eid] = {"id": eid, "label": label, "name": name, "attrs": dict(attrs)}
+                entities[eid] = {"id": eid, "label": label, "name": name,
+                                  "facets": facets, "attrs": dict(attrs)}
 
         for r in chunk_relations:
             src_name = (r.get("source") or "").strip()
