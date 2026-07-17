@@ -97,3 +97,47 @@ def test_source_uri_is_persisted():
     extract_fold.fold_labels(store, "g", ents, [], "doc:xyz", llm=llm)
     assert ents[0]["label"] == "DwarfPlanet"
     assert store.source_uris[("g", "entity", "DwarfPlanet")] == "doc:xyz"
+
+
+def test_facets_folded_and_vector_built():
+    store = FakeStore()
+    store.record_type("g", "entity", "Company", "Company", "EntityType", "doc")
+
+    def llm(prompt, *, schema=None):
+        return {"canonical": None}  # AI is genuinely new
+
+    ents = [{"name": "Anthropic", "label": "Firm",
+             "facets": [{"name": "AI", "axis": "Industry"}], "attrs": {}}]
+    # Seed the Firm->Company alias so structural folds deterministically.
+    store.record_type("g", "entity", "Firm", "Company", "EntityType", "doc")
+
+    extract_fold.fold_labels(store, "g", ents, [], "doc", llm=llm)
+    assert ents[0]["label"] == "Company"
+    assert ents[0]["labels"] == ["Company", "AI"]
+    assert ents[0]["label_raw"] == ["Firm", "AI"]
+    # AI registered on the Industry axis.
+    assert store.rows[("g", "entity", "AI")] == ("AI", "Industry")
+
+
+def test_facet_folds_to_existing_canonical():
+    store = FakeStore()
+    store.record_type("g", "entity", "Company", "Company", "EntityType", "doc")
+    store.record_type("g", "entity", "AI", "AI", "Industry", "doc")
+    store.record_type("g", "entity", "Company", "Company", "EntityType", "doc")
+
+    def llm(prompt, *, schema=None):
+        return {"canonical": "AI"}  # "Artificial Intelligence" ~ "AI"
+
+    ents = [{"name": "X", "label": "Company",
+             "facets": [{"name": "Artificial Intelligence", "axis": "Industry"}], "attrs": {}}]
+    extract_fold.fold_labels(store, "g", ents, [], "doc", llm=llm)
+    assert ents[0]["labels"] == ["Company", "AI"]
+
+
+def test_no_facets_still_builds_singleton_vector():
+    store = FakeStore()
+    store.record_type("g", "entity", "Person", "Person", "EntityType", "doc")
+    ents = [{"name": "Bob", "label": "Person", "facets": [], "attrs": {}}]
+    extract_fold.fold_labels(store, "g", ents, [], "doc", llm=_no_llm)
+    assert ents[0]["labels"] == ["Person"]
+    assert ents[0]["label_raw"] == ["Person"]

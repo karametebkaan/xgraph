@@ -99,9 +99,26 @@ def fold_labels(store, graph, entities, relations, source_uri, llm=None):
     cache: dict = {}
     report: list = []
     for e in entities:
-        e["label"] = _resolve_one(store, graph, "entity",
-                                  e.get("label", ""), _ENTITY_AXIS, llm, cache, report,
-                                  source_uri)
+        raw_struct = (e.get("label") or "").strip()
+        struct_canon = _resolve_one(store, graph, "entity",
+                                    raw_struct, _ENTITY_AXIS, llm, cache, report,
+                                    source_uri)
+        e["label"] = struct_canon
+        labels = [struct_canon] if struct_canon else []
+        label_raw = [raw_struct] if raw_struct else []
+        for f in e.get("facets") or []:
+            f_name = (f.get("name") or "").strip()
+            f_axis = (f.get("axis") or _ENTITY_AXIS).strip()
+            if not f_name:
+                continue
+            f_canon = _resolve_one(store, graph, "entity",
+                                   f_name, f_axis, llm, cache, report,
+                                   source_uri)
+            label_raw.append(f_name)
+            if f_canon and f_canon not in labels:
+                labels.append(f_canon)
+        e["labels"] = labels
+        e["label_raw"] = label_raw
     for r in relations:
         r["label"] = _resolve_one(store, graph, "relation",
                                   r.get("label", ""), _RELATION_AXIS, llm, cache, report,
