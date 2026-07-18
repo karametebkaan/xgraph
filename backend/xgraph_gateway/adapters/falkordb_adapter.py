@@ -56,6 +56,14 @@ def _column_names(header) -> list[str]:
         names.append(name.decode() if isinstance(name, bytes) else name)
     return names
 
+def _as_labels(v):
+    """Normalize a raw `n.LABEL` value to a list of strings. FalkorDB nodes
+    from `build_ingest_cypher` (Task 7+) store `LABEL` as an array (multi-
+    label); pre-existing graphs (e.g. `banking_graph`, loaded via
+    graph_loader) store it as a scalar string. Treat both uniformly as a
+    list -- a scalar becomes a one-element list, `None`/`""` becomes `[]`."""
+    return v if isinstance(v, list) else ([v] if v else [])
+
 def _dot_from_triples(triples) -> str:
     lines = ["digraph {"]
     for src, rel, dst in triples:
@@ -326,15 +334,38 @@ class FalkorDBAdapter(GraphEngineAdapter):
     def get_schema(self, graph, options=None):
         # `options` (Full/NKey/EKey display modes) is Kinetica-only -- FalkorDB
         # always derives the DOT from actual triples, so it's accepted and ignored.
+        #
+        # `n.LABEL` is ALWAYS treated as a list of strings (Task 9): a scalar
+        # (pre-existing graphs like `banking_graph`) is normalized to a
+        # one-element list via `_as_labels`, same as an array `LABEL`
+        # (extracted graphs, Task 7+) -- one code path, no scalar/array branch.
         g = self._graph(graph)
-        labels = [r[0] for r in g.query("MATCH (n) RETURN DISTINCT n.LABEL", timeout=60000).result_set if r[0]]
+        label_rows = [r[0] for r in
+                      g.query("MATCH (n) RETURN DISTINCT n.LABEL", timeout=60000).result_set]
+        labels = sorted({label for row in label_rows for label in _as_labels(row)})
         rels = [r[0] for r in g.query("MATCH ()-[r]->() RETURN DISTINCT type(r)", timeout=60000).result_set if r[0]]
-        triples = [(r[0], r[1], r[2]) for r in g.query(
-            "MATCH (a)-[r]->(b) RETURN DISTINCT a.LABEL, type(r), b.LABEL", timeout=60000).result_set
-            if r[0] and r[2]]
+        raw_triples = [(r[0], r[1], r[2]) for r in g.query(
+            "MATCH (a)-[r]->(b) RETURN DISTINCT a.LABEL, type(r), b.LABEL", timeout=60000).result_set]
+        triples = []
+        seen_triples: set = set()
+        for a_label, rel, b_label in raw_triples:
+            a_labels, b_labels = _as_labels(a_label), _as_labels(b_label)
+            if a_labels and b_labels:
+                # DOT is a structural label -> label graph; the first element
+                # of each side's label vector is its structural label. Two
+                # distinct multi-label arrays can collapse to the same
+                # structural triple -- dedup (stable order) before DOT.
+                triple = (a_labels[0], rel, b_labels[0])
+                if triple not in seen_triples:
+                    seen_triples.add(triple)
+                    triples.append(triple)
         return {"labels": labels, "rel_types": rels, "dot": _dot_from_triples(triples),
                 "properties": self._label_properties(g, labels),
-                "counts": self._counts(g)}
+                "counts": self._counts(g),
+                # No ontology-store handle here, so every label defaults to
+                # the single EntityType axis; a later task can enrich this
+                # from the metadata store.
+                "axes": {"EntityType": labels}}
 
     def fetch_entities(self, graph, limit, offset=0):
         g = self._graph(graph)

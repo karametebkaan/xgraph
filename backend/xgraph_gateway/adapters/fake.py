@@ -11,7 +11,8 @@ class FakeAdapter(GraphEngineAdapter):
     def get_schema(self, graph, options=None):
         return {"labels": ["bank", "wire_message"], "rel_types": ["performed"],
                 "dot": 'digraph { "bank" -> "wire_message" [label="performed"]; }',
-                "counts": {"nodes": len(_NODES), "edges": len(_EDGES)}}
+                "counts": {"nodes": len(_NODES), "edges": len(_EDGES)},
+                "axes": {"EntityType": ["bank", "wire_message"]}}
     def run_query(self, graph, cypher, timeout=60000):
         return {"columns": ["NODE"], "rows": [[n["id"]] for n in _NODES],
                 "graph": {"nodes": list(_NODES), "edges": list(_EDGES)}}

@@ -29,6 +29,17 @@ def _client(tmp_path):
     return TestClient(create_app(adapter_factory=lambda e: FakeAdapter(), compute=compute))
 
 
+def test_schema_reports_axes(tmp_path):
+    # Task 9: get_schema must group labels into `axes` (e.g. {"EntityType":
+    # [...]}) so the frontend/nlcypher path can rely on the key existing
+    # regardless of adapter (fake here; FalkorDB is covered live).
+    r = _client(tmp_path).get("/schema", params={"graph": "demo_graph", "engine": "fake"})
+    assert r.status_code == 200
+    body = r.json()
+    assert "axes" in body
+    assert body["axes"] == {"EntityType": ["bank", "wire_message"]}
+
+
 def _patch_extract_document(monkeypatch, truncated=False):
     def fake_extract_document(text, hint=None, llm=None, max_chunks=40):
         assert text  # non-empty doc reached extract_document

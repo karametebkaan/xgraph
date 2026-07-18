@@ -1,5 +1,15 @@
 import pytest
-from xgraph_gateway.adapters.falkordb_adapter import _column_names, _dot_from_triples
+from xgraph_gateway.adapters.falkordb_adapter import _as_labels, _column_names, _dot_from_triples
+
+def test_as_labels_normalizes_scalar_and_array_and_empty():
+    # Pre-existing graphs (e.g. banking_graph) store `n.LABEL` as a scalar
+    # string; extracted graphs (Task 7+) store it as an array -- both must
+    # normalize to a list, uniformly, with no separate code path.
+    assert _as_labels("bank") == ["bank"]
+    assert _as_labels(["Company", "AI"]) == ["Company", "AI"]
+    assert _as_labels([]) == []
+    assert _as_labels(None) == []
+    assert _as_labels("") == []
 
 def test_column_names_decodes_header():
     header = [[1, b"NODE"], [1, "risk"]]
@@ -127,6 +137,32 @@ def test_get_schema_skips_label_with_unsafe_identifier():
     sch = adapter.get_schema("demo_graph")
     assert sch["properties"] == {"ok_label": ["NODE", "name"]}
     assert "bad label" not in sch["properties"]
+
+def test_get_schema_flattens_multi_label_arrays():
+    # Extracted graphs (Task 7+) store `n.LABEL` as an ARRAY (multi-label),
+    # e.g. a node tagged ["Company", "AI"] alongside a node tagged only
+    # ["Company"]. `get_schema` must flatten these to a distinct list of
+    # plain label STRINGS (never nested lists), and the DOT triples -- built
+    # from each endpoint's first (structural) label -- must be deduped, since
+    # two distinct multi-label arrays here both collapse to the same
+    # structural triple ("Company" -> "Company").
+    fake = _FakeSchemaGraph(
+        labels=[["Company", "AI"], ["Company"]],
+        rels=["invests_in"],
+        triples=[
+            (["Company", "AI"], "invests_in", ["Company"]),
+            (["Company"], "invests_in", ["Company"]),
+        ],
+        key_rows={},
+    )
+    adapter = _schema_adapter(fake)
+    sch = adapter.get_schema("demo_graph")
+    assert sorted(sch["labels"]) == ["AI", "Company"]
+    assert all(isinstance(l, str) for l in sch["labels"])
+    assert "['" not in sch["dot"]
+    assert sch["dot"].count('"Company" -> "Company"') == 1
+    assert "axes" in sch
+
 
 def test_live_query_returns_graph():
     a = _adapter_or_skip()
