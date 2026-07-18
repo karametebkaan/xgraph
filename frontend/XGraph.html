@@ -47,7 +47,7 @@
 const { useState, useEffect, useRef, useCallback, useMemo } = React;
 
 /* ═══════════════════════ CONSTANTS ════════════════════════ */
-const EXPLORER_VERSION = "0.3.2";  // xGraph version — bump on frontend changes so a stale browser cache is visible
+const EXPLORER_VERSION = "0.3.3";  // xGraph version — bump on frontend changes so a stale browser cache is visible
 const SAFETY_TIMEOUT_MS = 10 * 60 * 1000;
 const PALETTE = [
     { solid: '#0984e3', light: '#e1f0fb' }, { solid: '#00cec9', light: '#e0f9f8' },
@@ -2207,7 +2207,10 @@ function QueryPanel(props) {
         while ((m = re.exec(dotString)) !== null) {
             var src = normNodeKey(m[1]);
             var tgt = normNodeKey(m[2]);
-            var edgeRaw = m[3].replace(/\s*\([^)]*\)\s*$/, '').replace(/^\s+/, '').trim();
+            // The DOT edge label may carry a `\n(NN.N%)` distribution suffix (a
+            // literal backslash-n from the ontology graph); take the part before
+            // the first `\n`, then drop any trailing `(…)`.
+            var edgeRaw = m[3].split(/\\n/)[0].replace(/\s*\([^)]*\)\s*$/, '').replace(/^\s+/, '').trim();
             if (!adj[src]) adj[src] = [];
             if (!adj[src].some(function(e) { return e.edge === edgeRaw && e.target === tgt; })) {
                 adj[src].push({ edge: edgeRaw, target: tgt });
