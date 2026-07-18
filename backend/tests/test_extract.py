@@ -357,3 +357,42 @@ def test_session_store_records_extract_mode():
     assert store.get(sid)["extract_mode"] == "whole"
     sid2 = store.create("fake", None, "duckdb", None)  # default
     assert store.get(sid2)["extract_mode"] == "sequential"
+
+
+def test_merge_partial_names_folds_surname_into_fullname():
+    ents = [{"id": "Mullin", "name": "Mullin", "label": "Person", "facets": [], "attrs": {}},
+            {"id": "Markwayne Mullin", "name": "Markwayne Mullin", "label": "Person",
+             "facets": [], "attrs": {}}]
+    rels = [{"id": "r1", "src": "Mullin", "dst": "DHS", "label": "WORKS_AT", "attrs": {}}]
+    ents2, rels2 = extract._merge_partial_names(ents, rels)
+    assert {e["name"] for e in ents2} == {"Markwayne Mullin"}  # Mullin folded away
+    assert rels2[0]["src"] == "Markwayne Mullin"
+
+
+def test_merge_partial_names_skips_ambiguous_surname():
+    ents = [{"id": "Trump", "name": "Trump", "label": "Person", "facets": [], "attrs": {}},
+            {"id": "Donald Trump", "name": "Donald Trump", "label": "Person", "facets": [], "attrs": {}},
+            {"id": "Ivanka Trump", "name": "Ivanka Trump", "label": "Person", "facets": [], "attrs": {}}]
+    ents2, _ = extract._merge_partial_names(ents, [])
+    assert {e["name"] for e in ents2} == {"Trump", "Donald Trump", "Ivanka Trump"}  # ambiguous
+
+
+def test_merge_partial_names_respects_label():
+    ents = [{"id": "Apple", "name": "Apple", "label": "Organization", "facets": [], "attrs": {}},
+            {"id": "Bob Apple", "name": "Bob Apple", "label": "Person", "facets": [], "attrs": {}}]
+    ents2, _ = extract._merge_partial_names(ents, [])
+    assert len(ents2) == 2  # different labels -> no merge
+
+
+def test_extract_document_merges_surname_across_chunks():
+    def fake(prompt, *, schema=None):
+        if "DHS" in prompt:  # chunk two (unique token, not in the prompt template)
+            return {"entities": [{"name": "Mullin", "label": "Person"},
+                                 {"name": "DHS", "label": "Organization"}],
+                    "relations": [{"source": "Mullin", "target": "DHS", "label": "WORKS_AT"}]}
+        return {"entities": [{"name": "Markwayne Mullin", "label": "Person"}], "relations": []}
+    out = extract.extract_document("Markwayne Mullin spoke.\n\nMullin joined DHS.",
+                                   llm=fake, mode="sequential")
+    names = {e["name"] for e in out["entities"]}
+    assert "Markwayne Mullin" in names and "Mullin" not in names
+    assert any(r["src"] == "Markwayne Mullin" for r in out["relations"])

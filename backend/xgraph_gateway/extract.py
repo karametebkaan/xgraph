@@ -195,6 +195,49 @@ def _extract_chunks(chunks: list[str], hint: Optional[str], call: LLMFunc,
         return list(ex.map(lambda c: call(_prompt(c, hint), schema=_EXTRACT_SCHEMA), chunks))
 
 
+def _merge_partial_names(entities: list, relations: list) -> tuple[list, list]:
+    """Fold a bare single-token name into the UNIQUE fuller same-label name that
+    ends with that token -- e.g. 'Mullin' -> 'Markwayne Mullin', 'Trump' ->
+    'Donald Trump'. Conservative: skip when zero or MORE THAN ONE fuller name
+    matches (ambiguous, e.g. both 'Donald Trump' and 'Ivanka Trump'). Redirects
+    the merged node's relations, drops any self-loop the merge creates, dedupes."""
+    by_label: dict = {}
+    for e in entities:
+        by_label.setdefault(e.get("label"), []).append(e)
+    rename: dict = {}  # short entity id -> fuller entity id
+    for group in by_label.values():
+        names = [e["name"] for e in group]
+        for e in group:
+            toks = (e["name"] or "").split()
+            if len(toks) != 1:
+                continue
+            surname = toks[0].lower()
+            fuller = [n for n in names if n != e["name"]
+                      and len(n.split()) > 1 and n.split()[-1].lower() == surname]
+            if len(fuller) == 1:
+                rename[e["id"]] = next(x["id"] for x in group if x["name"] == fuller[0])
+    if not rename:
+        return entities, relations
+    kept = {e["id"]: e for e in entities}
+    for short_id, long_id in rename.items():
+        short = kept.pop(short_id, None)
+        lng = kept.get(long_id)
+        if short and lng:
+            lng["attrs"] = {**(short.get("attrs") or {}), **(lng.get("attrs") or {})}
+            if not lng.get("facets"):
+                lng["facets"] = short.get("facets") or []
+    new_rels: dict = {}
+    for r in relations:
+        src = rename.get(r["src"], r["src"])
+        dst = rename.get(r["dst"], r["dst"])
+        if src == dst:
+            continue  # self-loop introduced by the merge
+        rid = hashlib.sha1(f"{src}|{dst}|{r['label']}".encode("utf-8")).hexdigest()[:16]
+        if rid not in new_rels:
+            new_rels[rid] = {**r, "id": rid, "src": src, "dst": dst}
+    return list(kept.values()), list(new_rels.values())
+
+
 def extract_document(text: str, hint: Optional[str] = None, llm: Optional[LLMFunc] = None,
                       max_chunks: int = EXTRACT_MAX_CHUNKS, mode: str = "sequential") -> dict:
     """Extract and merge entities/relationships across `text`'s paragraphs.
@@ -269,8 +312,5 @@ def extract_document(text: str, hint: Optional[str] = None, llm: Optional[LLMFun
                 relations[rid] = {"id": rid, "src": src_id, "dst": dst_id, "label": label,
                                    "attrs": dict(attrs)}
 
-    return {
-        "entities": list(entities.values()),
-        "relations": list(relations.values()),
-        "truncated": truncated,
-    }
+    ents, rels = _merge_partial_names(list(entities.values()), list(relations.values()))
+    return {"entities": ents, "relations": rels, "truncated": truncated}
