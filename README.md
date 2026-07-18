@@ -178,12 +178,124 @@ The gateway exposes one uniform JSON API; the frontend uses only this.
 | `GET /schema`, `GET /entities`, `GET /record` | ontology + entity browse |
 | `POST /query` | run GQL/Cypher → `{columns, rows, graph}` |
 | `POST /create` | `CREATE OR REPLACE GRAPH` (DuckDB→FalkorDB build, or Kinetica DDL) |
-| `POST /extract` | document (multipart file or text) → LLM entities/relationships → MERGE into a graph |
+| `POST /extract` | document (multipart file or text) → LLM entities/relationships → **fold labels to canonicals** → MERGE into a graph; records the document in a per-graph provenance ledger |
+| `GET /documents` | the per-graph document provenance ledger (`doc_uri, sha256, first/last ingested, status`) |
 | `POST /delete_graph` | drop a graph (both engines; also clears Kinetica extract backing tables) |
 | `POST /ask` | NL question → generate query → run → answer |
 | `POST /nl2cypher`, `POST /synthesize` | the round-trip steps individually |
 | `POST /explain` | results → English, with optional focus-driven post-join |
 | `POST /hydrate`, `POST /sql` | DuckDB late-hydration and ad-hoc OLAP |
+
+### Request bodies
+
+POST bodies are JSON. `engine` is `falkordb | kinetica | fake`; `session` is optional (from
+`POST /connect`) and, when present, supplies the engine so `engine` can be omitted.
+
+| Endpoint | Required fields | Optional fields |
+|---|---|---|
+| `POST /connect` | `engine` | connection overrides (host/port/user/pass) |
+| `POST /query` | `engine`, `graph`, `cypher` | `timeout` (ms, default `60000`), `session` |
+| `POST /create` | `engine`, `spec` | `session` |
+| `POST /extract` | `graph` *(multipart:* `file` *or* `text`*)* | `hint`, `engine`, `session` |
+| `POST /delete_graph` | `engine`, `graph` | `session` |
+| `POST /ask` | `engine`, `graph`, `question` | `session` |
+| `POST /nl2cypher` | `engine`, `graph`, `question` | `session` |
+| `POST /synthesize` | `question`, `columns`, `rows` | `cypher` |
+| `POST /hydrate` | `rows` *(list of dicts)*, `source` | `key` (default `NODE`), `columns` (default `*`) |
+| `POST /explain` | `columns`, `rows` | `question`, `source`, `cypher` |
+| `POST /sql` | `sql` | `session` |
+
+GET endpoints take query params: `/graphs?engine=`, `/schema?engine=&graph=`,
+`/entities?engine=&graph=&limit=&offset=`, `/record?engine=&graph=&id=`,
+`/source_preview?source=`, `/documents?engine=&graph=`.
+
+### Extraction: folding, facets, and the provenance ledger
+
+`POST /extract` does more than MERGE. Its state (folding ontology + document ledger) lives in the
+session's selected **OLAP** engine — DuckDB tables for a DuckDB session, Kinetica tables for a
+Kinetica session — so it never mixes engines across stages.
+
+- **Label folding** — a proposed type is resolved to a canonical (deterministic alias lookup, then a
+  one-shot LLM synonym check for genuinely-new names), so `Company`/`Firm`/`Organization` collapse to
+  one label instead of sprawling. The response reports `folded: [{kind, from, to, axis}]`.
+- **Facets / axes** — an entity carries a label *vector*: one structural label plus classifying
+  facets, each on an **axis** (e.g. `Company` on `EntityType`, `AI` on `Industry`). Stored as a
+  multi-label node (FalkorDB `SET n:Company:AI`; Kinetica `LABEL VARCHAR[]` + a `label_keys`
+  grouping fed into `CREATE GRAPH`). `GET /schema` returns an `axes` grouping.
+- **Document ledger / idempotency** — each document is sha256-hashed and recorded (`doc_uri`,
+  first/last ingested, status). Re-submitting identical bytes short-circuits: the response has
+  `document.reused = true` with zero new entities. Attributes still ride on the nodes/edges for
+  Cypher hydration (FalkorDB properties / Kinetica evolved columns) — unchanged.
+
+### Interacting from the CLI
+
+Every call is a plain `curl` — no client library needed. The **FalkorDB + DuckDB combo** is two
+chained calls: FalkorDB runs the skinny traversal, DuckDB hydrates the wide attribute columns onto
+the returned ids.
+
+```bash
+# Optional — open a session that fixes the graph engine + OLAP engine, so later calls
+# can pass "session" instead of "engine". Extraction's folding ontology + document
+# ledger live in the chosen OLAP engine (here DuckDB; use "kinetica" for Kinetica state).
+curl -s -X POST localhost:8090/connect -H 'Content-Type: application/json' -d '{
+  "graph":{"engine":"falkordb"}, "compute":{"engine":"duckdb"}
+}'
+# → {"session":"s1","graphs":[...]}    # then pass "session":"s1" in place of "engine"
+
+# Discovery
+curl -s localhost:8090/engines
+curl -s 'localhost:8090/graphs?engine=falkordb'
+curl -s 'localhost:8090/schema?engine=falkordb&graph=banking_graph'
+curl -s 'localhost:8090/source_preview?source=vertexes.parquet'   # DuckDB columns + sample rows
+
+# Step 1 — FalkorDB traversal → {columns, rows, graph}
+curl -s -X POST localhost:8090/query -H 'Content-Type: application/json' -d '{
+  "engine":"falkordb","graph":"banking_graph",
+  "cypher":"MATCH (p:party) RETURN p.NODE AS NODE LIMIT 3"
+}'
+
+# Step 2 — DuckDB hydrate the returned ids against a Parquet source.
+# NOTE: rows are DICTS (not the arrays /query returns — reshape between calls),
+# and `columns` MUST include the join key so rows can be matched back.
+curl -s -X POST localhost:8090/hydrate -H 'Content-Type: application/json' -d '{
+  "rows":[{"NODE":"6cc93130-53c6-4e6f-b4cf-e4a6fab3c741"}],
+  "source":"vertexes.parquet","key":"NODE",
+  "columns":"NODE, \"party:party_name\", \"party:risk_score\""
+}'
+# → [{"NODE":"6cc9...","party:party_name":"Gracie Beier","party:risk_score":17.0}]
+
+# One-shot: /explain does the same graph→DuckDB post-join internally, then answers in English
+curl -s -X POST localhost:8090/explain -H 'Content-Type: application/json' -d '{
+  "question":"which parties are highest risk by name",
+  "columns":["NODE"],"rows":[["6cc93130-53c6-4e6f-b4cf-e4a6fab3c741"]],
+  "source":"vertexes.parquet","cypher":"MATCH (p:party) RETURN p.NODE"
+}'
+
+# Pure DuckDB OLAP over the Parquet, no graph involved
+curl -s -X POST localhost:8090/sql -H 'Content-Type: application/json' -d '{
+  "sql":"SELECT \"party:party_name\", \"party:risk_score\" FROM '\''data/vertexes.parquet'\'' WHERE label='\''party'\'' ORDER BY \"party:risk_score\" DESC LIMIT 5"
+}'
+
+# Extraction: document → fold labels to canonicals → MERGE, recording provenance.
+curl -s -X POST localhost:8090/extract -F 'graph=demo_extract' -F 'engine=falkordb' \
+  -F 'text=Anthropic is an AI firm. Google is a technology firm. Anthropic competes with Google.'
+# → {"entities":2,"relations":1,"folded":[...],"document":{"status":"new","reused":false,...}}
+# Re-submit the SAME text → sha256 idempotency short-circuits:
+#   {"document":{"reused":true,"status":"unchanged",...},"entities":0}
+curl -s 'localhost:8090/documents?engine=falkordb&graph=demo_extract'   # the provenance ledger
+```
+
+Errors come back as a uniform envelope `{"error":{code,message,engine,detail}}` with status
+`400` (bad query), `502` (engine unreachable), or `504` (timeout).
+
+### Serialization & clients
+
+The wire format is JSON only — there is no Avro/protobuf path, and none is needed: payloads are
+small, the primary consumer is a browser (`fetch`), and CLI curl-ability is intentional. FastAPI
+already serves an OpenAPI spec at `GET /openapi.json` with Swagger UI at `/docs`, so typed
+language bindings would come from OpenAPI codegen (not a schema registry). Today the POST bodies
+are declared as untyped `dict`, so the generated schemas are opaque `object`s — giving them
+Pydantic models is the prerequisite for good generated clients.
 
 ## Testing
 
