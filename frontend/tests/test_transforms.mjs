@@ -29,4 +29,27 @@ const g = require("../gateway.js");
   assert.deepEqual(g.recordFromGateway({ id: "b1", label: "bank", props: { bank_name: "Acme" } }),
                    { NODE: "b1", LABEL: "bank", bank_name: "Acme" });
 }
+// graphTableFromGateway: a multi-label (array) node label must become a JSON-array-STRING
+// so the carried-over renderer's `charAt(0) === '['` / `.split(', ')` path doesn't crash on an
+// array (that blanked the Visualize tab on extracted graphs).
+{
+  const gt = g.graphTableFromGateway({
+    nodes: [{ id: "n1", label: ["Person", "Engineer"], props: {} }],
+    edges: [{ id: "e1", source: "n1", target: "n1", type: "WORKS_FOR" }],
+  });
+  const nl = gt.nodes.records[0].NODE_LABEL;
+  assert.equal(typeof nl, "string", "NODE_LABEL must be a string (renderer calls .charAt/.split on it)");
+  assert.equal(nl, '["Person","Engineer"]');
+  assert.equal(gt.edges.records[0].EDGE_LABEL, "WORKS_FOR"); // scalar edge label unchanged
+  // Prove the renderer's normalize path now yields the real labels (no throw):
+  const parsed = nl.charAt(0) === "[" ? JSON.parse(nl) : nl.split(", ");
+  assert.deepEqual(parsed, ["Person", "Engineer"]);
+}
+// recordFromGateway: array LABEL (from props spread) coerced to JSON-array-string
+{
+  const r = g.recordFromGateway({ id: "n1", label: ["Person", "Engineer"],
+                                  props: { LABEL: ["Person", "Engineer"], name: "Tan" } });
+  assert.equal(r.LABEL, '["Person","Engineer"]');
+  assert.equal(r.name, "Tan");
+}
 console.log("transforms OK");

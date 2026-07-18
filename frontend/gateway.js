@@ -21,16 +21,26 @@
     };
   }
 
+  // A node/edge LABEL may arrive as an array (multi-label / faceted extraction,
+  // e.g. ["Person","Engineer"]). The carried-over explorer renderers expect a
+  // STRING and normalize with `v.charAt(0) === '[' ? JSON.parse(v) : v.split(', ')`
+  // — passing a raw array makes them call `.split`/`.charAt` on an array and blow
+  // up the whole view. Encode arrays as the JSON-array-STRING form the renderers
+  // already parse; leave scalars untouched.
+  function labelToString(v) {
+    return Array.isArray(v) ? JSON.stringify(v) : v;
+  }
+
   function graphTableFromGateway(res) {
     var nodes = (res && res.nodes) || [];
     var edges = (res && res.edges) || [];
     return {
       nodes: {
-        records: nodes.map(function (n) { return { NODE_NAME: n.id, NODE_LABEL: n.label }; }),
+        records: nodes.map(function (n) { return { NODE_NAME: n.id, NODE_LABEL: labelToString(n.label) }; }),
         headers: ["NODE_NAME", "NODE_LABEL"], total: nodes.length,
       },
       edges: {
-        records: edges.map(function (e) { return { NODE1_NAME: e.source, NODE2_NAME: e.target, EDGE_LABEL: e.type }; }),
+        records: edges.map(function (e) { return { NODE1_NAME: e.source, NODE2_NAME: e.target, EDGE_LABEL: labelToString(e.type) }; }),
         headers: ["NODE1_NAME", "NODE2_NAME", "EDGE_LABEL"], total: edges.length,
       },
       edgeTable: "gateway (entities)", nodeTable: "gateway (entities/nodes)",
@@ -42,6 +52,9 @@
     var out = { NODE: rec.id, LABEL: rec.label };
     var props = rec.props || {};
     for (var k in props) if (Object.prototype.hasOwnProperty.call(props, k)) out[k] = props[k];
+    // props may carry an array LABEL (it overwrites the one above); coerce the
+    // final value so the detail view never sees a raw array.
+    out.LABEL = labelToString(out.LABEL);
     return out;
   }
 
