@@ -109,3 +109,120 @@ def test_record_type_first_seen_ts_is_naive_utc(tmp_path):
         con.close()
     assert row is not None
     assert row[0].tzinfo is None
+
+
+# ---------------------------------------------------------------------------
+# KineticaComputeEngine metadata-store mirror -- live (SKIP if Kinetica
+# unreachable). Same contract as DuckDBComputeEngine above, backed by
+# xgraph_meta.documents/xgraph_meta.ontology Kinetica tables (see
+# compute/kinetica_engine.py). Uses a throwaway graph name so it never
+# touches a real graph's rows; cleanup deletes only rows WHERE
+# graph = the throwaway name (never drops the xgraph_meta tables themselves,
+# in case a real deployment already has rows in them).
+# ---------------------------------------------------------------------------
+
+import pytest
+from xgraph_gateway import config
+from xgraph_gateway.compute.kinetica_engine import (
+    KineticaComputeEngine, _DOCUMENTS_TABLE, _ONTOLOGY_TABLE, _lit,
+)
+
+_KINETICA_TEST_GRAPH = "xgraph_meta_test"
+_KINETICA_NULL_TEST_GRAPH = "xgraph_meta_null_test"
+
+
+def test_lit_renders_none_as_unquoted_null():
+    # None must become the bare SQL token NULL -- never the quoted string
+    # literal 'None' (that's the bug: str(None) == "None" would otherwise
+    # silently persist as data instead of a real SQL NULL).
+    assert _lit(None) == "NULL"
+
+
+def test_lit_renders_string_as_escaped_quoted_literal():
+    # Normal values still go through _escape_sql_literal's quoting/escaping.
+    assert _lit("O'Brien") == "'O''Brien'"
+    assert _lit("Company") == "'Company'"
+
+
+def _kinetica_engine_or_skip():
+    s = config.load_settings()
+    if not s.kinetica_url:
+        pytest.skip("KINETICA_URL not set")
+    conn = {"url": s.kinetica_url, "user": s.kinetica_user, "password": s.kinetica_pass}
+    eng = KineticaComputeEngine(conn=conn)
+    try:
+        eng._ensure_meta_schema()
+    except Exception as e:
+        pytest.skip(f"Kinetica unreachable: {e}")
+    return eng
+
+
+def _cleanup_kinetica_meta_rows(eng):
+    g = f"'{_KINETICA_TEST_GRAPH}'"
+    for table in (_DOCUMENTS_TABLE, _ONTOLOGY_TABLE):
+        try:
+            list(eng._src.rows(f"DELETE FROM {table} WHERE graph = {g}"))
+        except Exception:
+            pass
+
+
+@pytest.fixture
+def kinetica_engine():
+    eng = _kinetica_engine_or_skip()
+    _cleanup_kinetica_meta_rows(eng)
+    yield eng
+    _cleanup_kinetica_meta_rows(eng)
+
+
+def test_kinetica_metadata_roundtrip(kinetica_engine):
+    eng = kinetica_engine
+
+    first = eng.record_document(_KINETICA_TEST_GRAPH, "doc:a", "sha-1", "text")
+    assert first["status"] in ("new", "unchanged", "updated")
+    assert "first_ingested_ts" in first and "last_ingested_ts" in first
+
+    again = eng.record_document(_KINETICA_TEST_GRAPH, "doc:a", "sha-1", "text")
+    assert again["status"] == "unchanged"
+    assert again["first_ingested_ts"] == first["first_ingested_ts"]
+
+    changed = eng.record_document(_KINETICA_TEST_GRAPH, "doc:a", "sha-2", "text")
+    assert changed["status"] == "updated"
+
+    docs = eng.list_documents(_KINETICA_TEST_GRAPH)
+    assert any(d["doc_uri"] == "doc:a" for d in docs)
+
+    eng.record_type(_KINETICA_TEST_GRAPH, "entity", "Company", "Company", "EntityType", "doc:a")
+    eng.record_type(_KINETICA_TEST_GRAPH, "entity", "Firm", "Company", "EntityType", "doc:a")
+
+    assert eng.resolve_canonical(_KINETICA_TEST_GRAPH, "entity", "Company") == "Company"
+    assert eng.resolve_canonical(_KINETICA_TEST_GRAPH, "entity", "Firm") == "Company"
+    assert eng.resolve_canonical(_KINETICA_TEST_GRAPH, "entity", "company") == "Company"
+    assert eng.resolve_canonical(_KINETICA_TEST_GRAPH, "entity", "Planet") is None
+
+    assert "Company" in eng.get_canonicals(_KINETICA_TEST_GRAPH, "entity")
+    amap = eng.axis_map(_KINETICA_TEST_GRAPH, "entity")
+    assert amap["Company"] == "EntityType"
+
+
+def test_kinetica_record_type_first_seen_wins(kinetica_engine):
+    eng = kinetica_engine
+    eng.record_type(_KINETICA_TEST_GRAPH, "entity", "Company", "Company", "EntityType", "doc:a")
+    eng.record_type(_KINETICA_TEST_GRAPH, "entity", "Company", "SOMETHING_ELSE", "OtherAxis", "doc:b")
+    assert eng.resolve_canonical(_KINETICA_TEST_GRAPH, "entity", "Company") == "Company"
+
+
+def test_kinetica_record_type_null_axis_and_canonical_roundtrip(kinetica_engine):
+    # Regression for the _escape_sql_literal(None) -> "'None'" bug: record_type
+    # is a legal call with canonical_name/axis/source_uri all None (mirroring
+    # DuckDBComputeEngine, whose parameterized binding persists a real NULL for
+    # None). Uses its own throwaway graph (never the shared _KINETICA_TEST_GRAPH)
+    # so it doesn't interfere with the other ontology rows in that fixture.
+    eng = kinetica_engine
+    g = _KINETICA_NULL_TEST_GRAPH
+    try:
+        eng.record_type(g, "entity", "SomeType", canonical_name=None, axis=None, source_uri="d")
+        amap = eng.axis_map(g, "entity")
+        assert amap["SomeType"] is None  # NULL round-trips as None, not the string "None"
+        assert eng.get_canonicals(g, "entity") == [None]
+    finally:
+        list(eng._src.rows(f"DELETE FROM {_ONTOLOGY_TABLE} WHERE graph = '{g}'"))

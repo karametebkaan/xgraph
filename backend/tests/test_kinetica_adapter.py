@@ -468,3 +468,65 @@ def test_live_label_keys_accumulate_across_ingest_calls():
         assert {"Alpha", "Beta"} <= labels
     finally:
         _task8_cleanup(a, graph)
+
+
+# ---------------------------------------------------------------------------
+# get_schema `axes` -- pure unit tests for `_as_labels` (array-LABEL safety:
+# extract graphs' VARCHAR[] LABEL columns round-trip as JSON-array strings
+# over a plain SQL read, pre-existing graphs store a scalar string) plus a
+# live axes assertion on a throwaway extract graph. See kinetica_engine.py's
+# metadata store for the DuckDB-parity half of this task.
+# ---------------------------------------------------------------------------
+
+def test_as_labels_parses_json_array_string():
+    assert ka._as_labels('["Company","Organization"]') == ["Company", "Organization"]
+
+def test_as_labels_wraps_scalar_string():
+    assert ka._as_labels("address") == ["address"]
+
+def test_as_labels_passes_through_list():
+    assert ka._as_labels(["Company", "AI"]) == ["Company", "AI"]
+
+def test_as_labels_empty_for_none_or_blank():
+    assert ka._as_labels(None) == []
+    assert ka._as_labels("") == []
+
+def test_as_labels_falls_back_to_scalar_wrap_on_bad_json():
+    # Starts with '[' but isn't valid JSON -- must not raise, wraps as-is.
+    assert ka._as_labels("[not json") == ["[not json"]
+
+def test_get_schema_axes_defaults_to_entity_type_when_no_label_keys_table():
+    # expero.banking_graph has no <graph>_label_keys table -- axes must
+    # default every label onto the single EntityType axis.
+    adapter, _db = _adapter_with_capturing_db()
+    adapter._current_columns = lambda table: []  # no label_keys table found
+    axes = adapter._axes("expero.banking_graph", ["bank", "wire_message"])
+    assert axes == {"EntityType": ["bank", "wire_message"]}
+
+
+_AXES_TEST_GRAPH = "xgraph_axes_probe_test"
+
+def test_live_get_schema_axes_from_label_keys_table():
+    a = _task8_adapter_or_skip()
+    graph = _AXES_TEST_GRAPH
+    _task8_cleanup(a, graph)
+    try:
+        nodes = [
+            {"id": "ax-n1", "label": "Person", "labels": ["Person"],
+             "name": "Ada", "attrs": {}},
+            {"id": "ax-n2", "label": "Organization", "labels": ["Organization", "Company"],
+             "name": "Acme", "attrs": {}},
+        ]
+        edges = [{"id": "ax-e1", "src": "ax-n1", "dst": "ax-n2",
+                  "label": "WORKS_AT", "attrs": {}}]
+        a.ingest_elements(graph, nodes, edges)
+
+        schema = a.get_schema(graph)
+        assert "axes" in schema
+        axes = schema["axes"]
+        assert "EntityType" in axes
+        assert set(axes["EntityType"]) == {"Person", "Organization", "Company"}
+        # Flat strings, never nested lists/JSON strings leaking through.
+        assert all(isinstance(lbl, str) for lbl in axes["EntityType"])
+    finally:
+        _task8_cleanup(a, graph)

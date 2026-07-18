@@ -122,6 +122,34 @@ def _backing_tables(resp) -> tuple[str | None, str | None]:
 
     return (_first_from("nodes"), _first_from("edges"))
 
+def _as_labels(v) -> list[str]:
+    """Normalize a Kinetica LABEL/label-array value to a flat list of label
+    strings. An extract graph's `VARCHAR[]` LABEL column (Task 7+, multi-
+    label) round-trips through a plain SQL read (`KineticaSource.rows`) as a
+    JSON-array STRING (e.g. '["Company","Organization"]'), not a native
+    Python list (confirmed live -- see the task-9k report); a pre-existing
+    scalar-LABEL graph (e.g. `expero.banking_graph`) stores a bare string
+    (e.g. "address"). Both are normalized to a list here -- a scalar becomes
+    a one-element list, `None`/`""` becomes `[]` -- mirroring
+    falkordb_adapter.py's own `_as_labels` helper (same name, same contract,
+    different wire encoding to unwrap).
+    """
+    if v is None or v == "":
+        return []
+    if isinstance(v, list):
+        return [str(x) for x in v if x]
+    if isinstance(v, str):
+        s = v.strip()
+        if s.startswith("["):
+            try:
+                parsed = json.loads(s)
+            except (TypeError, ValueError):
+                parsed = None
+            if isinstance(parsed, list):
+                return [str(x) for x in parsed if x]
+        return [v]
+    return [str(v)]
+
 def _escape_sql_literal(value) -> str:
     """Escape a value for interpolation as a single-quoted SQL string literal
     (double the single quotes -- the SQL-standard escape). Kinetica SQL has no
@@ -628,7 +656,34 @@ class KineticaAdapter(GraphEngineAdapter):
         counts = _counts_from_show_graph(resp)
         properties = self._extract_node_properties(graph, labels)
         return {"labels": labels, "rel_types": rel_types, "dot": dot,
-                "properties": properties, "counts": counts}
+                "properties": properties, "counts": counts,
+                "axes": self._axes(graph, labels)}
+
+    def _axes(self, graph, labels: list[str]) -> dict:
+        """{axis: [labels]} for the ontology display -- parity with the
+        FalkorDB/fake adapters' `axes` key (see falkordb_adapter.get_schema).
+
+        Prefers the graph's materialized `<graph>_label_keys` table (the
+        kgr-style LABEL_KEY grouping ingest_elements maintains via
+        `_materialize_label_keys`/`label_keys_table_name`) when it exists --
+        that table IS the normalized axis->labels grouping, one row per axis.
+        Its `label` column is a `VARCHAR[]` that round-trips as a JSON-array
+        string over a plain SQL read (see `_as_labels`), so each row is
+        unwrapped through that same helper. Falls back to defaulting every
+        label onto the single 'EntityType' axis when there's no label_keys
+        table (e.g. `expero.banking_graph`, or an extract graph ingested
+        before axis-aware ingest) -- never raises, any failure degrades to
+        that same default.
+        """
+        try:
+            table = label_keys_table_name(graph)
+            if self._current_columns(table):
+                rows = list(self._src.rows(f"SELECT label_key, label FROM {table}"))
+                if rows:
+                    return {r["label_key"]: _as_labels(r.get("label")) for r in rows}
+        except Exception:
+            pass
+        return {"EntityType": labels}
 
     def _extract_node_properties(self, graph, labels: list[str]) -> dict:
         """Per-label property keys (for NL->Cypher grounding, see
@@ -886,14 +941,7 @@ class KineticaAdapter(GraphEngineAdapter):
         labels: set[str] = set()
         try:
             for r in self._src.rows(f"SELECT DISTINCT LABEL FROM {node_table}"):
-                val = r.get("LABEL")
-                if isinstance(val, str):
-                    try:
-                        val = json.loads(val)
-                    except (TypeError, ValueError):
-                        val = None
-                if isinstance(val, list):
-                    labels.update(lbl for lbl in val if lbl)
+                labels.update(_as_labels(r.get("LABEL")))
         except Exception:
             return set()
         return labels
