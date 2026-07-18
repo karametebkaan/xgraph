@@ -44,11 +44,19 @@ class KineticaSource:
             resp = self._db.execute_sql_and_decode(
                 sql, offset=offset, limit=self._page_size, get_column_major=False
             )
-            records = resp.records
+            # Some responses (notably GRAPH ... MATCH queries) don't carry a
+            # `records` attribute or a `has_more_records` key -- accessing them
+            # raised AttributeError and crashed the whole query (and made the
+            # live NL->query test flaky). Access defensively: no records => empty
+            # result, no has_more => stop. (Diverges from falkor's graph_loader.)
+            records = getattr(resp, "records", None)
+            if records is None:
+                records = resp["records"] if "records" in resp else []
             for rec in records:
                 yield dict(rec)
 
             offset += len(records)
 
-            if not records or not resp["has_more_records"]:
+            has_more = resp["has_more_records"] if "has_more_records" in resp else False
+            if not records or not has_more:
                 break
