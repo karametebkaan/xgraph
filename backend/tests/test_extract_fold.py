@@ -141,3 +141,38 @@ def test_no_facets_still_builds_singleton_vector():
     extract_fold.fold_labels(store, "g", ents, [], "doc", llm=_no_llm)
     assert ents[0]["labels"] == ["Person"]
     assert ents[0]["label_raw"] == ["Person"]
+
+
+def test_fresh_graph_makes_no_foldcheck_llm_calls():
+    """Perf regression guard: on a fresh graph (no pre-existing canonicals) folding
+    must make ZERO fold-check LLM calls — nothing to fold into. This is what made a
+    single-sentence extraction fire ~7 sequential claude-CLI calls."""
+    store = FakeStore()
+    calls = {"n": 0}
+    def counting_llm(prompt, *, schema=None):
+        calls["n"] += 1
+        return {"canonical": None}
+    ents = [{"name": "Kaan", "label": "Person",
+             "facets": [{"name": "Engineer", "axis": "Role"}], "attrs": {}},
+            {"name": "Acme", "label": "Organization", "facets": [], "attrs": {}}]
+    rels = [{"src": "Kaan", "dst": "Acme", "label": "WORKS_FOR", "attrs": {}}]
+    extract_fold.fold_labels(store, "g", ents, rels, "doc", llm=counting_llm)
+    assert calls["n"] == 0
+    assert store.resolve_canonical("g", "entity", "Person") == "Person"
+    assert store.resolve_canonical("g", "entity", "Engineer") == "Engineer"
+    assert store.resolve_canonical("g", "relation", "WORKS_FOR") == "WORKS_FOR"
+
+
+def test_foldcheck_only_against_preexisting_canonicals():
+    """When canonicals DO pre-exist, folding still consults the LLM (once here) and
+    folds — cross-run synonym folding is preserved."""
+    store = FakeStore()
+    store.record_type("g", "entity", "Company", "Company", "EntityType", "seed")
+    calls = {"n": 0}
+    def counting_llm(prompt, *, schema=None):
+        calls["n"] += 1
+        return {"canonical": "Company"}
+    ents = [{"name": "Acme", "label": "Corporation", "facets": [], "attrs": {}}]
+    extract_fold.fold_labels(store, "g", ents, [], "doc", llm=counting_llm)
+    assert calls["n"] == 1
+    assert ents[0]["label"] == "Company"

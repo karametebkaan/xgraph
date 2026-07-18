@@ -65,9 +65,18 @@ def fold_check_via_llm(kind, proposed_name, existing_canonicals, llm):
     return None
 
 
-def _resolve_one(store, graph, kind, name, axis, llm, cache, report, source_uri):
+def _resolve_one(store, graph, kind, name, axis, llm, cache, report, source_uri, pre_canon):
     """Resolve a single (kind, name) to a canonical, learning + persisting the
-    decision. `cache` dedupes within one call; `report` accumulates folds."""
+    decision. `cache` dedupes within one call; `report` accumulates folds.
+
+    `pre_canon[kind]` is the set of canonicals that existed BEFORE this
+    extraction call — the only valid fold targets. We deliberately do NOT
+    fold-check against canonicals recorded during this same call: on a fresh
+    graph that set is empty, so `fold_check_via_llm` short-circuits and makes
+    ZERO LLM calls (each fold-check is a slow `claude` CLI round-trip, and one
+    document introducing N new types would otherwise fire N of them). Cross-run
+    folding — a later document's `Firm` folding into an earlier document's
+    `Company` — is preserved, because by then `Company` is pre-existing."""
     name = (name or "").strip()
     if not name:
         return name
@@ -77,7 +86,7 @@ def _resolve_one(store, graph, kind, name, axis, llm, cache, report, source_uri)
 
     canonical = store.resolve_canonical(graph, kind, name)
     if canonical is None:
-        existing = store.get_canonicals(graph, kind)
+        existing = pre_canon.get(kind) or []
         fold_to = fold_check_via_llm(kind, name, existing, llm)
         if fold_to:
             store.record_type(graph, kind, name, fold_to, axis, source_uri)
@@ -98,11 +107,17 @@ def fold_labels(store, graph, entities, relations, source_uri, llm=None):
     llm = llm or _get_llm()
     cache: dict = {}
     report: list = []
+    # Snapshot the pre-existing canonicals ONCE (fold targets). Types recorded
+    # during this call are intentionally excluded — see _resolve_one.
+    pre_canon = {
+        "entity": store.get_canonicals(graph, "entity"),
+        "relation": store.get_canonicals(graph, "relation"),
+    }
     for e in entities:
         raw_struct = (e.get("label") or "").strip()
         struct_canon = _resolve_one(store, graph, "entity",
                                     raw_struct, _ENTITY_AXIS, llm, cache, report,
-                                    source_uri)
+                                    source_uri, pre_canon)
         e["label"] = struct_canon
         labels = [struct_canon] if struct_canon else []
         label_raw = [raw_struct] if raw_struct else []
@@ -113,7 +128,7 @@ def fold_labels(store, graph, entities, relations, source_uri, llm=None):
                 continue
             f_canon = _resolve_one(store, graph, "entity",
                                    f_name, f_axis, llm, cache, report,
-                                   source_uri)
+                                   source_uri, pre_canon)
             label_raw.append(f_name)
             if f_canon and f_canon not in labels:
                 labels.append(f_canon)
@@ -122,5 +137,5 @@ def fold_labels(store, graph, entities, relations, source_uri, llm=None):
     for r in relations:
         r["label"] = _resolve_one(store, graph, "relation",
                                   r.get("label", ""), _RELATION_AXIS, llm, cache, report,
-                                  source_uri)
+                                  source_uri, pre_canon)
     return report
