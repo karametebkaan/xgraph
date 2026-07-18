@@ -218,41 +218,67 @@ mixes engines across stages.
 
 Worked example — extracting one sentence:
 
-> *"Anthropic is an AI firm. Google is a technology company."*
+> *"Anthropic is an AI startup. Google is a technology firm."*
 
-**1. Label folding = collapse synonymous type names into one canonical.**
-The LLM tags Anthropic's type as `Firm` and Google's as `Company`. Those mean the same thing, but
-left alone the graph would carry two labels for one concept. Folding resolves each proposed type to a
-canonical — first a cheap exact/alias lookup, then, *only* for a genuinely new name, one yes/no LLM
-check ("is `Firm` a synonym of an existing type?"). So `Firm` **folds into** `Company`, both nodes
-end up labeled `Company`, and the learned alias `Firm → Company` is saved so it's free next time. The
+**1. Label folding — collapse synonymous type names into one canonical.**
+The LLM tags Anthropic's type as `startup` and Google's as `firm`. Both mean "company"; left alone the
+graph sprawls into a distinct label per phrasing. Folding resolves each proposed type to a canonical —
+first a cheap exact/alias lookup, then, *only* for a genuinely new name, one yes/no LLM check ("is
+`startup` a synonym of an existing type?"):
+
+```text
+Anthropic  →  LABEL "Company"      ("startup" folds to Company)
+Google     →  LABEL "Company"      ("firm"    folds to Company)
+```
+
+The learned aliases (`startup → Company`, `firm → Company`) are saved, so they're free next time. The
 response lists every fold applied:
 
 ```json
-"folded": [ {"kind": "entity", "from": "Firm", "to": "Company", "axis": "EntityType"} ]
+"folded": [ {"kind": "entity", "from": "startup", "to": "Company", "axis": "EntityType"} ]
 ```
 
-**2. A facet is a second label on a different dimension; the axis names that dimension.**
-"AI" also describes Anthropic — but it isn't its *structural* type, it's an industry classification.
-So it rides along as a **facet** `{"name": "AI", "axis": "Industry"}`. After folding, Anthropic
-carries a label **vector**, not one label:
+**2. Facets — one label isn't enough; a node carries a label *vector*.**
+That single-label result is clean but **lossy** — "AI" and "technology" as *classifications* of these
+companies just vanish (they aren't structural types, so folding either discards them or, worse, mints
+a bogus `AI startup` entity label). So those ride along as **facets** instead, and a node gets a label
+vector:
+
+```text
+Anthropic  →  LABEL ["Company", "AI"]
+Google     →  LABEL ["Company", "Technology"]
+```
+
+`Company` is the **structural** type; `AI`/`Technology` are facets — extra classifying labels on the
+same node. Per entity the extractor produces:
 
 | field | value | meaning |
 |---|---|---|
-| `label` | `"Company"` | the structural type (on the `EntityType` axis) |
+| `label` | `"Company"` | the structural type (folded) |
 | `labels` | `["Company", "AI"]` | full vector — structural first, then facets |
-| `label_raw` | `["Firm", "AI"]` | original pre-fold names, kept for provenance |
+| `label_raw` | `["startup", "AI"]` | original pre-fold names, kept for provenance |
 
-An **axis** is just the dimension a label classifies on: `Company` sits on `EntityType`, `AI` on
-`Industry`. It's stored natively per engine (FalkorDB `SET n:Company:AI`; Kinetica `LABEL VARCHAR[]`
-+ a `label_keys` grouping fed into `CREATE GRAPH`), and `GET /schema` groups the graph's labels by
-axis:
+**3. Axis (a.k.a. `LABEL_KEY`) — which dimension each label belongs to.**
+A bare vector `["Company", "AI"]` is an undifferentiated bag. The **axis** says what dimension each
+label classifies on:
+
+| label | axis (`LABEL_KEY`) |
+|---|---|
+| `Company` | `EntityType` (structural: Person / Company / Product…) |
+| `AI` | `Industry` |
+| `Technology` | `Industry` |
+
+So Anthropic reads as *"a **Company** (on the EntityType axis) that is **AI** (on the Industry
+axis)."* Each engine stores this natively — FalkorDB `SET n:Company:AI`; Kinetica `LABEL VARCHAR[]`
+plus a `label_keys` table, which is just the *transposed* materialization (one row per axis holding
+all its labels) that `CREATE GRAPH` feeds in so `/show/graph` groups a node's vector by axis into a
+compact ontology. `GET /schema` returns that grouping:
 
 ```json
 "axes": { "EntityType": ["Company", "Person"], "Industry": ["AI", "Technology"] }
 ```
 
-**3. The provenance ledger records which documents built the graph — making re-runs safe.**
+**4. The provenance ledger records which documents built the graph — making re-runs safe.**
 Every document is fingerprinted (sha256) and written to a per-graph ledger row: `doc_uri`, `sha256`,
 first/last-ingested timestamps, status. *Provenance* means the graph knows where its data came from
 and when. It also makes extraction **idempotent** — submit the exact same bytes again and `/extract`
