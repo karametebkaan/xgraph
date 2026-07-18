@@ -49,27 +49,35 @@ def create_app(adapter_factory=registry.get_adapter, compute=None, store=None) -
             resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
         return resp
 
+    def _sess(session):
+        # Session dict, or None when the id is stale/unknown (e.g. after a
+        # gateway restart cleared the in-memory store). Callers then fall back to
+        # the request's `engine`/defaults instead of hard-failing with a 400 --
+        # the client sends `engine` alongside `session` for exactly this.
+        if not session:
+            return None
+        try:
+            return store.get(session)
+        except KeyError:
+            return None
+
     def _resolve_adapter(session, engine):
-        if session:
-            return store.get(session)["adapter"]
-        return adapter_factory(engine)
+        s = _sess(session)
+        return s["adapter"] if s else adapter_factory(engine)
 
     def _resolve_compute(session):
-        if session:
-            return store.get(session)["compute"]
-        return compute
+        s = _sess(session)
+        return s["compute"] if s else compute
 
     def _resolve_engine(session, engine):
-        if session:
-            return store.get(session)["graph_engine"]
-        return engine
+        s = _sess(session)
+        return s["graph_engine"] if s else engine
 
     def _resolve_extract_mode(session):
         # Reads the SessionStore (not the compute store that extract_endpoint
         # locally shadows as `store`); defaults to the conservative sequential.
-        if session:
-            return store.get(session).get("extract_mode", "sequential")
-        return "sequential"
+        s = _sess(session)
+        return s.get("extract_mode", "sequential") if s else "sequential"
 
     @app.get("/engines")
     def engines():

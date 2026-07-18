@@ -72,19 +72,22 @@
     var f = fetchImpl || (typeof fetch !== "undefined" ? fetch : null);
     var session = null; // set once connect() resolves; overrides legacy `engine` when present
 
+    // Send BOTH session (backend-preferred) and engine (fallback if the session
+    // is stale, e.g. after a gateway restart) so calls degrade gracefully.
     var q = function (path) {
       var sep = path.indexOf("?") >= 0 ? "&" : "?";
-      if (session) return base + path + sep + "session=" + encodeURIComponent(session);
-      if (engine) return base + path + sep + "engine=" + encodeURIComponent(engine);
-      return base + path;
+      var parts = [];
+      if (session) parts.push("session=" + encodeURIComponent(session));
+      if (engine) parts.push("engine=" + encodeURIComponent(engine));
+      return parts.length ? base + path + sep + parts.join("&") : base + path;
     };
 
-    // Merge session (preferred) or legacy engine into a POST body, without mutating the caller's object.
+    // Merge session (preferred) AND engine (fallback) into a POST body, without mutating the caller's object.
     function withSessionOrEngine(payload) {
       var out = {};
       for (var k in payload) if (Object.prototype.hasOwnProperty.call(payload, k)) out[k] = payload[k];
       if (session) out.session = session;
-      else if (engine) out.engine = engine;
+      if (engine) out.engine = engine;
       return out;
     }
 
@@ -105,9 +108,9 @@
     }
     async function postFormWithAuth(path, formData) {
       // Multipart: do NOT set Content-Type — the browser/runtime must set the
-      // boundary itself. Session (preferred) or legacy engine, like postJSONWithAuth.
+      // boundary itself. Session (preferred) AND engine (fallback), like postJSONWithAuth.
       if (session) formData.append("session", session);
-      else if (engine) formData.append("engine", engine);
+      if (engine) formData.append("engine", engine);
       var res = await f(base + path, { method: "POST", body: formData });
       var body = await res.json();
       if (body && body.error) throw new Error(body.error.message || "gateway error");

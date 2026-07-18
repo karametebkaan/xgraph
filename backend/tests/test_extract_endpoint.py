@@ -285,3 +285,11 @@ def test_frontend_assets_are_no_cache(tmp_path):
     # build after a deploy (bit the user: missing radio + old viz crash).
     r = _client(tmp_path).get("/")
     assert "no-store" in r.headers.get("cache-control", "").lower()
+
+
+def test_stale_session_falls_back_to_engine(tmp_path):
+    # A gateway restart clears in-memory sessions; a stale session id + engine
+    # must degrade gracefully (fall back to engine), not 400 "unknown session".
+    r = _client(tmp_path).get("/graphs", params={"session": "s999", "engine": "fake"})
+    assert r.status_code == 200
+    assert r.json() == ["demo_graph"]  # FakeAdapter.list_graphs()

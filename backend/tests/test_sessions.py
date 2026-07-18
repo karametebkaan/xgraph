@@ -70,13 +70,15 @@ def test_backcompat_query_endpoint_no_session():
     assert body["columns"] == ["NODE"]
     assert ["b1"] in body["rows"]
 
-def test_unknown_session_returns_error_envelope():
-    r = _client().get("/graphs", params={"session": "s999"})
-    assert r.status_code == 400
-    assert "unknown session" in r.json()["error"]["message"]
+def test_unknown_session_falls_back_to_engine():
+    # A stale session (e.g. after a gateway restart cleared the in-memory store)
+    # degrades gracefully to the request's engine instead of hard-failing.
+    r = _client().get("/graphs", params={"session": "s999", "engine": "fake"})
+    assert r.status_code == 200
+    assert r.json() == ["demo_graph"]
 
-def test_unknown_session_on_query_returns_error_envelope():
+def test_unknown_session_on_query_falls_back_to_engine():
     c = _client()
-    r = c.post("/query", json={"session": "s999", "graph": "g", "cypher": "x"})
-    assert r.status_code == 400
-    assert "error" in r.json()
+    r = c.post("/query", json={"session": "s999", "engine": "fake", "graph": "g", "cypher": "x"})
+    assert r.status_code == 200
+    assert "columns" in r.json()  # ran on the fallback FakeAdapter
