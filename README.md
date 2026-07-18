@@ -291,6 +291,15 @@ To point a *single session* at a different server instead, pass a `conn` overrid
 the returned `session` then carries those credentials so later calls need only `"session"`:
 
 ```bash
+# FalkorDB only — password-authenticated graph, DuckDB as the local OLAP store.
+# FalkorDB auth is password-only over RESP (no username); omit "password" if unauthenticated.
+curl -s -X POST localhost:8090/connect -H 'Content-Type: application/json' -d '{
+  "graph":   {"engine":"falkordb", "conn":{"host":"10.0.0.5","port":6379,"password":"s3cret"}},
+  "compute": {"engine":"duckdb"}
+}'
+# → {"session":"s1","graphs":[...]}   # pass "session":"s1" on later calls
+
+# Both engines at once — FalkorDB graph + Kinetica OLAP, each with its own conn keys.
 curl -s -X POST localhost:8090/connect -H 'Content-Type: application/json' -d '{
   "graph":   {"engine":"falkordb", "conn":{"host":"10.0.0.5","port":6379,"password":"s3cret"}},
   "compute": {"engine":"kinetica", "conn":{"url":"http://10.0.0.9:9191","user":"admin","password":"pw"}}
