@@ -47,7 +47,7 @@
 const { useState, useEffect, useRef, useCallback, useMemo } = React;
 
 /* ═══════════════════════ CONSTANTS ════════════════════════ */
-const EXPLORER_VERSION = "0.3.3";  // xGraph version — bump on frontend changes so a stale browser cache is visible
+const EXPLORER_VERSION = "0.3.4";  // xGraph version — bump on frontend changes so a stale browser cache is visible
 const SAFETY_TIMEOUT_MS = 10 * 60 * 1000;
 const PALETTE = [
     { solid: '#0984e3', light: '#e1f0fb' }, { solid: '#00cec9', light: '#e0f9f8' },
@@ -6762,6 +6762,11 @@ function CreatePanel(props) {
     // {statement:null} there and the render below falls back to createHistory
     // / extractSources.
     const [activeDdl, setActiveDdl] = useState(null);
+    // The active graph was built via Extract (attrs on the nodes) -- the
+    // Parquet-build form below doesn't describe it, so collapse it by default
+    // and let the user opt in to building a *different* Parquet-backed graph.
+    var isExtracted = extractSources.some(function(s){ return s.graph === activeGraph && (s.engine === graphEngine || !s.engine); });
+    const [showCreateForm, setShowCreateForm] = useState(false);
     useEffect(function() {
         if (!gwClient || !activeGraph) { setActiveDdl(null); return; }
         gwClient.graphDdl(activeGraph).then(setActiveDdl).catch(function(){ setActiveDdl(null); });
@@ -6878,6 +6883,12 @@ function CreatePanel(props) {
                 );
             })()}
 
+            {isExtracted && !showCreateForm ? (
+                <p style={{ fontSize:12, color:'#636e72', margin:'8px 0 0' }}>
+                    Built from documents via Extract — there's no Parquet recipe to rebuild it here. Add more with the <b>Extract</b> tab, or{' '}
+                    <a href="#" onClick={function(e){ e.preventDefault(); setShowCreateForm(true); }} style={{ color:'#0984e3', fontWeight:600 }}>build a different graph from a Parquet source →</a>
+                </p>
+            ) : (<React.Fragment>
             <Label>Graph name</Label>
             <input style={inp} value={createGraphName} onChange={function(e){ setCreateGraphName(e.target.value); }} placeholder="banking_graph_duckdb" />
 
@@ -6936,6 +6947,7 @@ function CreatePanel(props) {
             }}>{status.loading ? 'Creating…' : 'Create / Replace graph'}</button>
             {status.loading && <p style={{ marginTop:10, fontSize:12, color:'#636e72' }}>Creating… (this can take ~30s for a large graph)</p>}
             {!status.loading && status.text && <p style={{ marginTop:10, fontSize:12, color: status.error ? '#d63031' : '#00b894', fontWeight:600 }}>{status.text}</p>}
+            </React.Fragment>)}
         </div>
     );
 }
