@@ -115,8 +115,8 @@
     }
 
     return {
-      connect: async function (graph, compute) {
-        var res = await postJSON("/connect", { graph: graph, compute: compute });
+      connect: async function (graph, compute, llm) {
+        var res = await postJSON("/connect", { graph: graph, compute: compute, llm: llm });
         if (res && res.session) session = res.session;
         return res;
       },

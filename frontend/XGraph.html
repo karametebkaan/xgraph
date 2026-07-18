@@ -6672,7 +6672,14 @@ function SetupPanel(props) {
                 </div>
                 <Label>API key</Label>
                 <input type={pwType} autoComplete="new-password" style={Object.assign({}, inp, { marginBottom:6 })} value={llmConn.apiKey || ''} onChange={function(e){ setLlmField('apiKey', e.target.value); }} placeholder="(optional — falls back to claude CLI / env)" />
-                <p style={{ fontSize:11, color:'#b2bec3', margin:0 }}>via claude CLI / Anthropic SDK · model claude-opus-4-7</p>
+                <p style={{ fontSize:11, color:'#b2bec3', margin:'0 0 12px' }}>via claude CLI / Anthropic SDK (SDK used when an API key is set) · extraction on Haiku</p>
+                <Label>Extraction mode</Label>
+                <div style={{ marginTop:4 }}>
+                    <label style={radioLbl}><input type="radio" checked={(llmConn.extractMode || 'sequential') === 'sequential'} onChange={function(){ setLlmField('extractMode', 'sequential'); }}/> Sequential</label>
+                    <label style={radioLbl}><input type="radio" checked={llmConn.extractMode === 'parallel'} onChange={function(){ setLlmField('extractMode', 'parallel'); }}/> Parallel</label>
+                    <label style={radioLbl}><input type="radio" checked={llmConn.extractMode === 'whole'} onChange={function(){ setLlmField('extractMode', 'whole'); }}/> Whole-doc</label>
+                </div>
+                <p style={{ fontSize:11, color:'#b2bec3', margin:'4px 0 0' }}>Sequential: one paragraph per LLM call (default). Parallel: paragraphs concurrent. Whole-doc: one call — keeps relations that span paragraphs.</p>
             </div>
 
             {/* Gateway URL — unchanged from the pre-shell Sidebar. */}
@@ -7813,7 +7820,7 @@ function App() {
     const [olapEngine, setOlapEngine]   = useState('duckdb');
     const [olapConn, setOlapConn]       = useState({ url:'http://127.0.0.1:9191', user:'admin', password:'' });
     const [llmEngine, setLlmEngine]     = useState('claude'); // single option today; kept for the later LLM slice
-    const [llmConn, setLlmConn]         = useState({ apiKey:'' });
+    const [llmConn, setLlmConn]         = useState({ apiKey:'', extractMode:'sequential' });
     const [connectStatus, setConnectStatus] = useState({ text:'', error:false, loading:false });
     // Flips true on a successful /connect — gates the Create action-bar tab
     // even before any graphs exist (Create is how the first one gets made),
@@ -7867,7 +7874,7 @@ function App() {
             // Kinetica graph + Kinetica OLAP share one login — don't ask twice.
             var computeConn = (olapEngine === 'kinetica' && graphEngine === 'kinetica') ? graphConn : olapConn;
             var compute = { engine: olapEngine, conn: computeConn };
-            var llm = { engine: 'claude', conn: llmConn };
+            var llm = { engine: 'claude', conn: llmConn, extract_mode: llmConn.extractMode || 'sequential' };
             var res = await gwClient.connect(graph, compute, llm);
             var names = (res && res.graphs) || [];
             setGraphs(names);
