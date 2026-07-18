@@ -13,6 +13,7 @@ from xgraph_gateway.adapters.kinetica_adapter import (
     create_graph_sql,
     discover_attr_columns,
     edge_table_name,
+    label_keys_table_name,
     node_table_name,
 )
 
@@ -214,7 +215,8 @@ def _drop_test_graph(adapter):
         adapter._db.delete_graph(graph_name=_TEST_GRAPH)
     except Exception:
         pass
-    for table in (node_table_name(_TEST_GRAPH), edge_table_name(_TEST_GRAPH)):
+    for table in (node_table_name(_TEST_GRAPH), edge_table_name(_TEST_GRAPH),
+                  label_keys_table_name(_TEST_GRAPH)):
         try:
             adapter._db.execute_sql(f"DROP TABLE IF EXISTS {table}")
         except Exception:

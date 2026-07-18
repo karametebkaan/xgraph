@@ -8,6 +8,7 @@ from xgraph_gateway.adapters.kinetica_adapter import (
     create_table_sql,
     edge_rows,
     edge_table_name,
+    label_keys_table_name,
     node_rows,
     node_table_name,
 )
@@ -124,11 +125,17 @@ def _edges():
     ]
 
 def test_node_rows_shape():
+    # Task 8: LABEL is now a multi-label vector (falls back to [label] when
+    # the caller doesn't supply one), plus label_raw + provenance timestamps
+    # -- see test_kinetica_adapter.py for the dedicated array-LABEL tests.
     rows = node_rows(_nodes())
-    assert rows == [
-        {"NODE": "n1", "LABEL": "Person", "name": "Jerome Powell"},
-        {"NODE": "n2", "LABEL": "Organization", "name": "Federal Reserve"},
-    ]
+    assert rows[0]["NODE"] == "n1"
+    assert rows[0]["LABEL"] == ["Person"]
+    assert rows[0]["label_raw"] == ["Person"]
+    assert rows[0]["name"] == "Jerome Powell"
+    assert "first_seen_ts" in rows[0] and "last_seen_ts" in rows[0]
+    assert rows[1]["NODE"] == "n2"
+    assert rows[1]["LABEL"] == ["Organization"]
 
 def test_edge_rows_shape():
     rows = edge_rows(_edges())
@@ -202,7 +209,8 @@ def _drop_test_graph(adapter):
         adapter._db.delete_graph(graph_name=_TEST_GRAPH)
     except Exception:
         pass
-    for table in (node_table_name(_TEST_GRAPH), edge_table_name(_TEST_GRAPH)):
+    for table in (node_table_name(_TEST_GRAPH), edge_table_name(_TEST_GRAPH),
+                  label_keys_table_name(_TEST_GRAPH)):
         try:
             adapter._db.execute_sql(f"DROP TABLE IF EXISTS {table}")
         except Exception:

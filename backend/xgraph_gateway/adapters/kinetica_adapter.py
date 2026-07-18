@@ -1,6 +1,7 @@
 from __future__ import annotations
 import json
 import re
+from datetime import datetime, timezone
 from gpudb import GPUdb
 from xgraph_gateway import config
 from .base import GraphEngineAdapter
@@ -233,6 +234,9 @@ def node_table_name(graph: str) -> str:
 def edge_table_name(graph: str) -> str:
     return _qualified_table_name(graph, "_edges")
 
+def label_keys_table_name(graph: str) -> str:
+    return _qualified_table_name(graph, "_label_keys")
+
 def create_schema_sql(graph: str) -> str | None:
     """`CREATE SCHEMA IF NOT EXISTS <schema>` for a dotted graph name, or None
     if `graph` is unqualified (nothing to create -- the default schema is
@@ -252,8 +256,11 @@ def create_table_sql(table: str, kind: str) -> str:
         return (
             f"CREATE TABLE IF NOT EXISTS {table} (\n"
             "    NODE VARCHAR(256, PRIMARY_KEY, SHARD_KEY) NOT NULL,\n"
-            "    LABEL VARCHAR(256),\n"
-            "    name VARCHAR(1024)\n"
+            "    LABEL VARCHAR[],\n"
+            "    label_raw VARCHAR[],\n"
+            "    name VARCHAR(1024),\n"
+            "    first_seen_ts TIMESTAMP,\n"
+            "    last_seen_ts TIMESTAMP\n"
             ")"
         )
     if kind == "edge":
@@ -266,6 +273,51 @@ def create_table_sql(table: str, kind: str) -> str:
             ")"
         )
     raise ValueError(f"unknown create_table_sql kind: {kind!r}")
+
+# ---------------------------------------------------------------------------
+# label_keys -- kgr-style LABEL_KEY (axis) grouping table: one row per axis,
+# holding the array of node labels that belong to it (e.g. "EntityType" ->
+# ["Company", "Person"]). Materialized per-graph, rebuilt before every
+# CREATE GRAPH (see KineticaAdapter._materialize_label_keys) and fed in as a
+# second NODES input (see create_graph_sql's label_keys_table param) so
+# Kinetica's graph schema can group the multi-label vector by axis. The
+# adapter has no ontology-store handle here, so every label defaults to the
+# single "EntityType" axis (kgr's own default) -- a later task refines this
+# once the metadata store is reachable from ingest_elements.
+# ---------------------------------------------------------------------------
+
+_DEFAULT_LABEL_AXIS = "EntityType"
+
+def create_label_keys_table_sql(table: str) -> str:
+    """DDL for the label_keys grouping table: `label_key` (axis name, PK) ->
+    `label` (VARCHAR[] of the node labels on that axis). `table` is expected
+    pre-validated (from label_keys_table_name)."""
+    return (
+        f"CREATE TABLE IF NOT EXISTS {table} (\n"
+        "    label_key VARCHAR(64, PRIMARY_KEY, SHARD_KEY) NOT NULL,\n"
+        "    label VARCHAR[]\n"
+        ")"
+    )
+
+def label_keys_rows(nodes: list[dict], default_axis: str = _DEFAULT_LABEL_AXIS) -> list[dict]:
+    """Group the distinct labels across `nodes` under `default_axis` -- one
+    row `{label_key, label}` (or `[]` if there are no labels at all). Every
+    node's full label vector (`_node_label_vector`: `labels` or `[label]`)
+    contributes; axis metadata isn't reachable from the adapter here, so
+    there is exactly one axis for now (refined once the ontology store is
+    consulted, see the module docstring above). `nodes` need not be a real
+    ingest payload -- `_materialize_label_keys` calls this with a single
+    synthetic `{"labels": [...]}` entry built from the node table's actual
+    accumulated label set, so the row reflects every label ever ingested
+    into the graph, not just this call's."""
+    labels: set[str] = set()
+    for n in nodes:
+        for lbl in _node_label_vector(n):
+            if lbl:
+                labels.add(lbl)
+    if not labels:
+        return []
+    return [{"label_key": default_axis, "label": sorted(labels)}]
 
 # Kinetica's CREATE GRAPH DDL grammar special-cases certain result-column
 # names inside the NODES INPUT_TABLES select as identity aliases: NODE (also
@@ -284,7 +336,8 @@ _NAME_PROPERTY = "entity_name"
 
 def create_graph_sql(graph: str, node_table: str, edge_table: str,
                       node_attr_cols: list[str] | None = None,
-                      edge_attr_cols: list[str] | None = None) -> str:
+                      edge_attr_cols: list[str] | None = None,
+                      label_keys_table: str | None = None) -> str:
     """`CREATE OR REPLACE DIRECTED GRAPH` DDL over the node/edge backing
     tables. `graph` is validated (dot-part-wise) via safe_ident before
     interpolation; `node_table`/`edge_table` are expected pre-validated
@@ -295,26 +348,80 @@ def create_graph_sql(graph: str, node_table: str, edge_table: str,
     caller-supplied column list blindly), and only appended if present, so
     the base 3-/4-column shape (and the `name AS entity_name` alias -- see
     `_NAME_PROPERTY`) is unchanged when there are no attrs yet.
+
+    `label_keys_table`, if given, is a second NODES input -- the kgr-style
+    LABEL_KEY (axis) grouping table (see `_materialize_label_keys`) -- added
+    as a SIBLING select inside the same `NODES => INPUT_TABLES(...)` list,
+    matching kgr's `graph.sql` verbatim:
+        NODES => INPUT_TABLES(
+            (SELECT label_key AS LABEL_KEY, label AS LABEL FROM <label_keys_table>),
+            (SELECT ... FROM <node_table>)
+        )
+    (NOT a trailing clause appended after the node select -- Kinetica's CREATE
+    GRAPH grammar takes the LABEL_KEY grouping as one more member of the same
+    INPUT_TABLES(...) tuple list.) `label_keys_table` is re-validated
+    dot-part-wise via safe_ident, same as `graph`.
     """
     graph_ident = ".".join(safe_ident(p) for p in str(graph).split("."))
     node_cols = [safe_ident(c) for c in (node_attr_cols or [])]
     edge_cols = [safe_ident(c) for c in (edge_attr_cols or [])]
     node_select = ", ".join(["NODE", "LABEL", f"name AS {_NAME_PROPERTY}"] + node_cols)
     edge_select = ", ".join(["NODE1", "NODE2", "LABEL"] + edge_cols)
+    if label_keys_table:
+        lk_ident = ".".join(safe_ident(p) for p in str(label_keys_table).split("."))
+        nodes_clause = (
+            "INPUT_TABLES(\n"
+            f"        (SELECT label_key AS LABEL_KEY, label AS LABEL FROM {lk_ident}),\n"
+            f"        (SELECT {node_select} FROM {node_table})\n"
+            "    )"
+        )
+    else:
+        nodes_clause = f"INPUT_TABLES((SELECT {node_select} FROM {node_table}))"
     return (
         f"CREATE OR REPLACE DIRECTED GRAPH {graph_ident} (\n"
-        f"    NODES => INPUT_TABLES((SELECT {node_select} FROM {node_table})),\n"
+        f"    NODES => {nodes_clause},\n"
         f"    EDGES => INPUT_TABLES((SELECT {edge_select} FROM {edge_table})),\n"
         "    OPTIONS => KV_PAIRS(save_persist = 'true')\n"
         ")"
     )
 
+def _now_ts_str() -> str:
+    """Current time as a naive-UTC 'YYYY-MM-DD HH:MM:SS.mmm' string -- the
+    same naive-UTC convention as compute/duckdb_engine.py's record_document
+    (`datetime.now(timezone.utc).replace(tzinfo=None)`), formatted to
+    millisecond precision as a string because insert_records_json's payload
+    is JSON (a raw `datetime` object isn't JSON-serializable) and Kinetica's
+    TIMESTAMP JSON-insert format is millisecond-precision, not microsecond
+    (confirmed live: a 3-digit-ms string round-trips through insert_records_json
+    -> show_table as the expected epoch-ms TIMESTAMP)."""
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    return now.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+
+def _node_label_vector(n: dict) -> list[str]:
+    """A node's multi-label vector: `labels` if present (Task 6/7's
+    facet-carrying entities), else a one-element fallback `[label]` (older
+    single-label callers), else `[]` if neither is present."""
+    return n.get("labels") or ([n["label"]] if n.get("label") else [])
+
 def node_rows(nodes: list[dict]) -> list[dict]:
-    """[{id,label,name,attrs}] -> insert_records_json payload dicts
-    ({NODE,LABEL,name}), dropping rows with no identity (mirrors
-    graph_loader.mapper's null-id row discard)."""
-    return [{"NODE": n["id"], "LABEL": n.get("label"), "name": n.get("name")}
-            for n in nodes if n.get("id") is not None]
+    """[{id,label,labels?,label_raw?,name,attrs}] -> insert_records_json
+    payload dicts ({NODE,LABEL,label_raw,name,first_seen_ts,last_seen_ts}),
+    dropping rows with no identity (mirrors graph_loader.mapper's null-id row
+    discard). `LABEL` is the multi-label vector (`_node_label_vector`);
+    `label_raw` falls back to that same vector when the caller didn't supply
+    pre-fold labels. Provenance timestamps are naive UTC, one shared value for
+    the whole batch (see `_now_ts_str`)."""
+    now = _now_ts_str()
+    out = []
+    for n in nodes:
+        if n.get("id") is None:
+            continue
+        labels = _node_label_vector(n)
+        out.append({"NODE": n["id"], "LABEL": labels,
+                     "label_raw": n.get("label_raw") or labels,
+                     "name": n.get("name"),
+                     "first_seen_ts": now, "last_seen_ts": now})
+    return out
 
 def edge_rows(edges: list[dict]) -> list[dict]:
     """[{id,src,dst,label,attrs}] -> insert_records_json payload dicts
@@ -332,7 +439,8 @@ def edge_rows(edges: list[dict]) -> list[dict]:
 # KineticaAdapter (below), which calls these.
 # ---------------------------------------------------------------------------
 
-_NODE_BASE_COLS = {"NODE", "LABEL", "name", _NAME_PROPERTY}
+_NODE_BASE_COLS = {"NODE", "LABEL", "label_raw", "name", _NAME_PROPERTY,
+                   "first_seen_ts", "last_seen_ts"}
 _EDGE_BASE_COLS = {"edge_key", "NODE1", "NODE2", "LABEL"}
 
 def _infer_col_type(value) -> str:
@@ -419,14 +527,19 @@ def _coerce_attr_value(value, col_type: str):
 def _node_rows_with_attrs(nodes: list[dict], attr_cols: dict[str, str]) -> list[dict]:
     """Like `node_rows`, but each row also carries one field per evolved attr
     column (`attr_cols`: {col_name: sql_type}), coerced via
-    `_coerce_attr_value`. Kept separate from `node_rows` (rather than changing
-    it) so the base row shape stays exactly what the existing tests assert;
-    this is the payload `KineticaAdapter.ingest_elements` actually upserts."""
+    `_coerce_attr_value`. This is the payload `KineticaAdapter.ingest_elements`
+    actually upserts, so it shares `node_rows`' multi-label vector + label_raw
+    + provenance-timestamp base shape (one shared batch timestamp)."""
+    now = _now_ts_str()
     rows = []
     for n in nodes:
         if n.get("id") is None:
             continue
-        row = {"NODE": n["id"], "LABEL": n.get("label"), "name": n.get("name")}
+        labels = _node_label_vector(n)
+        row = {"NODE": n["id"], "LABEL": labels,
+               "label_raw": n.get("label_raw") or labels,
+               "name": n.get("name"),
+               "first_seen_ts": now, "last_seen_ts": now}
         attrs = n.get("attrs") or {}
         for col, col_type in attr_cols.items():
             row[col] = _coerce_attr_value(attrs.get(col), col_type)
@@ -757,6 +870,69 @@ class KineticaAdapter(GraphEngineAdapter):
         on a run that only adds a different new attr (e.g. `country`)."""
         return [c for c in self._current_columns(table) if c not in base_cols]
 
+    def _distinct_node_labels(self, node_table: str) -> set[str]:
+        """Every distinct node label currently on `node_table`, read back
+        from the table itself -- mirrors `_all_attr_columns`'s "read the
+        table's actual accumulated state" approach, so a label from an
+        earlier ingest call (e.g. a prior `/extract` into the same graph)
+        stays in the axis grouping even on a later call whose payload
+        doesn't re-mention it. `LABEL` is declared `VARCHAR[]`; over the
+        plain-SQL read path each row's value round-trips as a JSON-array
+        string (confirmed live, see the task-8 live test), so this flattens
+        every row's array in Python rather than depending on Kinetica
+        array-unnest SQL. Returns `set()` (never raises) if the table
+        doesn't exist yet or the read fails for any reason.
+        """
+        labels: set[str] = set()
+        try:
+            for r in self._src.rows(f"SELECT DISTINCT LABEL FROM {node_table}"):
+                val = r.get("LABEL")
+                if isinstance(val, str):
+                    try:
+                        val = json.loads(val)
+                    except (TypeError, ValueError):
+                        val = None
+                if isinstance(val, list):
+                    labels.update(lbl for lbl in val if lbl)
+        except Exception:
+            return set()
+        return labels
+
+    def _materialize_label_keys(self, graph, node_table) -> str | None:
+        """Best-effort, idempotent per-graph label_keys table (kgr's
+        LABEL_KEY grouping shape, see `label_keys_rows`) built from
+        `node_table`'s FULL ACCUMULATED label set, not just this call's
+        passed-in nodes. `ingest_elements` is invoked once per extracted
+        document with only that document's entities, so grouping from just
+        this call's nodes would silently drop an earlier document's label
+        from the axis the moment a later `/extract` into the same graph
+        doesn't re-mention it -- breaking incremental "append to an existing
+        graph" behavior. Mirrors `_all_attr_columns`: re-read the table's
+        actual state via `_distinct_node_labels` (by the time this runs,
+        `ingest_elements` has already upserted this call's rows into
+        `node_table`, so its labels are included too). Idempotent via
+        drop-and-recreate (not `CREATE TABLE IF NOT EXISTS` + upsert) so a
+        label no longer present anywhere in the node table doesn't linger as
+        a stale row -- this table holds only a rebuildable *derived*
+        grouping, never the entity data itself, so replacing it outright
+        each call is safe. Returns the table name to feed into
+        `create_graph_sql`'s `label_keys_table=`, or `None` if there's
+        nothing to materialize (no labels at all) or the write failed for
+        any reason -- never blocks the node/edge ingest that matters more.
+        """
+        try:
+            labels = self._distinct_node_labels(node_table)
+            if not labels:
+                return None
+            rows = label_keys_rows([{"labels": sorted(labels)}])
+            table = label_keys_table_name(graph)
+            self._execute_ddl(f"DROP TABLE IF EXISTS {table}")
+            self._execute_ddl(create_label_keys_table_sql(table))
+            self._insert_and_count(table, rows)
+            return table
+        except Exception:
+            return None
+
     def ingest_elements(self, graph, nodes, edges):
         n_rows = node_rows(nodes)
         e_rows = edge_rows(edges)
@@ -803,10 +979,14 @@ class KineticaAdapter(GraphEngineAdapter):
         # don't mention them.
         all_node_attr_cols = self._all_attr_columns(node_table, _NODE_BASE_COLS)
         all_edge_attr_cols = self._all_attr_columns(edge_table, _EDGE_BASE_COLS)
+        label_keys_table = self._materialize_label_keys(graph, node_table)
         self._execute_ddl(create_graph_sql(
-            graph, node_table, edge_table, all_node_attr_cols, all_edge_attr_cols))
+            graph, node_table, edge_table, all_node_attr_cols, all_edge_attr_cols,
+            label_keys_table=label_keys_table))
 
-        node_labels = sorted({r["LABEL"] for r in n_rows if r.get("LABEL")})
+        # LABEL is now a multi-label vector (list), not a scalar -- flatten
+        # before deduping (a set of lists would be unhashable).
+        node_labels = sorted({lbl for r in n_rows for lbl in (r.get("LABEL") or [])})
         edge_labels = sorted({r["LABEL"] for r in e_rows if r.get("LABEL")})
         # "nodes"/"edges" = total ensured present this call; "nodes_created"/
         # "edges_created" = newly created (vs. matched-and-updated) -- lets a
