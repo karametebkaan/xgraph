@@ -72,12 +72,12 @@ class _FakeSchemaGraph:
         class _Result:
             def __init__(self, result_set):
                 self.result_set = result_set
+        if "n.LABEL AS l" in cypher:  # per-label node counts (count(*))
+            return _Result([[l, 1] for l in self._labels])
+        if "type(r) AS t" in cypher:  # per-rel-type counts (count(*))
+            return _Result([[r, 1] for r in self._rels])
         if "RETURN DISTINCT n.LABEL" in cypher:
             return _Result([[l] for l in self._labels])
-        if "count(*)" in cypher:
-            return _Result([[l, 1] for l in self._labels])
-        if "RETURN DISTINCT type(r)" in cypher:
-            return _Result([[r] for r in self._rels])
         if "RETURN DISTINCT a.LABEL" in cypher:
             return _Result([list(t) for t in self._triples])
         if "count(n)" in cypher:
@@ -378,3 +378,10 @@ def test_dot_from_triples_annotates_percentages():
     assert 'Person\\n(60.0%)' in dot            # node display label carries its share
     assert 'Organization\\n(40.0%)' in dot
     assert '"Person" -> "Organization"' in dot  # edge id still the bare label
+
+
+def test_dot_from_triples_annotates_edge_percentages():
+    from xgraph_gateway.adapters.falkordb_adapter import _dot_from_triples
+    dot = _dot_from_triples([("Person", "WORKS_AT", "Organization")],
+                            None, {"WORKS_AT": 75.0})
+    assert 'WORKS_AT\\n(75.0%)' in dot

@@ -38,7 +38,6 @@ def test_build_ingest_cypher_node_statement_shape():
     assert "MERGE (n:Entity {NODE: r.id})" in cypher
     assert "SET n:`Person`" in cypher
     assert "n.LABEL = r.labels" in cypher
-    assert "n.name = r.name" in cypher
     assert "n += r.attrs" in cypher
     ids = {row["id"] for row in params["rows"]}
     assert ids == {"n1", "n2"}
@@ -166,9 +165,10 @@ def test_ingest_elements_creates_nodes_and_edges(live_adapter):
     assert out["labels"]["edge_labels"] == ["WORKS_AT"]
 
     result = live_adapter.run_query(
-        _TEST_GRAPH, "MATCH (n:Entity {NODE: 'ing-n1'}) RETURN n.NODE, n.LABEL, n.name")
-    # n.LABEL is now the full label vector (array), not a scalar (Task 7).
-    assert result["rows"] == [["ing-n1", ["Person"], "Ada Lovelace"]]
+        _TEST_GRAPH, "MATCH (n:Entity {NODE: 'ing-n1'}) RETURN n.NODE, n.LABEL")
+    # NODE is the readable identity; the redundant `name` property was dropped.
+    # n.LABEL is the full label vector (array), not a scalar (Task 7).
+    assert result["rows"] == [["ing-n1", ["Person"]]]
 
 def test_ingest_elements_merge_does_not_double_on_rerun(live_adapter):
     nodes = [{"id": "ing-n1", "label": "Person", "name": "Ada Lovelace", "attrs": {}}]

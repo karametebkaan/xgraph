@@ -72,7 +72,7 @@ def _dot_esc(s) -> str:
     return str(s).replace("\\", "\\\\").replace('"', '\\"')
 
 
-def _dot_from_triples(triples, pct=None) -> str:
+def _dot_from_triples(triples, pct=None, edge_pct=None) -> str:
     lines = ["digraph {"]
     if pct:
         # Emit a node declaration per label with its share of nodes in the
@@ -89,7 +89,10 @@ def _dot_from_triples(triples, pct=None) -> str:
             disp = _dot_esc(n) + (f"\\n({p:.1f}%)" if p is not None else "")
             lines.append(f'  "{_dot_esc(n)}" [label="{disp}"];')
     for src, rel, dst in triples:
-        lines.append(f'  "{_dot_esc(src)}" -> "{_dot_esc(dst)}" [label="{_dot_esc(rel)}"];')
+        # Edge label carries its relationship-type's share of all edges.
+        elabel = _dot_esc(rel) + (f"\\n({edge_pct[rel]:.1f}%)"
+                                  if edge_pct and rel in edge_pct else "")
+        lines.append(f'  "{_dot_esc(src)}" -> "{_dot_esc(dst)}" [label="{elabel}"];')
     lines.append("}")
     return "\n".join(lines)
 
@@ -281,7 +284,7 @@ def build_ingest_cypher(nodes: list[dict], edges: list[dict]) -> list[tuple[str,
             f"MERGE (n:Entity {{NODE: r.id}}) "
             "ON CREATE SET n.first_seen_ts = $now "
             f"SET {label_set}n.LABEL = r.labels, n.label_raw = r.label_raw, "
-            "n.name = r.name, n += r.attrs, n.last_seen_ts = $now"
+            "n += r.attrs, n.last_seen_ts = $now"
         )
         payload = [{"id": r["id"], "name": r.get("name"),
                     "labels": list(labels),
@@ -393,7 +396,15 @@ class FalkorDBAdapter(GraphEngineAdapter):
             if lbls:
                 struct_counts[lbls[0]] += c  # structural (first) label, matches the DOT
         label_pct = {l: 100.0 * c / _total for l, c in struct_counts.items()} if _total else {}
-        rels = [r[0] for r in g.query("MATCH ()-[r]->() RETURN DISTINCT type(r)", timeout=60000).result_set if r[0]]
+        rel_counts: Counter = Counter()
+        _etotal = 0
+        for t, c in g.query("MATCH ()-[r]->() RETURN type(r) AS t, count(*) AS c",
+                            timeout=60000).result_set:
+            if t:
+                rel_counts[t] += c
+                _etotal += c
+        rels = sorted(rel_counts)
+        edge_pct = {t: 100.0 * c / _etotal for t, c in rel_counts.items()} if _etotal else {}
         raw_triples = [(r[0], r[1], r[2]) for r in g.query(
             "MATCH (a)-[r]->(b) RETURN DISTINCT a.LABEL, type(r), b.LABEL", timeout=60000).result_set]
         triples = []
@@ -410,8 +421,9 @@ class FalkorDBAdapter(GraphEngineAdapter):
                     seen_triples.add(triple)
                     triples.append(triple)
         return {"labels": labels, "rel_types": rels,
-                "dot": _dot_from_triples(triples, label_pct),
+                "dot": _dot_from_triples(triples, label_pct, edge_pct),
                 "label_counts": dict(struct_counts),
+                "rel_counts": dict(rel_counts),
                 "properties": self._label_properties(g, labels),
                 "counts": self._counts(g),
                 # No ontology-store handle here, so every label defaults to

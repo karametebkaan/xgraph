@@ -63,15 +63,18 @@ Target dialect: openCypher, as implemented by FalkorDB. Rules (MUST follow):
 - Do NOT prefix the query with GRAPH "..." — FalkorDB Cypher has no GRAPH clause, it runs
   directly against the connected graph.
 - When filtering by a NAME or other free-text value, match LOOSELY with case-insensitive
-  substring containment — `WHERE toLower(x.name) CONTAINS toLower('mullin')` — NOT exact `=`.
-  Extracted nodes often store a fuller/differently-spelled value (node 'Markwayne Mullin' vs a
-  question saying 'Mullin'), so `=` misses them.
+  substring containment, NOT exact `=` — `WHERE toLower(x.name) CONTAINS toLower('mullin')`, or on
+  `NODE` when the label has no `name` in its property list (extracted graphs store the readable name
+  AS NODE): `WHERE toLower(x.NODE) CONTAINS toLower('mullin')`. Nodes often store a fuller/differently-
+  spelled value (node 'Markwayne Mullin' vs a question saying 'Mullin'), so `=` misses them.
 - Do NOT put predicates inline in the node/relationship pattern (that is Kinetica-only
   syntax). Instead, write the whole MATCH first, then a single WHERE clause after it,
   AND-joining every hop's predicates, e.g.:
     MATCH p=(a:bank)-[:performed]->(b:wire_message) WHERE a.NODE = 'b1' AND b.risk > 20 RETURN a, b, p
 - ALWAYS include, as SCALAR columns in RETURN, the human-readable identity of every entity the
-  question is about — its name property AND its label — e.g. `RETURN b.name AS name, b.LABEL AS type`.
+  question is about AND its label — the `name` property if the label's property list has one, else
+  `NODE` (extracted graphs store the readable name AS NODE). E.g. `RETURN b.name AS name, b.LABEL AS type`
+  when the label has a `name`, otherwise `RETURN b.NODE AS name, b.LABEL AS type`.
   NEVER return a bare node/relationship/path object (`RETURN b`, `RETURN p`) as the ONLY output: the
   English answer is built from the scalar columns and cannot read raw graph objects.
 - To make the result visualizable, ALSO bind the traversal to a path variable
