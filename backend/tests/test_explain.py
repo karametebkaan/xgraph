@@ -210,3 +210,21 @@ def test_explain_uses_duckdb_even_when_session_olap_is_kinetica(tmp_path, monkey
     assert body["hydrated"] is True
     assert body["columns"] == ["party_name", "sar_paths"]
     assert body["rows"][0] == ["Acme", 2]
+
+
+def test_explain_hydrates_from_graph_when_nodes_have_attrs(monkeypatch):
+    # Extracted-graph model: attributes live ON the nodes. Explain must post-join
+    # the graph's own node attrs (fetch_node_attrs), NOT the external Parquet.
+    client = TestClient(create_app(adapter_factory=lambda e: FakeAdapter()))
+    monkeypatch.setattr(nlcypher, "generate_join_sql",
+        lambda focus, cypher, cols, wide_cols:
+            "SELECT wide.bank_name AS bank, COUNT(*) AS n FROM cypher "
+            "JOIN wide ON cypher.NODE = wide.NODE GROUP BY wide.bank_name")
+    monkeypatch.setattr(nlcypher, "synthesize", lambda *a, **k: "ok")
+    r = client.post("/explain", json={
+        "question": "which banks", "columns": ["NODE"], "rows": [["b1"]],
+        "cypher": "MATCH (n) RETURN n.NODE", "graph": "g", "engine": "fake",
+        "source": "vertexes.parquet"})  # source present, but graph attrs win
+    body = r.json()
+    assert body["hydrate_from"] == "graph"
+    assert any("Acme" in str(v) for row in body["rows"] for v in row)

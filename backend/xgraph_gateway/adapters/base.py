@@ -12,6 +12,13 @@ class GraphEngineAdapter(ABC):
     def fetch_entities(self, graph: str, limit: int, offset: int = 0) -> dict: ...
     @abstractmethod
     def get_record(self, graph: str, node_id: str) -> dict: ...
+
+    def fetch_node_attrs(self, graph: str, ids) -> list[dict]:
+        """Wide attribute rows `[{NODE, ...}]` for the given NODE ids, for
+        Explain's post-join when attributes live ON the graph nodes. Default:
+        none, so engines backed by an external wide source use that instead."""
+        return []
+
     @abstractmethod
     def load_graph(self, spec: dict) -> dict: ...
     @abstractmethod

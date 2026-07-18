@@ -200,6 +200,27 @@ class DuckDBComputeEngine:
         finally:
             con.close()
 
+    def run_join_rows(self, cypher_rows, wide_rows, join_sql,
+                      cypher_relation="cypher", wide_relation="wide"):
+        """Post-join two IN-MEMORY row sets (no Parquet). Used when the wide
+        attributes come from the graph's own nodes (`fetch_node_attrs`) rather
+        than an external file -- the `wide` relation is registered from
+        `wide_rows` instead of a file."""
+        for rel in (cypher_relation, wide_relation):
+            if not _REL_RE.fullmatch(rel):
+                raise ValueError(f"unsafe relation name: {rel!r}")
+        if not cypher_rows or not wide_rows:
+            return []
+        con = duckdb.connect()
+        try:
+            _register_rows(con, cypher_relation, cypher_rows)
+            _register_rows(con, wide_relation, wide_rows)
+            cur = con.execute(join_sql)
+            cols = [d[0] for d in cur.description]
+            return [coerce_row(cols, r) for r in cur.fetchall()]
+        finally:
+            con.close()
+
     def run_join(self, rows, source, join_sql, cypher_relation="cypher", wide_relation="wide"):
         source = resolve_data_path(source)
         for rel in (cypher_relation, wide_relation):

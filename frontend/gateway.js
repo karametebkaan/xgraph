@@ -144,7 +144,7 @@
       ask: function (graph, question) { return postJSONWithAuth("/ask", { graph: graph, question: question }); },
       nl2cypher: function (graph, question) { return postJSONWithAuth("/nl2cypher", { graph: graph, question: question }); },
       synthesize: function (question, columns, rows, cypher) { return postJSONWithAuth("/synthesize", { question: question, columns: columns, rows: rows, cypher: cypher }); },
-      explain: function (question, columns, rows, cypher, source) { return postJSONWithAuth("/explain", { question: question, columns: columns, rows: rows, cypher: cypher, source: source }); },
+      explain: function (question, columns, rows, cypher, source, graph) { return postJSONWithAuth("/explain", { question: question, columns: columns, rows: rows, cypher: cypher, source: source, graph: graph }); },
       extract: function (graph, fileOrText, hint) {
         var formData = new FormData();
         var isFileLike = typeof Blob !== "undefined" && fileOrText instanceof Blob;

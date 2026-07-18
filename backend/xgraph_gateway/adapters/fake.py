@@ -23,6 +23,9 @@ class FakeAdapter(GraphEngineAdapter):
             if n["id"] == node_id:
                 return n
         return {}
+    def fetch_node_attrs(self, graph, ids):
+        want = set(ids)
+        return [dict({"NODE": n["id"]}, **n["props"]) for n in _NODES if n["id"] in want]
     def load_graph(self, spec):
         return {"nodes": {"bank": 2}, "edges": {"performed": 1}}
     def graph_sizes(self):

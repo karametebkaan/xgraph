@@ -47,7 +47,7 @@
 const { useState, useEffect, useRef, useCallback, useMemo } = React;
 
 /* ═══════════════════════ CONSTANTS ════════════════════════ */
-const EXPLORER_VERSION = "0.3.4";  // xGraph version — bump on frontend changes so a stale browser cache is visible
+const EXPLORER_VERSION = "0.3.5";  // xGraph version — bump on frontend changes so a stale browser cache is visible
 const SAFETY_TIMEOUT_MS = 10 * 60 * 1000;
 const PALETTE = [
     { solid: '#0984e3', light: '#e1f0fb' }, { solid: '#00cec9', light: '#e0f9f8' },
@@ -7568,7 +7568,7 @@ function InteractExplainPanel(props) {
                 var qr = await gwClient.runQuery(activeGraph, cypher);
                 cols = qr.columns; rws = qr.rows;
             }
-            var r = await gwClient.explain(focusText.trim() || 'Explain these results', cols, rws, cypher, HYDRATE_SOURCE);
+            var r = await gwClient.explain(focusText.trim() || 'Explain these results', cols, rws, cypher, HYDRATE_SOURCE, activeGraph);
             setResp(r);
         } catch (err) {
             setError((err && err.message) || String(err));

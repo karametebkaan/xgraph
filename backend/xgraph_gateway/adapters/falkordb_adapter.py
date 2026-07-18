@@ -441,6 +441,29 @@ class FalkorDBAdapter(GraphEngineAdapter):
             {"l": limit, "off": offset}, timeout=60000).result_set]
         return {"nodes": nodes, "edges": edges}
 
+    def fetch_node_attrs(self, graph, ids):
+        """Wide attribute rows `{NODE, <props>}` for the given NODE ids -- the
+        post-join source when the attributes live ON the graph (extracted
+        graphs) instead of in an external Parquet. Metadata columns (the LABEL
+        vector, label_raw, provenance timestamps) are dropped so only real
+        extracted attributes remain."""
+        ids = [i for i in dict.fromkeys(ids) if isinstance(i, str)]
+        if not ids:
+            return []
+        g = self._graph(graph)
+        rs = g.query(
+            "MATCH (n) WHERE n.NODE IN $ids RETURN n.NODE AS NODE, properties(n) AS props",
+            {"ids": ids}, timeout=60000).result_set
+        skip = {"NODE", "LABEL", "label_raw", "first_seen_ts", "last_seen_ts"}
+        out = []
+        for node_id, props in rs:
+            row = {"NODE": node_id}
+            for k, v in (props or {}).items():
+                if k not in skip:
+                    row[k] = v
+            out.append(row)
+        return out
+
     def get_record(self, graph, node_id):
         rs = self._graph(graph).query(
             "MATCH (n {NODE:$id}) RETURN n.NODE, n.LABEL, properties(n)",

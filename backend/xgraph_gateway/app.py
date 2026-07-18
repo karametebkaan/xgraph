@@ -327,30 +327,59 @@ def create_app(adapter_factory=registry.get_adapter, compute=None, store=None) -
         try:
             focus = (payload.get("question") or "").strip()
             source = payload.get("source")
+            graph = payload.get("graph")
+            engine = payload.get("engine", "")
+            session = payload.get("session")
             cols, rows, cypher = payload["columns"], payload["rows"], payload.get("cypher")
-            # File-based post-join hydration reads the Parquet/CSV hydrate file, which
-            # is intrinsically a DuckDB operation — use DuckDB here regardless of the
-            # session's OLAP engine (Kinetica compute can't post-join a local file).
+            # DuckDB does the post-join regardless of the session's OLAP engine.
             duck = ComputeEngine()
-            join_sql, hydrated = None, False
+            join_sql, hydrated, hydrate_from = None, False, None
             out_cols, out_rows = cols, rows
-            if focus and source:
-                wide_cols = duck.describe_source(source)
-                join_sql = nlcypher.generate_join_sql(focus, cypher, cols, wide_cols) or None
-                if join_sql:
-                    ok, reason = nlcypher.validate_sql(join_sql)
-                    if not ok:
-                        return _err("duckdb", ValueError(reason))
-                    dict_rows = [dict(zip(cols, r)) for r in rows]
-                    agg = duck.run_join(dict_rows, source, join_sql)
-                    out_cols = list(agg[0].keys()) if agg else []
-                    out_rows = [[d.get(c) for c in out_cols] for d in agg]
-                    hydrated = True
+            dict_rows = [dict(zip(cols, r)) for r in rows]
+
+            def _post_join(wide_cols, run):
+                nonlocal out_cols, out_rows, join_sql, hydrated, hydrate_from
+                js = nlcypher.generate_join_sql(focus, cypher, cols, wide_cols) or None
+                if not js:
+                    return False
+                ok, reason = nlcypher.validate_sql(js)
+                if not ok:
+                    raise ValueError(reason)
+                agg = run(js)
+                if not agg:
+                    return False  # this source doesn't cover these NODE ids -- try the next / raw
+                join_sql = js
+                out_cols = list(agg[0].keys())
+                out_rows = [[d.get(c) for c in out_cols] for d in agg]
+                hydrated = True
+                return True
+
+            # 1) Hydrate from the GRAPH's own node attributes (extracted graphs
+            #    store attrs ON the nodes -- no external Parquet). Falls through
+            #    to (2) when the graph nodes are skinny (banking).
+            if focus and graph:
+                candidate_ids = {v for r in rows for v in r if isinstance(v, str)}
+                try:
+                    wide = _resolve_adapter(session, engine).fetch_node_attrs(graph, candidate_ids)
+                except Exception:
+                    wide = []
+                attr_wide = [r for r in wide if set(r) - {"NODE"}]
+                if attr_wide:
+                    wide_cols = sorted({k for r in attr_wide for k in r})
+                    if _post_join(wide_cols, lambda js: duck.run_join_rows(dict_rows, attr_wide, js)):
+                        hydrate_from = "graph"
+
+            # 2) Fallback: external Parquet source (banking skinny-graph model).
+            if not hydrated and focus and source:
+                if _post_join(duck.describe_source(source),
+                              lambda js: duck.run_join(dict_rows, source, js)):
+                    hydrate_from = "source"
+
             q = focus or "Explain these results"
             answer = nlcypher.synthesize(q, out_cols, out_rows,
                                           cypher=(join_sql if hydrated else cypher))
             return {"answer": answer, "join_sql": join_sql, "columns": out_cols,
-                    "rows": out_rows, "hydrated": hydrated}
+                    "rows": out_rows, "hydrated": hydrated, "hydrate_from": hydrate_from}
         except Exception as e:
             return _err(payload.get("engine", ""), e)
 
