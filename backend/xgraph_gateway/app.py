@@ -202,6 +202,13 @@ def create_app(adapter_factory=registry.get_adapter, compute=None, store=None) -
         except Exception as e:
             return _err(engine, e)
 
+    @app.get("/documents")
+    def documents(graph: str, engine: str = "", session: str | None = None):
+        try:
+            return {"documents": _resolve_compute(session).list_documents(graph)}
+        except Exception as e:
+            return _err(engine, e)
+
     @app.post("/ask")
     def ask(payload: dict = Body(...)):
         session = payload.get("session")

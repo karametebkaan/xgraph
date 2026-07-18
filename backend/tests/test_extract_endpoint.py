@@ -169,3 +169,18 @@ def test_extract_same_text_is_reused(client_with_store, monkeypatch):
     assert second["document"]["reused"] is True
     assert second["document"]["status"] == "unchanged"
     assert second["entities"] == 0 and second["relations"] == 0
+
+
+def test_documents_endpoint_lists_ledger(client_with_store, monkeypatch):
+    from xgraph_gateway import extract, extract_fold
+
+    def fake_extract_document(text, hint=None, **kw):
+        return {"entities": [], "relations": [], "truncated": False}
+    monkeypatch.setattr(extract, "extract_document", fake_extract_document)
+    monkeypatch.setattr(extract_fold, "fold_labels",
+                        lambda *a, **k: [])
+
+    client_with_store.post("/extract", data={"text": "hi", "graph": "gL", "engine": "fake"})
+    resp = client_with_store.get("/documents", params={"graph": "gL", "engine": "fake"})
+    assert resp.status_code == 200
+    assert any(d["doc_uri"].startswith("text:") for d in resp.json()["documents"])
