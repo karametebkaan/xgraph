@@ -64,10 +64,18 @@ def _as_labels(v):
     list -- a scalar becomes a one-element list, `None`/`""` becomes `[]`."""
     return v if isinstance(v, list) else ([v] if v else [])
 
+def _dot_esc(s) -> str:
+    """Escape a value for a double-quoted Graphviz DOT string: backslash then
+    double-quote (standard DOT escaping). Labels now come from arbitrary LLM
+    output (e.g. `Government Agency`, or a name with an embedded quote), so the
+    schema DOT must escape them or a stray `"` breaks the whole ontology render."""
+    return str(s).replace("\\", "\\\\").replace('"', '\\"')
+
+
 def _dot_from_triples(triples) -> str:
     lines = ["digraph {"]
     for src, rel, dst in triples:
-        lines.append(f'  "{src}" -> "{dst}" [label="{rel}"];')
+        lines.append(f'  "{_dot_esc(src)}" -> "{_dot_esc(dst)}" [label="{_dot_esc(rel)}"];')
     lines.append("}")
     return "\n".join(lines)
 
@@ -213,9 +221,20 @@ def _valid_edges(edges: list[dict]) -> list[dict]:
     return [e for e in edges
             if e.get("id") is not None and e.get("src") is not None and e.get("dst") is not None]
 
+def _cypher_ident(name) -> str:
+    """Backtick-quote an arbitrary label / relationship type for use as a Cypher
+    identifier. Labels can't be parameterized, so they're interpolated into the
+    query string; backtick-quoting (embedded backticks doubled) lets multi-word
+    or punctuated LLM labels like `Government Agency` be used safely without the
+    identifier-only restriction of `safe_ident`, while neutralizing injection —
+    a `` a`)-[:X]-() `` payload stays inside the quoted identifier as
+    `` `a``)-[:X]-()` ``."""
+    return "`" + str(name).replace("`", "``") + "`"
+
+
 def build_ingest_cypher(nodes: list[dict], edges: list[dict]) -> list[tuple[str, dict]]:
     """Group `nodes` by their full label vector and `edges` by label into one
-    UNWIND/MERGE Cypher statement each (labels/type via safe_ident); returns
+    UNWIND/MERGE Cypher statement each (labels/type backtick-quoted); returns
     [(cypher, params), ...]. All entity data (ids, names, attrs) travels in
     `params["rows"]`, never interpolated into the Cypher string.
 
@@ -232,10 +251,13 @@ def build_ingest_cypher(nodes: list[dict], edges: list[dict]) -> list[tuple[str,
     node_groups: dict[tuple, list[dict]] = {}
     for n in _valid_nodes(nodes):
         labels = n.get("labels") or [n.get("label")]
-        labels = tuple(safe_ident(l) for l in labels if l)
+        labels = tuple(l for l in labels if l)  # original strings; quoted below
         node_groups.setdefault(labels, []).append(n)
     for labels, rows in node_groups.items():
-        label_clause = "".join(f":{l}" for l in labels)
+        label_clause = "".join(f":{_cypher_ident(l)}" for l in labels)
+        # A node with no usable label yields an empty clause -- keep the SET
+        # valid by dropping the bare `n` token in that case.
+        label_set = f"n{label_clause}, " if label_clause else ""
         # FalkorDB requires ON CREATE SET to appear directly after the MERGE
         # it qualifies, before any other SET clause on the same variable --
         # so first_seen_ts is set there, and the label/vector/name/attrs/
@@ -244,7 +266,7 @@ def build_ingest_cypher(nodes: list[dict], edges: list[dict]) -> list[tuple[str,
             "UNWIND $rows AS r "
             f"MERGE (n:Entity {{NODE: r.id}}) "
             "ON CREATE SET n.first_seen_ts = $now "
-            f"SET n{label_clause}, n.LABEL = r.labels, n.label_raw = r.label_raw, "
+            f"SET {label_set}n.LABEL = r.labels, n.label_raw = r.label_raw, "
             "n.name = r.name, n += r.attrs, n.last_seen_ts = $now"
         )
         payload = [{"id": r["id"], "name": r.get("name"),
@@ -255,13 +277,13 @@ def build_ingest_cypher(nodes: list[dict], edges: list[dict]) -> list[tuple[str,
 
     edge_groups: dict[str, list[dict]] = {}
     for e in _valid_edges(edges):
-        label = safe_ident(e.get("label"))
+        label = e.get("label")  # original string; quoted below
         edge_groups.setdefault(label, []).append(e)
     for label, rows in edge_groups.items():
         query = (
             "UNWIND $rows AS e "
             "MATCH (a:Entity {NODE: e.src}), (b:Entity {NODE: e.dst}) "
-            f"MERGE (a)-[x:{label} {{ID: e.id}}]->(b) "
+            f"MERGE (a)-[x:{_cypher_ident(label)} {{ID: e.id}}]->(b) "
             "ON CREATE SET x.first_seen_ts = $now "
             f"SET x.LABEL = $label, x += e.attrs, x.last_seen_ts = $now"
         )

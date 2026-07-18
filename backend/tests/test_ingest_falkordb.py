@@ -1,6 +1,5 @@
 import pytest
 
-from graph_loader.mapper import MappingError
 from xgraph_gateway.adapters.falkordb_adapter import build_ingest_cypher
 
 
@@ -37,7 +36,7 @@ def test_build_ingest_cypher_node_statement_shape():
     cypher, params = by_labels[("Person",)]
     assert "UNWIND $rows AS r" in cypher
     assert "MERGE (n:Entity {NODE: r.id})" in cypher
-    assert "SET n:Person" in cypher
+    assert "SET n:`Person`" in cypher
     assert "n.LABEL = r.labels" in cypher
     assert "n.name = r.name" in cypher
     assert "n += r.attrs" in cypher
@@ -51,22 +50,21 @@ def test_build_ingest_cypher_edge_statement_shape():
     assert params["label"] == "WORKS_AT"
     assert "UNWIND $rows AS e" in cypher
     assert "MATCH (a:Entity {NODE: e.src}), (b:Entity {NODE: e.dst})" in cypher
-    assert "MERGE (a)-[x:WORKS_AT {ID: e.id}]->(b)" in cypher
+    assert "MERGE (a)-[x:`WORKS_AT` {ID: e.id}]->(b)" in cypher
     assert "x.LABEL = $label" in cypher
     assert "x += e.attrs" in cypher
     assert params["rows"] == [{"id": "e1", "src": "n1", "dst": "n3", "attrs": {"since": 2018}}]
 
-def test_build_ingest_cypher_labels_pass_through_safe_ident():
+def test_build_ingest_cypher_labels_are_backtick_quoted():
     statements = build_ingest_cypher(_nodes(), _edges())
     for cypher, params in statements:
-        # Every interpolated label is a bare safe_ident token (alnum/underscore).
-        # Edge statements still key by scalar "label"; node statements key by
-        # the full label vector carried in the row payload (Task 7).
-        if "label" in params:
-            assert params["label"].replace("_", "").isalnum()
+        # Labels/types are interpolated as backtick-quoted Cypher identifiers.
+        rows = params.get("rows") or [{}]
+        if "src" in rows[0]:
+            assert "[x:`" in cypher  # edge relationship type is quoted
         else:
             for lbl in params["rows"][0]["labels"]:
-                assert lbl.replace("_", "").isalnum()
+                assert "`" + lbl + "`" in cypher  # each node label applied, quoted
 
 def test_build_ingest_cypher_no_entity_data_in_cypher_string():
     statements = build_ingest_cypher(_nodes(), _edges())
@@ -101,15 +99,28 @@ def test_build_ingest_cypher_skips_rows_with_null_identity():
 def test_build_ingest_cypher_empty_inputs_yield_no_statements():
     assert build_ingest_cypher([], []) == []
 
-def test_build_ingest_cypher_malicious_node_label_raises():
-    nodes = [{"id": "n1", "label": "a` b", "name": "x", "attrs": {}}]
-    with pytest.raises(MappingError):
-        build_ingest_cypher(nodes, [])
+def test_build_ingest_cypher_multiword_label_is_escaped_not_rejected():
+    # Multi-word LLM labels (e.g. "Government Agency") are common and must NOT
+    # fail extraction -- they're backtick-quoted, and the original string is
+    # kept in the LABEL property vector.
+    nodes = [{"id": "n1", "label": "Government Agency",
+              "labels": ["Government Agency"], "label_raw": ["Government Agency"],
+              "name": "DHS", "attrs": {}}]
+    cypher, params = build_ingest_cypher(nodes, [])[0]
+    assert ":`Government Agency`" in cypher
+    assert params["rows"][0]["labels"] == ["Government Agency"]
 
-def test_build_ingest_cypher_malicious_edge_label_raises():
+def test_build_ingest_cypher_node_label_injection_is_neutralized():
+    # A backtick in the label is doubled so it can't close the quoted identifier
+    # and break out into executable Cypher (no longer raises).
+    nodes = [{"id": "n1", "label": "a`b", "name": "x", "attrs": {}}]
+    cypher, _ = build_ingest_cypher(nodes, [])[0]
+    assert ":`a``b`" in cypher
+
+def test_build_ingest_cypher_edge_label_injection_is_neutralized():
     edges = [{"id": "e1", "src": "n1", "dst": "n2", "label": "a; DROP", "attrs": {}}]
-    with pytest.raises(MappingError):
-        build_ingest_cypher([], edges)
+    cypher, _ = build_ingest_cypher([], edges)[0]
+    assert "[x:`a; DROP`" in cypher  # quoted -> the ';' is a literal identifier char
 
 
 # ---------------------------------------------------------------------------

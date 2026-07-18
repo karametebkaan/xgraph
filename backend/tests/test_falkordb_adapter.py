@@ -346,8 +346,8 @@ def test_build_ingest_cypher_sets_multiple_labels():
               "labels": ["Company", "AI"], "label_raw": ["Firm", "AI"], "attrs": {}}]
     stmts = build_ingest_cypher(nodes, [])
     query, params = stmts[0]
-    # Both labels applied.
-    assert ":Company" in query and ":AI" in query
+    # Both labels applied (backtick-quoted).
+    assert ":`Company`" in query and ":`AI`" in query
     # Vector + provenance stored as node properties.
     assert "n.LABEL = $labels" in query or "n.LABEL = r.labels" in query
     assert "label_raw" in query
@@ -358,4 +358,12 @@ def test_build_ingest_cypher_falls_back_to_single_label():
     nodes = [{"id": "n1", "name": "Bob", "label": "Person", "attrs": {}}]
     stmts = build_ingest_cypher(nodes, [])
     query, _ = stmts[0]
-    assert ":Person" in query
+    assert ":`Person`" in query
+
+
+def test_dot_from_triples_escapes_quotes_and_spaces():
+    from xgraph_gateway.adapters.falkordb_adapter import _dot_from_triples
+    dot = _dot_from_triples([('Government Agency', 'REGULATES', 'A "quoted" Co')])
+    assert '"Government Agency"' in dot            # spaces fine (quoted)
+    assert '\\"quoted\\"' in dot                   # embedded quotes escaped
+    assert dot.startswith("digraph {")
