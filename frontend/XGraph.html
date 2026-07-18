@@ -47,7 +47,7 @@
 const { useState, useEffect, useRef, useCallback, useMemo } = React;
 
 /* ═══════════════════════ CONSTANTS ════════════════════════ */
-const EXPLORER_VERSION = "0.3.5";  // xGraph version — bump on frontend changes so a stale browser cache is visible
+const EXPLORER_VERSION = "0.3.6";  // xGraph version — bump on frontend changes so a stale browser cache is visible
 const SAFETY_TIMEOUT_MS = 10 * 60 * 1000;
 const PALETTE = [
     { solid: '#0984e3', light: '#e1f0fb' }, { solid: '#00cec9', light: '#e0f9f8' },
@@ -6762,15 +6762,21 @@ function CreatePanel(props) {
     // {statement:null} there and the render below falls back to createHistory
     // / extractSources.
     const [activeDdl, setActiveDdl] = useState(null);
-    // The active graph was built via Extract (attrs on the nodes) -- the
-    // Parquet-build form below doesn't describe it, so collapse it by default
-    // and let the user opt in to building a *different* Parquet-backed graph.
-    var isExtracted = extractSources.some(function(s){ return s.graph === activeGraph && (s.engine === graphEngine || !s.engine); });
     const [showCreateForm, setShowCreateForm] = useState(false);
+    // Whether the active graph was built via Extract. The in-session
+    // `extractSources` is lost on reload, so the persistent /documents ledger is
+    // the source of truth (survives reloads); fall back to in-session sources.
+    const [ledgerDocs, setLedgerDocs] = useState([]);
     useEffect(function() {
-        if (!gwClient || !activeGraph) { setActiveDdl(null); return; }
+        setShowCreateForm(false);
+        if (!gwClient || !activeGraph) { setActiveDdl(null); setLedgerDocs([]); return; }
         gwClient.graphDdl(activeGraph).then(setActiveDdl).catch(function(){ setActiveDdl(null); });
+        gwClient.documents(activeGraph).then(function(r){ setLedgerDocs((r && r.documents) || []); }).catch(function(){ setLedgerDocs([]); });
     }, [activeGraph, graphEngine]);
+    var sessionExtractSrcs = extractSources.filter(function(s){ return s.graph === activeGraph && (s.engine === graphEngine || !s.engine); });
+    // Prefer the ledger; fall back to in-session sources for a just-extracted graph.
+    var extractDocs = ledgerDocs.length ? ledgerDocs.map(function(d){ return { kind: d.source_type, label: d.doc_uri }; }) : sessionExtractSrcs;
+    var isExtracted = extractDocs.length > 0;
 
     var inp = { width:'100%', padding:'9px 11px', border:'1px solid #dfe6e9', borderRadius:6, boxSizing:'border-box', fontSize:13, marginBottom:10, background:'#fff', outline:'none', fontFamily:'inherit' };
     var sqlBox = Object.assign({}, inp, { fontFamily:'monospace', fontSize:12, minHeight:70, resize:'vertical' });
@@ -6856,7 +6862,7 @@ function CreatePanel(props) {
 
             {activeGraph && (function(){
                 var recorded = createHistory[activeGraph + " " + graphEngine];
-                var extractSrcs = extractSources.filter(function(s){ return s.graph === activeGraph && (s.engine === graphEngine || !s.engine); });
+                var extractSrcs = extractDocs;  // ledger-backed (survives reload), else in-session
                 var preStyle = { margin:'6px 0 0', fontFamily:'monospace', fontSize:11, background:'#2d3436', color:'#dfe6e9', padding:10, borderRadius:6, overflow:'auto', maxHeight:220, whiteSpace:'pre-wrap' };
                 var capStyle = { fontSize:10, color:'#b2bec3', margin:'4px 0 0' };
                 var body;
@@ -7222,6 +7228,15 @@ function StoragePanel(props) {
     const [sourceData, setSourceData] = useState(null);
     const [sourceBusy, setSourceBusy] = useState(false);
     const [sourceError, setSourceError] = useState(null);
+    // Extracted graphs store attrs ON the nodes (no external Parquet) -- the
+    // /documents ledger tells us which; if present, preview the provenance
+    // ledger instead of the unrelated banking vertexes.parquet.
+    const [storageDocs, setStorageDocs] = useState([]);
+    useEffect(function() {
+        if (!gwClient || !activeGraph) { setStorageDocs([]); return; }
+        gwClient.documents(activeGraph).then(function(r){ setStorageDocs((r && r.documents) || []); }).catch(function(){ setStorageDocs([]); });
+    }, [gwClient, activeGraph]);
+    var isExtracted = storageDocs.length > 0;
 
     useEffect(function() {
         if (!gwClient || !activeGraph) { setStorageData(null); return; }
@@ -7276,18 +7291,33 @@ function StoragePanel(props) {
                     )
                 )}
             </div>
-            <div style={{ background:'#fff', border:'1px solid #dfe6e9', borderRadius:10, padding:24, boxShadow:'0 2px 8px rgba(0,0,0,0.04)' }}>
-                <h2 style={{ fontWeight:700, fontSize:18, margin:'0 0 4px', color:'#2d3436' }}>DuckDB source preview</h2>
-                <p style={{ fontSize:12, color:'#b2bec3', margin:'0 0 16px' }}>
-                    DuckDB is stateless — a query layer over files, not a persisted store — so this
-                    previews the source file (<code>{HYDRATE_SOURCE}</code>) itself, not a table.
-                </p>
-                {sourceBusy && <p style={{ fontSize:13, color:'#636e72' }}>{'Loading source preview…'}</p>}
-                {sourceError && <p style={{ fontSize:13, color:'#d63031' }}>{sourceError}</p>}
-                {!sourceBusy && !sourceError && sourceData && (
-                    <StorageTable name={HYDRATE_SOURCE} columns={sourceData.columns} rows={sourceData.rows} />
-                )}
-            </div>
+            {isExtracted ? (
+                <div style={{ background:'#fff', border:'1px solid #dfe6e9', borderRadius:10, padding:24, boxShadow:'0 2px 8px rgba(0,0,0,0.04)' }}>
+                    <h2 style={{ fontWeight:700, fontSize:18, margin:'0 0 4px', color:'#2d3436' }}>Provenance — documents</h2>
+                    <p style={{ fontSize:12, color:'#b2bec3', margin:'0 0 16px' }}>
+                        Built from {storageDocs.length} document{storageDocs.length === 1 ? '' : 's'} via Extract — attributes live on the graph nodes (no external Parquet source).
+                    </p>
+                    {storageDocs.map(function(d, i){
+                        return <div key={i} style={{ fontSize:13, color:'#2d3436', padding:'6px 0', borderBottom:'1px solid #f1f2f6' }}>
+                            {(d.source_type === 'file' ? '📄 ' : '✎ ') + d.doc_uri}
+                            <span style={{ fontSize:11, color:'#b2bec3', marginLeft:8 }}>· {d.status} · ingested {String(d.last_ingested_ts || '').slice(0,19).replace('T',' ')}</span>
+                        </div>;
+                    })}
+                </div>
+            ) : (
+                <div style={{ background:'#fff', border:'1px solid #dfe6e9', borderRadius:10, padding:24, boxShadow:'0 2px 8px rgba(0,0,0,0.04)' }}>
+                    <h2 style={{ fontWeight:700, fontSize:18, margin:'0 0 4px', color:'#2d3436' }}>DuckDB source preview</h2>
+                    <p style={{ fontSize:12, color:'#b2bec3', margin:'0 0 16px' }}>
+                        DuckDB is stateless — a query layer over files, not a persisted store — so this
+                        previews the source file (<code>{HYDRATE_SOURCE}</code>) itself, not a table.
+                    </p>
+                    {sourceBusy && <p style={{ fontSize:13, color:'#636e72' }}>{'Loading source preview…'}</p>}
+                    {sourceError && <p style={{ fontSize:13, color:'#d63031' }}>{sourceError}</p>}
+                    {!sourceBusy && !sourceError && sourceData && (
+                        <StorageTable name={HYDRATE_SOURCE} columns={sourceData.columns} rows={sourceData.rows} />
+                    )}
+                </div>
+            )}
         </div>
     );
 }

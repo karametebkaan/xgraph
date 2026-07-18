@@ -139,6 +139,7 @@
       create: function (spec) { return postJSONWithAuth("/create", { spec: spec }); },
       deleteGraph: function (graph) { return postJSONWithAuth("/delete_graph", { graph: graph }); },
       storage: function (graph) { return getJSON(q("/storage?graph=" + encodeURIComponent(graph))); },
+      documents: function (graph) { return getJSON(q("/documents?graph=" + encodeURIComponent(graph))); },
       graphDdl: function (graph) { return getJSON(q("/graph_ddl?graph=" + encodeURIComponent(graph))); },
       sourcePreview: function (source) { return getJSON(q("/source_preview?source=" + encodeURIComponent(source))); },
       ask: function (graph, question) { return postJSONWithAuth("/ask", { graph: graph, question: question }); },
