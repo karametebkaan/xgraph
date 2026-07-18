@@ -38,6 +38,17 @@ def create_app(adapter_factory=registry.get_adapter, compute=None, store=None) -
         allow_headers=["*"],
     )
 
+    @app.middleware("http")
+    async def _no_cache_frontend(request, call_next):
+        # The gateway serves the single-file frontend; without this a browser
+        # caches XGraph.html/gateway.js and silently runs a stale build after a
+        # deploy. Force revalidation for the static assets (dev tool, local only).
+        resp = await call_next(request)
+        path = request.url.path
+        if path == "/" or path.endswith((".html", ".js", ".css")):
+            resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        return resp
+
     def _resolve_adapter(session, engine):
         if session:
             return store.get(session)["adapter"]

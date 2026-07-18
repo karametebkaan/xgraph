@@ -278,3 +278,10 @@ def test_extract_uses_session_extract_mode(tmp_path, monkeypatch):
     r = client.post("/extract", data={"graph": "g", "session": sid, "text": "hi there"})
     assert r.status_code == 200
     assert captured["mode"] == "whole"
+
+
+def test_frontend_assets_are_no_cache(tmp_path):
+    # Prevent a stale cached XGraph.html/gateway.js from silently running an old
+    # build after a deploy (bit the user: missing radio + old viz crash).
+    r = _client(tmp_path).get("/")
+    assert "no-store" in r.headers.get("cache-control", "").lower()
