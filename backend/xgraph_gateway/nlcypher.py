@@ -122,9 +122,10 @@ Target dialect: Kinetica GQL. Rules (MUST follow):
   negate a SCALAR predicate instead, e.g.:
     GRAPH "{graph}" MATCH (p:Person)-[:WORKS_AT]->(o:Organization) WHERE o.entity_name <> 'Kinetica' RETURN p.entity_name
   (this returns nodes linked to a DIFFERENT value; it cannot express "linked to nothing").
-- Match names/free-text LOOSELY with a wildcard `LIKE`, NOT exact `=`:
-  `WHERE x.entity_name LIKE '%mullin%'`. Extracted nodes often store a fuller/differently-
-  spelled value (node 'Markwayne Mullin' vs a question saying 'Mullin'), so `=` misses them.
+- Match names/free-text LOOSELY and case-INSENSITIVELY with `LOWER(...) LIKE` and a lowercased
+  wildcard pattern, NOT exact `=` (Kinetica LIKE is case-sensitive):
+  `WHERE LOWER(x.entity_name) LIKE '%mullin%'`. Extracted nodes often store a fuller/differently-
+  cased value (node 'Markwayne Mullin' vs a question saying 'Mullin'), so `=` misses them.
 - To filter or match by a human-readable value (a person/organization/place NAME, a
   title), use the appropriate property from the per-label property list (commonly
   `name`); use the `NODE` identity property in a filter ONLY when the question provides
