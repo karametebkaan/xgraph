@@ -72,8 +72,22 @@ def _dot_esc(s) -> str:
     return str(s).replace("\\", "\\\\").replace('"', '\\"')
 
 
-def _dot_from_triples(triples) -> str:
+def _dot_from_triples(triples, pct=None) -> str:
     lines = ["digraph {"]
+    if pct:
+        # Emit a node declaration per label with its share of nodes in the
+        # display label (e.g. `Location\n(31%)`) so the ontology graph carries
+        # the same distribution as the label donut. The node id stays the bare
+        # label so edges still match; only the rendered label carries the %.
+        seen: list = []
+        for src, _rel, dst in triples:
+            for n in (src, dst):
+                if n not in seen:
+                    seen.append(n)
+        for n in seen:
+            p = pct.get(n)
+            disp = _dot_esc(n) + (f"\\n({p:.1f}%)" if p is not None else "")
+            lines.append(f'  "{_dot_esc(n)}" [label="{disp}"];')
     for src, rel, dst in triples:
         lines.append(f'  "{_dot_esc(src)}" -> "{_dot_esc(dst)}" [label="{_dot_esc(rel)}"];')
     lines.append("}")
@@ -365,6 +379,20 @@ class FalkorDBAdapter(GraphEngineAdapter):
         label_rows = [r[0] for r in
                       g.query("MATCH (n) RETURN DISTINCT n.LABEL", timeout=60000).result_set]
         labels = sorted({label for row in label_rows for label in _as_labels(row)})
+        # Per-label node counts via server-side aggregation -- one small row per
+        # distinct LABEL value, so it stays cheap even on large graphs (unlike a
+        # full node scan). Feeds the ontology DOT's percentages; Kinetica's
+        # show/graph DOT computes the same distribution.
+        from collections import Counter
+        struct_counts: Counter = Counter()
+        _total = 0
+        for lv, c in g.query("MATCH (n) RETURN n.LABEL AS l, count(*) AS c",
+                             timeout=60000).result_set:
+            lbls = _as_labels(lv)
+            _total += c
+            if lbls:
+                struct_counts[lbls[0]] += c  # structural (first) label, matches the DOT
+        label_pct = {l: 100.0 * c / _total for l, c in struct_counts.items()} if _total else {}
         rels = [r[0] for r in g.query("MATCH ()-[r]->() RETURN DISTINCT type(r)", timeout=60000).result_set if r[0]]
         raw_triples = [(r[0], r[1], r[2]) for r in g.query(
             "MATCH (a)-[r]->(b) RETURN DISTINCT a.LABEL, type(r), b.LABEL", timeout=60000).result_set]
@@ -381,7 +409,9 @@ class FalkorDBAdapter(GraphEngineAdapter):
                 if triple not in seen_triples:
                     seen_triples.add(triple)
                     triples.append(triple)
-        return {"labels": labels, "rel_types": rels, "dot": _dot_from_triples(triples),
+        return {"labels": labels, "rel_types": rels,
+                "dot": _dot_from_triples(triples, label_pct),
+                "label_counts": dict(struct_counts),
                 "properties": self._label_properties(g, labels),
                 "counts": self._counts(g),
                 # No ontology-store handle here, so every label defaults to

@@ -74,6 +74,8 @@ class _FakeSchemaGraph:
                 self.result_set = result_set
         if "RETURN DISTINCT n.LABEL" in cypher:
             return _Result([[l] for l in self._labels])
+        if "count(*)" in cypher:
+            return _Result([[l, 1] for l in self._labels])
         if "RETURN DISTINCT type(r)" in cypher:
             return _Result([[r] for r in self._rels])
         if "RETURN DISTINCT a.LABEL" in cypher:
@@ -367,3 +369,12 @@ def test_dot_from_triples_escapes_quotes_and_spaces():
     assert '"Government Agency"' in dot            # spaces fine (quoted)
     assert '\\"quoted\\"' in dot                   # embedded quotes escaped
     assert dot.startswith("digraph {")
+
+
+def test_dot_from_triples_annotates_percentages():
+    from xgraph_gateway.adapters.falkordb_adapter import _dot_from_triples
+    dot = _dot_from_triples([("Person", "WORKS_AT", "Organization")],
+                            {"Person": 60.0, "Organization": 40.0})
+    assert 'Person\\n(60.0%)' in dot            # node display label carries its share
+    assert 'Organization\\n(40.0%)' in dot
+    assert '"Person" -> "Organization"' in dot  # edge id still the bare label
