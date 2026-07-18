@@ -62,6 +62,10 @@ _DIALECT_FALKORDB = """\
 Target dialect: openCypher, as implemented by FalkorDB. Rules (MUST follow):
 - Do NOT prefix the query with GRAPH "..." — FalkorDB Cypher has no GRAPH clause, it runs
   directly against the connected graph.
+- When filtering by a NAME or other free-text value, match LOOSELY with case-insensitive
+  substring containment — `WHERE toLower(x.name) CONTAINS toLower('mullin')` — NOT exact `=`.
+  Extracted nodes often store a fuller/differently-spelled value (node 'Markwayne Mullin' vs a
+  question saying 'Mullin'), so `=` misses them.
 - Do NOT put predicates inline in the node/relationship pattern (that is Kinetica-only
   syntax). Instead, write the whole MATCH first, then a single WHERE clause after it,
   AND-joining every hop's predicates, e.g.:
@@ -115,6 +119,9 @@ Target dialect: Kinetica GQL. Rules (MUST follow):
   negate a SCALAR predicate instead, e.g.:
     GRAPH "{graph}" MATCH (p:Person)-[:WORKS_AT]->(o:Organization) WHERE o.entity_name <> 'Kinetica' RETURN p.entity_name
   (this returns nodes linked to a DIFFERENT value; it cannot express "linked to nothing").
+- Match names/free-text LOOSELY with a wildcard `LIKE`, NOT exact `=`:
+  `WHERE x.entity_name LIKE '%mullin%'`. Extracted nodes often store a fuller/differently-
+  spelled value (node 'Markwayne Mullin' vs a question saying 'Mullin'), so `=` misses them.
 - To filter or match by a human-readable value (a person/organization/place NAME, a
   title), use the appropriate property from the per-label property list (commonly
   `name`); use the `NODE` identity property in a filter ONLY when the question provides

@@ -238,20 +238,22 @@ def extract_document(text: str, hint: Optional[str] = None, llm: Optional[LLMFun
             label = (e.get("label") or "").strip()
             attrs = e.get("attrs") or {}
             facets = e.get("facets") or []
-            eid = canonical_id(name)
-            name_to_id[name] = eid
-            if eid in entities:
-                existing = entities[eid]
+            cid = canonical_id(name)  # case-insensitive dedup KEY only (not the NODE)
+            if cid in entities:
+                existing = entities[cid]
+                name_to_id[name] = existing["id"]  # map this spelling to the canonical NODE
                 if not existing.get("label"):
                     existing["label"] = label
-                if not existing.get("name"):
-                    existing["name"] = name
                 if not existing.get("facets"):
                     existing["facets"] = facets
                 existing["attrs"] = {**attrs, **existing["attrs"]}
             else:
-                entities[eid] = {"id": eid, "label": label, "name": name,
+                # NODE is the readable NAME (what Visualize / queries show), not the
+                # slug-hash id. Dedup still keys on canonical_id so 'Mullin'/'mullin'
+                # collapse; the first-seen spelling becomes the NODE.
+                entities[cid] = {"id": name, "label": label, "name": name,
                                   "facets": facets, "attrs": dict(attrs)}
+                name_to_id[name] = name
 
         for r in chunk_relations:
             src_name = (r.get("source") or "").strip()

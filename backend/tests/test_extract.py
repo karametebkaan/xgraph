@@ -93,7 +93,7 @@ def test_extract_document_merges_duplicate_entity_across_chunks():
     assert rel_labels == ["FOUNDED_BY", "LED_BY"]
 
     apple_id = apple_entities[0]["id"]
-    assert apple_id == extract.canonical_id("Apple")
+    assert apple_id == "Apple"  # NODE = name
     for r in result["relations"]:
         assert r["src"] == apple_id
 
@@ -106,7 +106,7 @@ def test_extract_document_entity_ids_are_canonical():
         {"entities": [{"name": "Acme Corp", "label": "Organization"}], "relations": []},
     ])
     result = extract.extract_document(text, llm=fake_llm)
-    assert result["entities"][0]["id"] == extract.canonical_id("Acme Corp")
+    assert result["entities"][0]["id"] == "Acme Corp"  # NODE = name now
 
 
 def test_extract_document_relation_id_is_sha1_of_src_dst_label():
@@ -119,8 +119,8 @@ def test_extract_document_relation_id_is_sha1_of_src_dst_label():
         },
     ])
     result = extract.extract_document(text, llm=fake_llm)
-    src = extract.canonical_id("A")
-    dst = extract.canonical_id("B")
+    src = "A"  # NODE = name
+    dst = "B"
     expected_id = hashlib.sha1(f"{src}|{dst}|RELATES_TO".encode()).hexdigest()[:16]
     assert result["relations"][0]["id"] == expected_id
 
