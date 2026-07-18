@@ -272,6 +272,31 @@ Every call is a plain `curl` — no client library needed. The **FalkorDB + Duck
 chained calls: FalkorDB runs the skinny traversal, DuckDB hydrates the wide attribute columns onto
 the returned ids.
 
+**Connection settings / credentials.** By default the gateway reads engine credentials from
+`backend/.env` (copy `backend/.env.example`) — the process env overrides the file:
+
+```bash
+FALKORDB_HOST=localhost        # FalkorDB (RESP)
+FALKORDB_PORT=6379
+FALKORDB_PASSWORD=             # blank if unauthenticated
+KINETICA_URL=http://127.0.0.1:9191   # Kinetica REST
+KINETICA_USER=admin
+KINETICA_PASS=
+# XGRAPH_DATA_DIR=/abs/path/to/data   # bare source names resolve here (default: repo data/)
+# XGRAPH_META_DB=/abs/path/xgraph_meta.duckdb   # folding ontology + document ledger (default: data/)
+```
+
+To point a *single session* at a different server instead, pass a `conn` override in `/connect`
+(keys differ per engine — FalkorDB `{host, port, password}`, Kinetica `{url, user, password}`);
+the returned `session` then carries those credentials so later calls need only `"session"`:
+
+```bash
+curl -s -X POST localhost:8090/connect -H 'Content-Type: application/json' -d '{
+  "graph":   {"engine":"falkordb", "conn":{"host":"10.0.0.5","port":6379,"password":"s3cret"}},
+  "compute": {"engine":"kinetica", "conn":{"url":"http://10.0.0.9:9191","user":"admin","password":"pw"}}
+}'
+```
+
 ```bash
 # Optional — open a session that fixes the graph engine + OLAP engine, so later calls
 # can pass "session" instead of "engine". Extraction's folding ontology + document
