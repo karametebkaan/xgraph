@@ -92,6 +92,39 @@ def test_resolve_canonical_prefers_exact_match(tmp_path):
     assert eng.resolve_canonical("g1", "entity", "COMPANY") == "ShoutCo"
 
 
+def test_clear_graph_metadata_removes_only_that_graph(tmp_path):
+    eng = _engine(tmp_path)
+    eng.record_document("g1", "doc:a", "sha-1", "text")
+    eng.record_document("g2", "doc:a", "sha-1", "text")
+    eng.record_type("g1", "entity", "Company", "Company", "EntityType", "doc:a")
+    eng.record_type("g2", "entity", "Company", "Company", "EntityType", "doc:a")
+
+    eng.clear_graph_metadata("g1")
+
+    assert eng.list_documents("g1") == []
+    assert eng.get_canonicals("g1", "entity") == []
+    # g2's rows are untouched.
+    assert len(eng.list_documents("g2")) == 1
+    assert eng.get_canonicals("g2", "entity") == ["Company"]
+
+
+def test_clear_graph_metadata_is_idempotent(tmp_path):
+    eng = _engine(tmp_path)
+    eng.clear_graph_metadata("nonexistent")  # must not raise, even with no tables/rows
+
+
+def test_get_document_returns_row_or_none(tmp_path):
+    eng = _engine(tmp_path)
+    assert eng.get_document("g1", "doc:a") is None
+    eng.record_document("g1", "doc:a", "sha-1", "text")
+    doc = eng.get_document("g1", "doc:a")
+    assert doc is not None
+    assert doc["sha256"] == "sha-1"
+    assert doc["graph"] == "g1"
+    assert doc["doc_uri"] == "doc:a"
+    assert eng.get_document("g1", "doc:other") is None
+
+
 def test_record_type_first_seen_ts_is_naive_utc(tmp_path):
     eng = _engine(tmp_path)
     eng.record_type("g1", "entity", "Company", "Company", "EntityType", "doc:a")
@@ -209,6 +242,27 @@ def test_kinetica_record_type_first_seen_wins(kinetica_engine):
     eng.record_type(_KINETICA_TEST_GRAPH, "entity", "Company", "Company", "EntityType", "doc:a")
     eng.record_type(_KINETICA_TEST_GRAPH, "entity", "Company", "SOMETHING_ELSE", "OtherAxis", "doc:b")
     assert eng.resolve_canonical(_KINETICA_TEST_GRAPH, "entity", "Company") == "Company"
+
+
+def test_kinetica_clear_graph_metadata(kinetica_engine):
+    eng = kinetica_engine
+    eng.record_document(_KINETICA_TEST_GRAPH, "doc:a", "sha-1", "text")
+    eng.record_type(_KINETICA_TEST_GRAPH, "entity", "Company", "Company", "EntityType", "doc:a")
+
+    eng.clear_graph_metadata(_KINETICA_TEST_GRAPH)
+
+    assert eng.list_documents(_KINETICA_TEST_GRAPH) == []
+    assert eng.get_canonicals(_KINETICA_TEST_GRAPH, "entity") == []
+
+
+def test_kinetica_get_document(kinetica_engine):
+    eng = kinetica_engine
+    assert eng.get_document(_KINETICA_TEST_GRAPH, "doc:a") is None
+    eng.record_document(_KINETICA_TEST_GRAPH, "doc:a", "sha-1", "text")
+    doc = eng.get_document(_KINETICA_TEST_GRAPH, "doc:a")
+    assert doc is not None
+    assert doc["sha256"] == "sha-1"
+    assert doc["graph"] == _KINETICA_TEST_GRAPH
 
 
 def test_kinetica_record_type_null_axis_and_canonical_roundtrip(kinetica_engine):

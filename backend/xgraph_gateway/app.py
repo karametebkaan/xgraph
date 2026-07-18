@@ -88,8 +88,18 @@ def create_app(adapter_factory=registry.get_adapter, compute=None, store=None) -
     def schema(graph: str, engine: str = "", session: str | None = None,
                full: bool = False, nkey: bool = False, ekey: bool = False):
         try:
-            return _resolve_adapter(session, engine).get_schema(
+            result = _resolve_adapter(session, engine).get_schema(
                 graph, options={"full": full, "nkey": nkey, "ekey": ekey})
+            try:
+                amap = _resolve_compute(session).axis_map(graph, "entity")
+                if amap:
+                    axes = {}
+                    for label in result.get("labels", []):
+                        axes.setdefault(amap.get(label, "EntityType"), []).append(label)
+                    result["axes"] = axes
+            except Exception:
+                pass  # keep the adapter's default axes on any store error
+            return result
         except Exception as e:
             return _err(engine, e)
 
@@ -153,7 +163,13 @@ def create_app(adapter_factory=registry.get_adapter, compute=None, store=None) -
         engine = payload.get("engine", "")
         session = payload.get("session")
         try:
-            return _resolve_adapter(session, engine).delete_graph(payload["graph"])
+            graph = payload["graph"]
+            result = _resolve_adapter(session, engine).delete_graph(graph)
+            # Clear the ledger + ontology rows too, or a deleted-then-re-
+            # extracted identical document would be silently short-circuited
+            # as "unchanged" (0 entities) by the ledger's stale sha256 row.
+            _resolve_compute(session).clear_graph_metadata(graph)
+            return result
         except Exception as e:
             return _err(engine, e)
 
@@ -177,11 +193,18 @@ def create_app(adapter_factory=registry.get_adapter, compute=None, store=None) -
                 doc_uri = f"text:{sha[:12]}"
 
             store = _resolve_compute(session)
-            record = store.record_document(graph, doc_uri, sha, source_type)
-            doc_info = {"doc_uri": doc_uri, "sha256": sha, **record}
+            existing = store.get_document(graph, doc_uri)
 
-            # Idempotent short-circuit: identical bytes already ingested.
-            if record["status"] == "unchanged":
+            # Idempotent short-circuit: identical bytes already ingested for
+            # this graph. Only bumps last_ingested_ts -- no re-extraction/
+            # re-ingest, no ledger row for bytes that were never actually
+            # processed. Checked via a read (get_document) BEFORE any commit,
+            # so a graph that was deleted (which clears the ledger) or a
+            # prior extraction that failed (which never committed a ledger
+            # row -- see below) both correctly fall through to re-extraction.
+            if existing is not None and existing.get("sha256") == sha:
+                record = store.record_document(graph, doc_uri, sha, source_type)
+                doc_info = {"doc_uri": doc_uri, "sha256": sha, **record}
                 return {"graph": graph, "entities": 0, "relations": 0,
                         "entities_new": 0, "relations_new": 0,
                         "labels": {"node_labels": [], "edge_labels": []},
@@ -193,6 +216,12 @@ def create_app(adapter_factory=registry.get_adapter, compute=None, store=None) -
                                               res["relations"], doc_uri)
             adapter = _resolve_adapter(session, engine)
             out = adapter.ingest_elements(graph, res["entities"], res["relations"])
+            # Ledger is committed ONLY after a successful ingest -- if
+            # extraction/ingest throws above, this line never runs and no
+            # ledger row exists, so resubmitting the same bytes retries
+            # cleanly instead of being a permanent no-op.
+            record = store.record_document(graph, doc_uri, sha, source_type)
+            doc_info = {"doc_uri": doc_uri, "sha256": sha, **record}
             return {"graph": graph, "entities": out["nodes"], "relations": out["edges"],
                     "entities_new": out.get("nodes_created", out["nodes"]),
                     "relations_new": out.get("edges_created", out["edges"]),

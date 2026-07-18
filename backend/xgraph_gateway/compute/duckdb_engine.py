@@ -81,6 +81,33 @@ class DuckDBComputeEngine:
         finally:
             con.close()
 
+    def get_document(self, graph, doc_uri):
+        con = self._meta_con()
+        try:
+            cols = ["graph", "doc_uri", "sha256", "source_type",
+                    "first_ingested_ts", "last_ingested_ts", "status"]
+            row = con.execute(
+                f"SELECT {', '.join(cols)} FROM xgraph_documents"
+                " WHERE graph = ? AND doc_uri = ?", [graph, doc_uri]).fetchone()
+            if row is None:
+                return None
+            return dict(zip(cols, [_iso(v) if hasattr(v, 'isoformat') else v
+                                    for v in row]))
+        finally:
+            con.close()
+
+    def clear_graph_metadata(self, graph):
+        """Delete all ledger + ontology rows for `graph` (idempotent -- a
+        no-op, not an error, if the tables don't exist yet or the graph has
+        no rows). Called from /delete_graph so a deleted-then-re-extracted
+        document isn't silently short-circuited as "unchanged"."""
+        con = self._meta_con()
+        try:
+            con.execute("DELETE FROM xgraph_documents WHERE graph = ?", [graph])
+            con.execute("DELETE FROM xgraph_ontology WHERE graph = ?", [graph])
+        finally:
+            con.close()
+
     def record_type(self, graph, kind, type_name, canonical_name, axis, source_uri):
         # Naive UTC, matching record_document's convention: DuckDB TIMESTAMP is
         # tz-naive, so a tz-aware value would get silently shifted to local

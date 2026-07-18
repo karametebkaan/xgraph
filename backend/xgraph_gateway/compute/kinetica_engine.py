@@ -232,6 +232,31 @@ class KineticaComputeEngine:
             out.append(d)
         return out
 
+    def get_document(self, graph, doc_uri):
+        self._ensure_meta_schema()
+        cols = ["graph", "doc_uri", "sha256", "source_type",
+                "first_ingested_ts", "last_ingested_ts", "status"]
+        g, u = _escape_sql_literal(graph), _escape_sql_literal(doc_uri)
+        rows = list(self._src.rows(
+            f"SELECT {', '.join(cols)} FROM {_DOCUMENTS_TABLE}"
+            f" WHERE graph = {g} AND doc_uri = {u}"))
+        if not rows:
+            return None
+        d = {c: rows[0].get(c) for c in cols}
+        d["first_ingested_ts"] = _ts_from_kinetica(d["first_ingested_ts"])
+        d["last_ingested_ts"] = _ts_from_kinetica(d["last_ingested_ts"])
+        return d
+
+    def clear_graph_metadata(self, graph):
+        """Delete all ledger + ontology rows for `graph` (idempotent -- a
+        no-op, not an error, if the graph has no rows). Called from
+        /delete_graph so a deleted-then-re-extracted document isn't silently
+        short-circuited as "unchanged"."""
+        self._ensure_meta_schema()
+        g = _escape_sql_literal(graph)
+        for table in (_DOCUMENTS_TABLE, _ONTOLOGY_TABLE):
+            list(self._src.rows(f"DELETE FROM {table} WHERE graph = {g}"))
+
     def record_type(self, graph, kind, type_name, canonical_name, axis, source_uri):
         self._ensure_meta_schema()
         now_lit = _ts_literal(_now_ms())

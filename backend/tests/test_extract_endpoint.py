@@ -171,6 +171,74 @@ def test_extract_same_text_is_reused(client_with_store, monkeypatch):
     assert second["entities"] == 0 and second["relations"] == 0
 
 
+def test_delete_graph_clears_document_ledger(client_with_store, monkeypatch):
+    # Fix 1: delete_graph must clear the ledger so an identical re-extract
+    # after a delete is NOT short-circuited to "reused" with zero entities.
+    from xgraph_gateway import extract
+
+    def fake_extract_document(text, hint=None, **kw):
+        return {"entities": [{"id": "acme", "name": "Acme", "label": "Firm", "attrs": {}}],
+                "relations": [], "truncated": False}
+    monkeypatch.setattr(extract, "extract_document", fake_extract_document)
+    _patch_fold_identity(monkeypatch)
+
+    payload = {"text": "Acme is a firm.", "graph": "gDel", "engine": "fake"}
+    first = client_with_store.post("/extract", data=payload).json()
+    assert first["document"]["reused"] is False
+
+    del_resp = client_with_store.post("/delete_graph", json={"graph": "gDel", "engine": "fake"})
+    assert del_resp.status_code == 200
+
+    second = client_with_store.post("/extract", data=payload).json()
+    assert second["document"]["reused"] is False
+    assert second["entities"] > 0
+
+
+def test_extract_failure_does_not_commit_ledger(client_with_store, monkeypatch):
+    # Fix 1: if ingest throws AFTER extraction, no ledger row may be committed
+    # -- otherwise resubmitting identical bytes would be a permanent no-op.
+    from xgraph_gateway import extract
+    from xgraph_gateway.adapters.fake import FakeAdapter
+
+    def fake_extract_document(text, hint=None, **kw):
+        return {"entities": [{"id": "acme", "name": "Acme", "label": "Firm", "attrs": {}}],
+                "relations": [], "truncated": False}
+    monkeypatch.setattr(extract, "extract_document", fake_extract_document)
+    _patch_fold_identity(monkeypatch)
+
+    calls = {"n": 0}
+    orig_ingest = FakeAdapter.ingest_elements
+
+    def flaky_ingest(self, graph, nodes, edges):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("boom")
+        return orig_ingest(self, graph, nodes, edges)
+    monkeypatch.setattr(FakeAdapter, "ingest_elements", flaky_ingest)
+
+    payload = {"text": "Acme is a firm.", "graph": "gFail", "engine": "fake"}
+    first = client_with_store.post("/extract", data=payload)
+    assert first.status_code == 400
+    assert "error" in first.json()
+
+    second = client_with_store.post("/extract", data=payload).json()
+    assert second["document"]["reused"] is False
+    assert second["entities"] > 0
+
+
+def test_schema_surfaces_ontology_axes(tmp_path):
+    # Fix 2: get_schema should be enriched with real axes recorded in the
+    # ontology store, grouping unknown labels under the adapter's default.
+    compute = DuckDBComputeEngine(meta_path=str(tmp_path / "meta.duckdb"))
+    compute.record_type("demo_graph", "entity", "wire_message", "wire_message", "RiskAxis", "d")
+    client = TestClient(create_app(adapter_factory=lambda e: FakeAdapter(), compute=compute))
+
+    r = client.get("/schema", params={"graph": "demo_graph", "engine": "fake"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["axes"] == {"RiskAxis": ["wire_message"], "EntityType": ["bank"]}
+
+
 def test_documents_endpoint_lists_ledger(client_with_store, monkeypatch):
     from xgraph_gateway import extract, extract_fold
 
