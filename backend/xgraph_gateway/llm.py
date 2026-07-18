@@ -17,24 +17,29 @@ import subprocess
 from typing import Any, Optional
 
 
-def _llm(prompt: str, *, schema: Optional[dict] = None) -> Any:
-    """Return a dict (when schema given) or str. Honors XGRAPH_LLM=stub."""
+def _llm(prompt: str, *, schema: Optional[dict] = None, model: Optional[str] = None) -> Any:
+    """Return a dict (when schema given) or str. Honors XGRAPH_LLM=stub.
+
+    `model` (optional) overrides the model for THIS call — used to run the cheap,
+    high-volume paths (extraction, fold-checks) on a fast model while leaving the
+    reasoning paths (ask/explain) on the default. Falls back to XGRAPH_LLM_MODEL,
+    then the backend default."""
     if os.environ.get("XGRAPH_LLM") == "stub":
         raise RuntimeError(
             "XGRAPH_LLM=stub: ask/explain need a real LLM backend "
             "(claude CLI or ANTHROPIC_API_KEY)")
     if shutil.which("claude"):
-        return _llm_claude_cli(prompt, schema)
+        return _llm_claude_cli(prompt, schema, model)
     if os.environ.get("ANTHROPIC_API_KEY"):
-        return _llm_claude_sdk(prompt, schema)
+        return _llm_claude_sdk(prompt, schema, model)
     raise RuntimeError("no LLM backend: install the `claude` CLI or set ANTHROPIC_API_KEY")
 
 
-def _llm_claude_cli(prompt: str, schema: Optional[dict]) -> Any:
+def _llm_claude_cli(prompt: str, schema: Optional[dict], model: Optional[str] = None) -> Any:
     cmd = ["claude", "-p", "--output-format", "json"]
     if schema is not None:
         cmd += ["--json-schema", json.dumps(schema)]
-    model = os.environ.get("XGRAPH_LLM_MODEL")
+    model = model or os.environ.get("XGRAPH_LLM_MODEL")
     if model:
         cmd += ["--model", model]
     cmd.append(prompt)
@@ -51,10 +56,10 @@ def _llm_claude_cli(prompt: str, schema: Optional[dict]) -> Any:
     return wrapper.get("result", "")
 
 
-def _llm_claude_sdk(prompt: str, schema: Optional[dict]) -> Any:
+def _llm_claude_sdk(prompt: str, schema: Optional[dict], model: Optional[str] = None) -> Any:
     import anthropic
     client = anthropic.Anthropic()
-    model = os.environ.get("XGRAPH_LLM_MODEL", "claude-opus-4-7")
+    model = model or os.environ.get("XGRAPH_LLM_MODEL", "claude-opus-4-7")
     resp = client.messages.create(model=model, max_tokens=2048,
                                   messages=[{"role": "user", "content": prompt}])
     text = "".join(b.text for b in resp.content if b.type == "text")

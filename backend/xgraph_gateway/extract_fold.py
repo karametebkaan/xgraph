@@ -9,6 +9,7 @@ subset; facet handling is layered on in a later task.
 """
 from __future__ import annotations
 
+import os
 from typing import Any, Callable, Optional
 
 LLMFunc = Callable[..., Any]
@@ -16,16 +17,21 @@ LLMFunc = Callable[..., Any]
 _ENTITY_AXIS = "EntityType"
 _RELATION_AXIS = "RelationType"
 
+# Fold-checks are trivial yes/no synonym decisions — run on the fast model too.
+_FOLD_MODEL = os.environ.get("XGRAPH_EXTRACT_MODEL", "claude-haiku-4-5-20251001")
+
 _llm_fn: Optional[LLMFunc] = None
 
 
 def _get_llm() -> LLMFunc:
-    """Lazily bind the local `_llm` (mirrors extract.py) so importing this
+    """Lazily bind the local `_llm` (on the fast fold model) so importing this
     module never requires the `claude` CLI, and tests inject a fake."""
     global _llm_fn
     if _llm_fn is None:
         from .llm import _llm
-        _llm_fn = _llm
+        def _fast(prompt, *, schema=None):
+            return _llm(prompt, schema=schema, model=_FOLD_MODEL)
+        _llm_fn = _fast
     return _llm_fn
 
 

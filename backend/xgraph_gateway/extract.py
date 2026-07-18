@@ -10,26 +10,31 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 from typing import Any, Callable, Optional
 
 
 LLMFunc = Callable[..., Any]
 
+# Extraction is high-volume and structural, not reasoning-heavy — run it on a
+# fast, cheap model by default (overridable). ask/explain keep the default.
+EXTRACT_MODEL = os.environ.get("XGRAPH_EXTRACT_MODEL", "claude-haiku-4-5-20251001")
+
 _llm_fn: Optional[LLMFunc] = None
 
 
 def _get_llm() -> LLMFunc:
-    """Lazily bind the local `_llm` the first time a real call is needed.
-
-    Deferred (rather than a top-level import) so importing this module never
-    requires the `claude` CLI to be present, and so tests can inject a fake
-    `llm` and never shell out.
+    """Lazily bind the local `_llm` (on EXTRACT_MODEL) the first time a real call
+    is needed. Deferred so importing this module never requires the `claude` CLI,
+    and so tests can inject a fake `llm` and never shell out.
     """
     global _llm_fn
     if _llm_fn is None:
         from .llm import _llm
-        _llm_fn = _llm
+        def _fast(prompt, *, schema=None):
+            return _llm(prompt, schema=schema, model=EXTRACT_MODEL)
+        _llm_fn = _fast
     return _llm_fn
 
 

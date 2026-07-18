@@ -250,3 +250,41 @@ def test_read_document_pdf():
     if "Hello World" not in text:
         pytest.skip("pypdf could not extract readable text from the in-process PDF")
     assert "Hello World" in text
+
+
+def test_extract_get_llm_binds_fast_model(monkeypatch):
+    from xgraph_gateway import extract, llm as llmmod
+    captured = {}
+    def fake_llm(prompt, *, schema=None, model=None):
+        captured["model"] = model
+        return {"entities": [], "relations": []}
+    monkeypatch.setattr(llmmod, "_llm", fake_llm)
+    monkeypatch.setattr(extract, "_llm_fn", None)
+    extract._get_llm()("hi", schema={})
+    assert captured["model"] == extract.EXTRACT_MODEL
+    assert "haiku" in extract.EXTRACT_MODEL
+
+
+def test_fold_get_llm_binds_fast_model(monkeypatch):
+    from xgraph_gateway import extract_fold, llm as llmmod
+    captured = {}
+    def fake_llm(prompt, *, schema=None, model=None):
+        captured["model"] = model
+        return {"canonical": None}
+    monkeypatch.setattr(llmmod, "_llm", fake_llm)
+    monkeypatch.setattr(extract_fold, "_llm_fn", None)
+    extract_fold._get_llm()("hi", schema={})
+    assert "haiku" in captured["model"]
+
+
+def test_nlcypher_get_llm_keeps_default_model(monkeypatch):
+    # ask/explain path must NOT pin a model (keeps the default/Opus).
+    from xgraph_gateway import nlcypher, llm as llmmod
+    captured = {"model": "SENTINEL"}
+    def fake_llm(prompt, *, schema=None, model=None):
+        captured["model"] = model
+        return "x"
+    monkeypatch.setattr(llmmod, "_llm", fake_llm)
+    monkeypatch.setattr(nlcypher, "_llm_fn", None)
+    nlcypher._get_llm()("hi")
+    assert captured["model"] is None
