@@ -28,11 +28,14 @@ def _llm(prompt: str, *, schema: Optional[dict] = None, model: Optional[str] = N
         raise RuntimeError(
             "XGRAPH_LLM=stub: ask/explain need a real LLM backend "
             "(claude CLI or ANTHROPIC_API_KEY)")
-    if shutil.which("claude"):
-        return _llm_claude_cli(prompt, schema, model)
+    # Prefer the SDK when an API key is explicitly set -- a persistent client
+    # with no per-call CLI cold-start (faster on high-volume extraction). With
+    # no key, fall back to the `claude` CLI (the default dev path, no key needed).
     if os.environ.get("ANTHROPIC_API_KEY"):
         return _llm_claude_sdk(prompt, schema, model)
-    raise RuntimeError("no LLM backend: install the `claude` CLI or set ANTHROPIC_API_KEY")
+    if shutil.which("claude"):
+        return _llm_claude_cli(prompt, schema, model)
+    raise RuntimeError("no LLM backend: set ANTHROPIC_API_KEY or install the `claude` CLI")
 
 
 def _llm_claude_cli(prompt: str, schema: Optional[dict], model: Optional[str] = None) -> Any:

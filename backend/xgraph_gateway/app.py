@@ -53,6 +53,13 @@ def create_app(adapter_factory=registry.get_adapter, compute=None, store=None) -
             return store.get(session)["graph_engine"]
         return engine
 
+    def _resolve_extract_mode(session):
+        # Reads the SessionStore (not the compute store that extract_endpoint
+        # locally shadows as `store`); defaults to the conservative sequential.
+        if session:
+            return store.get(session).get("extract_mode", "sequential")
+        return "sequential"
+
     @app.get("/engines")
     def engines():
         return {"graph_engines": ["falkordb", "kinetica", "fake"], "sources": ["duckdb"]}
@@ -61,10 +68,12 @@ def create_app(adapter_factory=registry.get_adapter, compute=None, store=None) -
     def connect(payload: dict = Body(...)):
         graph = payload.get("graph", {})
         compute_cfg = payload.get("compute", {})
+        llm_cfg = payload.get("llm", {})
         try:
             session_id = store.create(
                 graph.get("engine"), graph.get("conn"),
-                compute_cfg.get("engine"), compute_cfg.get("conn"))
+                compute_cfg.get("engine"), compute_cfg.get("conn"),
+                extract_mode=llm_cfg.get("extract_mode"))
             adapter = store.get(session_id)["adapter"]
             return {"session": session_id, "graphs": adapter.list_graphs()}
         except Exception as e:
@@ -211,7 +220,7 @@ def create_app(adapter_factory=registry.get_adapter, compute=None, store=None) -
                         "truncated": False, "folded": [],
                         "document": {**doc_info, "reused": True}}
 
-            res = extract.extract_document(doc, hint)
+            res = extract.extract_document(doc, hint, mode=_resolve_extract_mode(session))
             folded = extract_fold.fold_labels(store, graph, res["entities"],
                                               res["relations"], doc_uri)
             adapter = _resolve_adapter(session, engine)

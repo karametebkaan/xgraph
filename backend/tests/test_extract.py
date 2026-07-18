@@ -55,30 +55,32 @@ def _canned_llm(responses):
 
 def test_extract_document_merges_duplicate_entity_across_chunks():
     text = "Apple chunk one.\n\nApple chunk two."
-    fake_llm = _canned_llm([
-        {
-            "entities": [
-                {"name": "Apple", "label": "Organization"},
-                {"name": "Steve Jobs", "label": "Person"},
-            ],
-            "relations": [
-                {"source": "Apple", "target": "Steve Jobs", "label": "FOUNDED_BY"},
-            ],
-        },
-        {
+    # Content-keyed (not order-based): chunk calls run concurrently, so the fake
+    # must return the right response for the right chunk regardless of order.
+    def fake_llm(prompt, *, schema=None):
+        if "chunk one" in prompt:
+            return {
+                "entities": [
+                    {"name": "Apple", "label": "Organization"},
+                    {"name": "Steve Jobs", "label": "Person"},
+                ],
+                "relations": [
+                    {"source": "Apple", "target": "Steve Jobs", "label": "FOUNDED_BY"},
+                ],
+            }
+        return {
             "entities": [
                 {"name": "Apple", "label": "Organization"},
                 {"name": "Tim Cook", "label": "Person"},
             ],
             "relations": [
                 {"source": "Apple", "target": "Tim Cook", "label": "LED_BY"},
-                # duplicate of the above within the same chunk -> collapses
+                # duplicate within the same chunk -> collapses
                 {"source": "Apple", "target": "Tim Cook", "label": "LED_BY"},
-                # target "Google" is not among this chunk's entities -> dangling, dropped
+                # target "Google" not among this chunk's entities -> dangling, dropped
                 {"source": "Apple", "target": "Google", "label": "COMPETES_WITH"},
             ],
-        },
-    ])
+        }
 
     result = extract.extract_document(text, llm=fake_llm)
 
@@ -150,11 +152,14 @@ def test_extract_document_accepts_json_string_response():
 
 
 def test_extract_document_shallow_merges_attrs_first_wins():
-    fake_llm = _canned_llm([
-        {"entities": [{"name": "X", "label": "Thing", "attrs": {"color": "red"}}], "relations": []},
-        {"entities": [{"name": "X", "label": "Thing", "attrs": {"color": "blue", "size": "big"}}],
-         "relations": []},
-    ])
+    # Content-keyed so it's deterministic under concurrent chunk calls: chunk
+    # "a" (first, wins) is red; chunk "b" adds size and a losing color.
+    def fake_llm(prompt, *, schema=None):
+        if prompt.rstrip().endswith("a"):
+            return {"entities": [{"name": "X", "label": "Thing", "attrs": {"color": "red"}}],
+                    "relations": []}
+        return {"entities": [{"name": "X", "label": "Thing",
+                              "attrs": {"color": "blue", "size": "big"}}], "relations": []}
     result = extract.extract_document("a\n\nb", llm=fake_llm)
     x = [e for e in result["entities"] if e["name"] == "X"][0]
     assert x["attrs"]["color"] == "red"
@@ -288,3 +293,67 @@ def test_nlcypher_get_llm_keeps_default_model(monkeypatch):
     monkeypatch.setattr(nlcypher, "_llm_fn", None)
     nlcypher._get_llm()("hi")
     assert captured["model"] is None
+
+
+def test_extract_chunks_run_concurrently_and_preserve_order():
+    # Multi-chunk extraction runs in parallel but results must align to chunk
+    # order (downstream merge is first-seen-wins).
+    from xgraph_gateway import extract
+    text = "\n\n".join(f"para number {i}" for i in range(6))
+    def echo_llm(prompt, *, schema=None):
+        # echo which para this call saw
+        n = prompt.split("para number ")[1].split("\n")[0].strip()
+        return {"entities": [{"name": f"E{n}", "label": "T"}], "relations": []}
+    result = extract.extract_document(text, llm=echo_llm, mode="parallel")
+    names = [e["name"] for e in result["entities"]]
+    assert names == [f"E{i}" for i in range(6)]  # in order, none lost
+
+
+def test_llm_backend_prefers_sdk_when_api_key_set(monkeypatch):
+    from xgraph_gateway import llm as llmmod
+    monkeypatch.setattr(llmmod, "_llm_claude_sdk", lambda p, s, m=None: "SDK")
+    monkeypatch.setattr(llmmod, "_llm_claude_cli", lambda p, s, m=None: "CLI")
+    monkeypatch.setattr(llmmod.shutil, "which", lambda _x: "/usr/bin/claude")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    assert llmmod._llm("hi") == "SDK"
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    assert llmmod._llm("hi") == "CLI"  # no key -> CLI (default dev path)
+
+
+def test_extract_document_whole_mode_is_one_call_and_keeps_cross_paragraph_relations():
+    calls = {"n": 0}
+    def fake(prompt, *, schema=None):
+        calls["n"] += 1
+        assert "P one" in prompt and "P two" in prompt  # whole doc in one prompt
+        return {"entities": [{"name": "A", "label": "T"}, {"name": "B", "label": "T"}],
+                "relations": [{"source": "A", "target": "B", "label": "R"}]}
+    out = extract.extract_document("A is P one.\n\nB is P two.", llm=fake, mode="whole")
+    assert calls["n"] == 1
+    assert len(out["relations"]) == 1  # A(para1) -> B(para2) survives in whole mode
+
+
+def test_extract_document_sequential_mode_one_call_per_paragraph():
+    calls = {"n": 0}
+    def fake(prompt, *, schema=None):
+        calls["n"] += 1
+        return {"entities": [], "relations": []}
+    extract.extract_document("p1\n\np2\n\np3", llm=fake, mode="sequential")
+    assert calls["n"] == 3
+
+
+def test_extract_document_unknown_mode_defaults_to_sequential():
+    def fake(prompt, *, schema=None):
+        return {"entities": [], "relations": []}
+    # should not raise; behaves like the paragraph split (not one whole call)
+    out = extract.extract_document("p1\n\np2", llm=fake, mode="bogus")
+    assert out["truncated"] is False
+
+
+def test_session_store_records_extract_mode():
+    from xgraph_gateway.sessions import SessionStore
+    store = SessionStore(adapter_factory=lambda e, c=None: object(),
+                         compute_factory=lambda e, c=None: object())
+    sid = store.create("fake", None, "duckdb", None, extract_mode="whole")
+    assert store.get(sid)["extract_mode"] == "whole"
+    sid2 = store.create("fake", None, "duckdb", None)  # default
+    assert store.get(sid2)["extract_mode"] == "sequential"

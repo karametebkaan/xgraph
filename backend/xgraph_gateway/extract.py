@@ -172,8 +172,31 @@ def _prompt(chunk_text: str, hint: Optional[str]) -> str:
     )
 
 
+# How many chunk-extraction LLM calls to run concurrently. Each call is a
+# blocking `claude` subprocess, so a long document's chunks finish in roughly
+# one call's wall-clock instead of N sequential ones.
+EXTRACT_CONCURRENCY = int(os.environ.get("XGRAPH_EXTRACT_CONCURRENCY", "6"))
+
+
+EXTRACT_MODES = ("sequential", "parallel", "whole")
+
+
+def _extract_chunks(chunks: list[str], hint: Optional[str], call: LLMFunc,
+                    parallel: bool = True) -> list:
+    """Run the per-chunk extraction. When `parallel`, chunk calls run
+    concurrently (threads release the GIL while each subprocess blocks) but
+    results come back in chunk order, so the downstream merge stays
+    first-seen-wins deterministic regardless of which call finishes first."""
+    if len(chunks) <= 1 or not parallel:
+        return [call(_prompt(c, hint), schema=_EXTRACT_SCHEMA) for c in chunks]
+    import concurrent.futures
+    workers = min(len(chunks), max(1, EXTRACT_CONCURRENCY))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+        return list(ex.map(lambda c: call(_prompt(c, hint), schema=_EXTRACT_SCHEMA), chunks))
+
+
 def extract_document(text: str, hint: Optional[str] = None, llm: Optional[LLMFunc] = None,
-                      max_chunks: int = EXTRACT_MAX_CHUNKS) -> dict:
+                      max_chunks: int = EXTRACT_MAX_CHUNKS, mode: str = "sequential") -> dict:
     """Extract and merge entities/relationships across `text`'s paragraphs.
 
     Calls the LLM once per chunk (`call = llm or _get_llm()`, mirroring
@@ -188,13 +211,19 @@ def extract_document(text: str, hint: Optional[str] = None, llm: Optional[LLMFun
     [{id,src,dst,label,attrs}], "truncated": bool}`.
     """
     call = llm or _get_llm()
-    chunks, truncated = chunk(text, max_chunks=max_chunks)
+    mode = mode if mode in EXTRACT_MODES else "sequential"
+    if mode == "whole":
+        # One LLM call over the entire document -- fewest calls, and relations
+        # that span paragraphs survive (all entities are in one call's scope).
+        body = text.strip()
+        chunks, truncated = ([body] if body else []), False
+    else:
+        chunks, truncated = chunk(text, max_chunks=max_chunks)
 
     entities: dict[str, dict] = {}
     relations: dict[str, dict] = {}
 
-    for chunk_text in chunks:
-        out = call(_prompt(chunk_text, hint), schema=_EXTRACT_SCHEMA)
+    for out in _extract_chunks(chunks, hint, call, parallel=(mode == "parallel")):
         if isinstance(out, str):
             out = json.loads(out)
 

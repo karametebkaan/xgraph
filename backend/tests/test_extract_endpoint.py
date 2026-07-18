@@ -41,7 +41,7 @@ def test_schema_reports_axes(tmp_path):
 
 
 def _patch_extract_document(monkeypatch, truncated=False):
-    def fake_extract_document(text, hint=None, llm=None, max_chunks=40):
+    def fake_extract_document(text, hint=None, llm=None, max_chunks=40, mode="sequential"):
         assert text  # non-empty doc reached extract_document
         return {"entities": list(_ENTITIES), "relations": list(_RELATIONS), "truncated": truncated}
     monkeypatch.setattr(extract, "extract_document", fake_extract_document)
@@ -252,3 +252,29 @@ def test_documents_endpoint_lists_ledger(client_with_store, monkeypatch):
     resp = client_with_store.get("/documents", params={"graph": "gL", "engine": "fake"})
     assert resp.status_code == 200
     assert any(d["doc_uri"].startswith("text:") for d in resp.json()["documents"])
+
+
+def test_extract_uses_session_extract_mode(tmp_path, monkeypatch):
+    # Regression: /extract must read the mode from the SessionStore, not the
+    # compute store it locally shadows as `store` (that raised AttributeError).
+    from xgraph_gateway.sessions import SessionStore
+    from xgraph_gateway.app import create_app
+    from xgraph_gateway import extract, extract_fold
+    tmp_compute = DuckDBComputeEngine(meta_path=str(tmp_path / "m.duckdb"))
+    store = SessionStore(adapter_factory=lambda e, c=None: FakeAdapter(),
+                         compute_factory=lambda e, c=None: tmp_compute)
+    client = TestClient(create_app(adapter_factory=lambda e: FakeAdapter(), store=store))
+    captured = {}
+
+    def fake_extract_document(text, hint=None, mode="sequential", **kw):
+        captured["mode"] = mode
+        return {"entities": [], "relations": [], "truncated": False}
+    monkeypatch.setattr(extract, "extract_document", fake_extract_document)
+    monkeypatch.setattr(extract_fold, "fold_labels", lambda *a, **k: [])
+
+    sid = client.post("/connect", json={"graph": {"engine": "fake"},
+                                        "compute": {"engine": "duckdb"},
+                                        "llm": {"extract_mode": "whole"}}).json()["session"]
+    r = client.post("/extract", data={"graph": "g", "session": sid, "text": "hi there"})
+    assert r.status_code == 200
+    assert captured["mode"] == "whole"

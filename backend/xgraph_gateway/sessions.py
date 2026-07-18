@@ -17,7 +17,8 @@ class SessionStore:
         self._sessions: dict[str, dict] = {}
         self._counter = 0
 
-    def create(self, graph_engine, graph_conn, compute_engine, compute_conn) -> str:
+    def create(self, graph_engine, graph_conn, compute_engine, compute_conn,
+               extract_mode=None) -> str:
         self._counter += 1
         session_id = f"s{self._counter}"
         self._sessions[session_id] = {
@@ -25,6 +26,7 @@ class SessionStore:
             "compute": self._compute_factory(compute_engine, compute_conn),
             "graph_engine": graph_engine,
             "compute_engine": compute_engine,
+            "extract_mode": extract_mode or "sequential",
         }
         return session_id
 
