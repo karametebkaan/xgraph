@@ -211,21 +211,60 @@ GET endpoints take query params: `/graphs?engine=`, `/schema?engine=&graph=`,
 
 ### Extraction: folding, facets, and the provenance ledger
 
-`POST /extract` does more than MERGE. Its state (folding ontology + document ledger) lives in the
-session's selected **OLAP** engine — DuckDB tables for a DuckDB session, Kinetica tables for a
-Kinetica session — so it never mixes engines across stages.
+`POST /extract` turns a document into graph nodes/edges with the LLM, and adds three things on top.
+Its bookkeeping (the folding ontology + the document ledger) lives in the session's selected **OLAP**
+engine — DuckDB tables for a DuckDB session, Kinetica tables for a Kinetica session — so state never
+mixes engines across stages.
 
-- **Label folding** — a proposed type is resolved to a canonical (deterministic alias lookup, then a
-  one-shot LLM synonym check for genuinely-new names), so `Company`/`Firm`/`Organization` collapse to
-  one label instead of sprawling. The response reports `folded: [{kind, from, to, axis}]`.
-- **Facets / axes** — an entity carries a label *vector*: one structural label plus classifying
-  facets, each on an **axis** (e.g. `Company` on `EntityType`, `AI` on `Industry`). Stored as a
-  multi-label node (FalkorDB `SET n:Company:AI`; Kinetica `LABEL VARCHAR[]` + a `label_keys`
-  grouping fed into `CREATE GRAPH`). `GET /schema` returns an `axes` grouping.
-- **Document ledger / idempotency** — each document is sha256-hashed and recorded (`doc_uri`,
-  first/last ingested, status). Re-submitting identical bytes short-circuits: the response has
-  `document.reused = true` with zero new entities. Attributes still ride on the nodes/edges for
-  Cypher hydration (FalkorDB properties / Kinetica evolved columns) — unchanged.
+Worked example — extracting one sentence:
+
+> *"Anthropic is an AI firm. Google is a technology company."*
+
+**1. Label folding = collapse synonymous type names into one canonical.**
+The LLM tags Anthropic's type as `Firm` and Google's as `Company`. Those mean the same thing, but
+left alone the graph would carry two labels for one concept. Folding resolves each proposed type to a
+canonical — first a cheap exact/alias lookup, then, *only* for a genuinely new name, one yes/no LLM
+check ("is `Firm` a synonym of an existing type?"). So `Firm` **folds into** `Company`, both nodes
+end up labeled `Company`, and the learned alias `Firm → Company` is saved so it's free next time. The
+response lists every fold applied:
+
+```json
+"folded": [ {"kind": "entity", "from": "Firm", "to": "Company", "axis": "EntityType"} ]
+```
+
+**2. A facet is a second label on a different dimension; the axis names that dimension.**
+"AI" also describes Anthropic — but it isn't its *structural* type, it's an industry classification.
+So it rides along as a **facet** `{"name": "AI", "axis": "Industry"}`. After folding, Anthropic
+carries a label **vector**, not one label:
+
+| field | value | meaning |
+|---|---|---|
+| `label` | `"Company"` | the structural type (on the `EntityType` axis) |
+| `labels` | `["Company", "AI"]` | full vector — structural first, then facets |
+| `label_raw` | `["Firm", "AI"]` | original pre-fold names, kept for provenance |
+
+An **axis** is just the dimension a label classifies on: `Company` sits on `EntityType`, `AI` on
+`Industry`. It's stored natively per engine (FalkorDB `SET n:Company:AI`; Kinetica `LABEL VARCHAR[]`
++ a `label_keys` grouping fed into `CREATE GRAPH`), and `GET /schema` groups the graph's labels by
+axis:
+
+```json
+"axes": { "EntityType": ["Company", "Person"], "Industry": ["AI", "Technology"] }
+```
+
+**3. The provenance ledger records which documents built the graph — making re-runs safe.**
+Every document is fingerprinted (sha256) and written to a per-graph ledger row: `doc_uri`, `sha256`,
+first/last-ingested timestamps, status. *Provenance* means the graph knows where its data came from
+and when. It also makes extraction **idempotent** — submit the exact same bytes again and `/extract`
+short-circuits with **no** LLM call and **no** re-MERGE:
+
+```json
+"document": { "doc_uri": "text:82a1e6d7d7d8", "status": "unchanged", "reused": true }   // entities: 0
+```
+
+`GET /documents?engine=&graph=` lists the ledger; deleting a graph clears its ledger so a rebuild
+re-ingests cleanly. (Rich attribute values still ride on the nodes/edges themselves for Cypher
+hydration — FalkorDB properties / Kinetica columns — that part is unchanged.)
 
 ### Interacting from the CLI
 
