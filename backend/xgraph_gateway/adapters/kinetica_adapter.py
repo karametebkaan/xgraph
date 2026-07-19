@@ -1003,6 +1003,17 @@ class KineticaAdapter(GraphEngineAdapter):
         except Exception:
             return []
 
+    def register_file(self, path, table=None, fmt=None, data_source=None):
+        """Import a file into a real Kinetica table via LOAD DATA INTO, then
+        report its columns. Remote sources use a reused named DATA SOURCE;
+        local/KiFS/server-readable paths omit it. Re-import appends."""
+        if not path:
+            raise ValueError("path is required")
+        fmt = fmt or _detect_format(path)
+        table = table or _derive_table_name(path)
+        self._execute_ddl(load_data_sql(table, path, fmt, data_source or None))
+        return {"name": table, "type": "table", "columns": self._current_columns(table)}
+
     # Identifier suffixes that are optional "add-ons" (decorations) rather than
     # part of a component's required key configuration.
     _GRAMMAR_OPTIONAL_SUFFIXES = ("_LABEL", "_LABEL_KEY", "_PARTITION",

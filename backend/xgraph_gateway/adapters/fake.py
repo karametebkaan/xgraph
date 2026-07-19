@@ -47,6 +47,9 @@ class FakeAdapter(GraphEngineAdapter):
         if table == "missing":
             return []
         return ["NODE", "NODE_LABEL", "AMOUNT"]
+    def register_file(self, path, table=None, fmt=None, data_source=None):
+        return {"name": table or "imported", "type": "table",
+                "columns": ["NODE", "AMOUNT"]}
     def graph_grammar(self):
         return {
             "NODES": {"configurations": [{"label": "NODE", "required": ["NODE"]}],

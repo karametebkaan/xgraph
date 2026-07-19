@@ -184,6 +184,13 @@ def create_app(adapter_factory=registry.get_adapter, compute=None, store=None) -
         session = payload.get("session")
         path = payload.get("path")
         try:
+            if _resolve_engine(session, engine) == "kinetica":
+                # Kinetica materializes the file into a real table (LOAD DATA);
+                # list_tables() then surfaces it — no session registry needed.
+                return _resolve_adapter(session, engine).register_file(
+                    path, table=payload.get("table"),
+                    fmt=payload.get("format"), data_source=payload.get("data_source"))
+            # Non-Kinetica: files ARE relations — remember the path in the session.
             if not _sess(session):
                 raise ValueError("register_file requires a live session (connect first)")
             if not path:

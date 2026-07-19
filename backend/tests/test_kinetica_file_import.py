@@ -61,3 +61,64 @@ def test_base_register_file_not_implemented():
         def graph_sizes(self): return {}
     with pytest.raises(NotImplementedError):
         A().register_file("a.parquet")
+
+
+# ── Task 2: KineticaAdapter.register_file (live-skip) ─────────────────────
+
+def _kinetica_or_skip():
+    try:
+        from xgraph_gateway.adapters.kinetica_adapter import KineticaAdapter
+        a = KineticaAdapter(config.load_settings())
+        a.list_graphs()
+        return a
+    except Exception as e:
+        pytest.skip(f"Kinetica unreachable: {e}")
+
+
+def test_kinetica_register_file_live():
+    # Requires a file Kinetica can read. Configure via env:
+    #   XG_TEST_LOAD_PATH   (e.g. kifs://… or s3://…)  [required]
+    #   XG_TEST_DATA_SOURCE (name)                     [optional, for remote]
+    path = os.environ.get("XG_TEST_LOAD_PATH")
+    if not path:
+        pytest.skip("set XG_TEST_LOAD_PATH to run the live LOAD DATA test")
+    a = _kinetica_or_skip()
+    tbl = "xg_test_import_tmp"
+    try:
+        res = a.register_file(path, table=tbl,
+                              data_source=os.environ.get("XG_TEST_DATA_SOURCE"))
+        assert res["name"] == tbl and res["type"] == "table"
+        assert isinstance(res["columns"], list) and res["columns"]
+        assert any(t["name"] == tbl or t["name"].endswith("." + tbl) for t in a.list_tables())
+    finally:
+        try:
+            a._execute_ddl(f"DROP TABLE IF EXISTS {tbl};")
+        except Exception:
+            pass
+
+
+# ── Task 3: /register_file routing (Fake, headless) ───────────────────────
+
+from fastapi.testclient import TestClient
+from xgraph_gateway.app import create_app
+from xgraph_gateway.sessions import SessionStore
+from xgraph_gateway.adapters.fake import FakeAdapter
+from xgraph_gateway.compute.duckdb_engine import DuckDBComputeEngine
+
+
+def test_register_file_routes_kinetica_to_adapter(tmp_path):
+    store = SessionStore(
+        adapter_factory=lambda e, c=None: FakeAdapter(),
+        compute_factory=lambda e, c=None: DuckDBComputeEngine(meta_path=str(tmp_path / "m.duckdb")))
+    client = TestClient(create_app(
+        adapter_factory=lambda e: FakeAdapter(),
+        compute=DuckDBComputeEngine(meta_path=str(tmp_path / "m2.duckdb")),
+        store=store))
+    sid = client.post("/connect", json={"graph": {"engine": "kinetica"},
+                                        "compute": {"engine": "duckdb"}}).json()["session"]
+    r = client.post("/register_file", json={"session": sid, "path": "s3://b/a.parquet",
+                                            "table": "airports", "data_source": "my_s3"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["name"] == "airports" and body["type"] == "table"
+    assert body["columns"] == ["NODE", "AMOUNT"]
