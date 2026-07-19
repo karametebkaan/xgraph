@@ -144,6 +144,7 @@
       sourcePreview: function (source) { return getJSON(q("/source_preview?source=" + encodeURIComponent(source))); },
       tables: function () { return getJSON(q("/tables")); },
       columns: function (table) { return getJSON(q("/columns?table=" + encodeURIComponent(table))); },
+      grammar: function () { return getJSON(q("/grammar")); },
       ask: function (graph, question) { return postJSONWithAuth("/ask", { graph: graph, question: question }); },
       nl2cypher: function (graph, question) { return postJSONWithAuth("/nl2cypher", { graph: graph, question: question }); },
       synthesize: function (question, columns, rows, cypher) { return postJSONWithAuth("/synthesize", { question: question, columns: columns, rows: rows, cypher: cypher }); },

@@ -80,6 +80,16 @@ class GraphEngineAdapter(ABC):
         """
         return []
 
+    def graph_grammar(self) -> dict:
+        """Per-component graph-creation grammar for the structured builder,
+        shaped as {COMPONENT: {"configurations": [{"label","required"[,"filtervalues"]}],
+        "optional": [ids]}} for COMPONENT in NODES/EDGES/WEIGHTS/RESTRICTIONS.
+
+        Default: {} -- the frontend falls back to its built-in static grammar.
+        Kinetica overrides this from show_graph_grammar.
+        """
+        return {}
+
     def creation_statement(self, graph) -> dict:
         """Best-effort "how was this graph created" recipe (Create panel's
         recipe viewer). Returns {"statement": <DDL text or None>, "source":

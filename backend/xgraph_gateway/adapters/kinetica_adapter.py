@@ -961,6 +961,41 @@ class KineticaAdapter(GraphEngineAdapter):
         except Exception:
             return []
 
+    # Identifier suffixes that are optional "add-ons" (decorations) rather than
+    # part of a component's required key configuration.
+    _GRAMMAR_OPTIONAL_SUFFIXES = ("_LABEL", "_LABEL_KEY", "_PARTITION",
+                                  "_PARTITION_BOUNDARY", "_WEIGHT", "_DIRECTION")
+
+    def graph_grammar(self):
+        """Live /create/graph grammar from show_graph_grammar, transformed into
+        the structured builder's shape. {} on any error (frontend falls back to
+        its static grammar)."""
+        try:
+            raw = self._db.show_graph_grammar()
+            comps = json.loads(raw["components_json"])["endpoints"]["/create/graph"]["components"]
+        except Exception:
+            return {}
+        out = {}
+        for comp in comps:
+            name = comp.get("name")
+            if not name:
+                continue
+            ids = comp.get("identifiers", []) or []
+            configs = []
+            for c in comp.get("configurations", []) or []:
+                req = c.get("identifiers", []) or []
+                if not req:
+                    continue
+                cfg = {"label": " + ".join(req), "required": req}
+                fv = c.get("filtervalues") or []
+                if fv:
+                    cfg["filtervalues"] = fv
+                configs.append(cfg)
+            optional = [i for i in ids
+                        if any(i.endswith(s) for s in self._GRAMMAR_OPTIONAL_SUFFIXES)]
+            out[name] = {"configurations": configs, "optional": optional}
+        return out
+
     def _evolve_columns(self, table: str, attr_cols: dict[str, str]) -> None:
         """ALTER TABLE ADD COLUMN for each key in `attr_cols` not already
         present on `table`. Column types never change once declared (kgr

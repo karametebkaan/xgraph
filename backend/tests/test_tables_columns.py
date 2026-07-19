@@ -41,6 +41,15 @@ def test_columns_requires_table_param():
     assert r.status_code == 422
 
 
+def test_grammar_returns_builder_shape():
+    r = _client().get("/grammar", params={"engine": "fake"})
+    assert r.status_code == 200
+    g = r.json()
+    assert "NODES" in g and "EDGES" in g
+    assert g["NODES"]["configurations"][0]["required"] == ["NODE"]
+    assert "NODE_LABEL" in g["NODES"]["optional"]
+
+
 # ── DuckDB / FalkorDB column introspection (embedded, no skip) ─────────────
 
 def test_describe_relation_returns_columns(tmp_path):
@@ -110,3 +119,14 @@ def test_kinetica_list_columns_of_first_table():
         pytest.skip("no base tables present")
     cols = a.list_columns(tables[0]["name"])
     assert isinstance(cols, list)
+
+
+def test_kinetica_graph_grammar_shape():
+    a = _kinetica_or_skip()
+    g = a.graph_grammar()
+    assert isinstance(g, dict)
+    # Live grammar carries NODES/EDGES with multiple configurations each.
+    assert "NODES" in g and "EDGES" in g
+    assert len(g["NODES"]["configurations"]) >= 3
+    for cfg in g["NODES"]["configurations"]:
+        assert cfg["required"] and "label" in cfg

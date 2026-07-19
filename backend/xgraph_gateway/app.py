@@ -170,6 +170,13 @@ def create_app(adapter_factory=registry.get_adapter, compute=None, store=None) -
         except Exception as e:
             return _err(engine, e)
 
+    @app.get("/grammar")
+    def grammar(engine: str = "", session: str | None = None):
+        try:
+            return _resolve_adapter(session, engine).graph_grammar()
+        except Exception as e:
+            return _err(engine, e)
+
     @app.post("/create")
     def create(payload: dict = Body(...)):
         engine = payload.get("engine", "")

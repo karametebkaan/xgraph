@@ -47,7 +47,7 @@
 const { useState, useEffect, useRef, useCallback, useMemo } = React;
 
 /* ═══════════════════════ CONSTANTS ════════════════════════ */
-const EXPLORER_VERSION = "0.6.0";  // xGraph version — bump on frontend changes so a stale browser cache is visible
+const EXPLORER_VERSION = "0.7.0";  // xGraph version — bump on frontend changes so a stale browser cache is visible
 const SAFETY_TIMEOUT_MS = 10 * 60 * 1000;
 const PALETTE = [
     { solid: '#0984e3', light: '#e1f0fb' }, { solid: '#00cec9', light: '#e0f9f8' },
@@ -8192,6 +8192,13 @@ function App() {
         gwClient.tables()
             .then(function(list) { if (!cancelled && Array.isArray(list)) setTables(list); })
             .catch(function() { /* leave tables as-is */ });
+        // Kinetica: pull the live /create/graph grammar (far richer than the
+        // static DEFAULT_GRAMMAR fallback); non-Kinetica keeps its static grammar.
+        if (graphEngine === 'kinetica') {
+            gwClient.grammar()
+                .then(function(g) { if (!cancelled && g && Object.keys(g).length) setGraphGrammar(g); })
+                .catch(function() { /* keep DEFAULT_GRAMMAR */ });
+        }
         return function() { cancelled = true; };
     }, [gwClient, connected, graphEngine]);
     // Create panel state, pre-seeded (editable) with the banking demo mapping

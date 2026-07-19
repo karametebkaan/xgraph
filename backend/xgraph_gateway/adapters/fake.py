@@ -47,3 +47,11 @@ class FakeAdapter(GraphEngineAdapter):
         if table == "missing":
             return []
         return ["NODE", "NODE_LABEL", "AMOUNT"]
+    def graph_grammar(self):
+        return {
+            "NODES": {"configurations": [{"label": "NODE", "required": ["NODE"]}],
+                      "optional": ["NODE_LABEL"]},
+            "EDGES": {"configurations": [{"label": "EDGE_NODE1 + EDGE_NODE2",
+                                          "required": ["EDGE_NODE1", "EDGE_NODE2"]}],
+                      "optional": ["EDGE_LABEL"]},
+        }
