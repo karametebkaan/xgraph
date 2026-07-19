@@ -7006,13 +7006,21 @@ function ExtractPanel(props) {
         var srcKey = isFile ? ('f|'+file.name+'|'+file.size+'|'+file.lastModified) : _extractKey(pasteText || '');
         var srcLabel = isFile ? file.name : ((pasteText||'').slice(0,80) + ((pasteText||'').length>80?'…':''));
         var already = extractSources.some(function(s){ return s.graph === graphName && (s.engine === graphEngine || !s.engine) && s.key === srcKey; });
-        if (already) {
+        if (already && props.buildMode !== 'recreate') {
             setError(null);
             setNoop('This source was already added to ' + graphName + ' — skipped (no new extraction).');
             return;
         }
 
         setBusy(true); setError(null); setResult(null);
+        if (props.buildMode === 'recreate') {
+            if (!window.confirm('Recreate "' + graphName + '"? This deletes the existing graph, then rebuilds it from this document.')) {
+                setBusy(false);
+                return;
+            }
+            // Idempotent: a missing graph is fine — the extract below rebuilds it.
+            try { await gwClient.deleteGraph(graphName); } catch (e) { /* best effort */ }
+        }
         try {
             var res = await gwClient.extract(graphName, payload, hint);
             if (res && res.status === 'error') throw new Error(res.message || 'extract failed');
@@ -7075,7 +7083,7 @@ function ExtractPanel(props) {
                 cursor: (busy || !graphName || !(file || pasteText.trim())) ? 'not-allowed' : 'pointer',
                 fontWeight:700, color:'#fff', fontSize:13, fontFamily:'inherit',
                 background: (busy || !graphName || !(file || pasteText.trim())) ? '#74b9ff' : 'linear-gradient(135deg,#0984e3,#0872c4)', transition:'0.2s',
-            }}>{busy ? 'Extracting…' : 'Extract & Build'}</button>
+            }}>{busy ? 'Extracting…' : (props.buildMode === 'recreate' ? 'Recreate & Build' : 'Extract & Build')}</button>
             {busy && <p style={{ marginTop:10, fontSize:12, color:'#636e72' }}>Extracting… this can take a while (LLM pass per chunk).</p>}
             {!busy && error && <p style={{ marginTop:10, fontSize:12, color:'#d63031', fontWeight:600 }}>{error}</p>}
             {!busy && !error && noop && <p style={{ marginTop:10, fontSize:12, color:'#636e72', fontWeight:600 }}>{noop}</p>}
