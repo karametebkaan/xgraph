@@ -119,21 +119,29 @@ returns a small set of ids, the post-join fetches just those rows' wide columns 
 the results. Any column used in a `MATCH`/`WHERE` must still be a graph property; only pure
 attributes live in the hydrate file.
 
+**Extracted graphs use the opposite model** — documents produce *attribute-carrying* nodes with no
+external Parquet, so Explain hydrates the post-join from the graph's **own node attributes** (fetched
+from FalkorDB) rather than a file: the same DuckDB aggregation, sourced from the graph itself. It
+falls back to the Parquet source only for skinny graphs like the banking demo, and to a plain
+semantic summary when a focus has no matching attribute.
+
 ## Building a graph from documents (Extract)
 
 **Extract** turns unstructured text into a graph. Upload a PDF/text file (or paste text); the LLM
 extracts entities and relationships with an **open-ended ontology** (it discovers labels like
-`Person`, `Organization`, `WORKS_AT`), and they MERGE into the named graph on the session's engine —
-FalkorDB (Cypher `MERGE`) or Kinetica (table upsert + `CREATE GRAPH`). Feeding more documents
-**accumulates** one graph; re-feeding the same text is a no-op (deduped by entity id). The pushed
-sources are remembered **per graph** in the session and saved with it, so you can see what built each
-graph and return to it later.
+`Person`, `Organization`, `WORKS_AT`), **folds** synonymous type labels to a canonical, and MERGEs
+them into the named graph on the session's engine — FalkorDB (Cypher `MERGE`) or Kinetica (table
+upsert + `CREATE GRAPH`). Feeding more documents **accumulates** one graph; re-feeding identical
+bytes is a no-op via the **sha256 document ledger** (`GET /documents`), which is persistent — it
+survives restarts and shows what built each graph. See *Extraction: folding, facets, and the
+provenance ledger* below for the full model. Extraction speed is a session choice (**Setup → LLM →
+Extraction mode**: sequential · parallel · whole-doc); it runs on Haiku by default.
 
-Because entity ids are canonical slugs (not the display name), the human value lives in a `name`
-property (FalkorDB) / `entity_name` node attribute (Kinetica). The NL→Cypher grounding knows this, so
-**Ask** on an extracted graph filters on the right property — e.g. *"Who works at Kinetica?"* becomes
-`… WHERE org.name = 'Kinetica'`, and *"Who is not working at Kinetica?"* uses each engine's supported
-negation form.
+**`NODE` is the readable entity name** (`Markwayne Mullin`), not an opaque id — so Visualize, queries,
+and node-detail all show names. Dedup is case-insensitive, and a bare surname folds into the unique
+fuller same-label name (`Mullin` → `Markwayne Mullin`). **Ask** matches names *loosely* so a partial
+or differently-cased name still hits — FalkorDB `toLower(x.name) CONTAINS …` (or `x.NODE` when the
+node has no separate `name`), Kinetica `LOWER(x.entity_name) LIKE '%…%'`.
 
 ## Quickstart
 
@@ -202,7 +210,7 @@ POST bodies are JSON. `engine` is `falkordb | kinetica | fake`; `session` is opt
 | `POST /nl2cypher` | `engine`, `graph`, `question` | `session` |
 | `POST /synthesize` | `question`, `columns`, `rows` | `cypher` |
 | `POST /hydrate` | `rows` *(list of dicts)*, `source` | `key` (default `NODE`), `columns` (default `*`) |
-| `POST /explain` | `columns`, `rows` | `question`, `source`, `cypher` |
+| `POST /explain` | `columns`, `rows` | `question`, `graph` *(hydrate from the graph's node attrs)*, `source` *(Parquet fallback)*, `cypher`, `session` |
 | `POST /sql` | `sql` | `session` |
 
 GET endpoints take query params: `/graphs?engine=`, `/schema?engine=&graph=`,
@@ -399,7 +407,7 @@ Pydantic models is the prerequisite for good generated clients.
 ## Testing
 
 ```bash
-# Backend (227 tests; live tests SKIP if FalkorDB/Kinetica are down)
+# Backend (363 tests; live tests SKIP if FalkorDB/Kinetica are down)
 cd backend && ./.venv/bin/python -m pytest tests/ -v
 
 # Regression tests worth knowing:
@@ -440,9 +448,12 @@ docs/                      design specs, plans, images
 
 ## Status & constraints
 
-- The backend and the action-bar frontend are built and live-verified — including Explain post-join,
-  document **Extract** into a graph, graph **delete**, and property-grounded **Ask** (name filters,
-  negation, and "related to" traversals) on both engines.
+- The backend and the action-bar frontend are built and live-verified on both engines — including
+  document **Extract** with **label folding + facets/axes** and a persistent **provenance ledger**
+  (sha256 idempotency), session-selectable **extraction mode** (sequential/parallel/whole-doc),
+  Explain **post-join** (from the graph's own node attributes or an external Parquet), fuzzy **Ask**,
+  graph **delete**, and per-label/per-edge **ontology percentages**. 363 backend tests pass (live
+  tests skip when an engine is down).
 - **Self-contained:** no runtime dependency on the `falkor` or `graphrag` repos. `graph_loader` is
   vendored and the LLM backend is a local module; the backend has its own venv and
   `requirements.txt`. The one tradeoff is that the vendored `graph_loader` is a fork that can drift
