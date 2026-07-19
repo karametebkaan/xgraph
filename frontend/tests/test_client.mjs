@@ -107,6 +107,14 @@ const run = async () => {
   assert.equal(seenExtractOpts.body.has("text"), false);
   assert.equal(seenExtractOpts.body.get("hint"), "");
 
+  // tables()/columns(): GET with engine carried; columns encodes the table param
+  const tcUrls = [];
+  const tcClient = g.makeClient("http://gw", "duckdb", fakeFetch((url) => { tcUrls.push(url); return []; }));
+  assert.deepEqual(await tcClient.tables(), []);
+  assert.deepEqual(await tcClient.columns("expero.vertexes"), []);
+  assert.equal(tcUrls[0], "http://gw/tables?engine=duckdb");
+  assert.equal(tcUrls[1], "http://gw/columns?table=expero.vertexes&engine=duckdb");
+
   console.log("client OK");
 };
 run();
