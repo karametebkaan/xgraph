@@ -95,6 +95,12 @@ def test_kinetica_list_tables_shape():
     assert isinstance(tables, list)
     for t in tables:
         assert set(t.keys()) >= {"name", "type"}
+    # Collections (schemas) are expanded into their child tables, never
+    # surfaced themselves — the builder filters type=='collection' out.
+    assert all(t["type"] != "collection" for t in tables)
+    # Expanded children are fully qualified as schema.table.
+    if tables:
+        assert any("." in t["name"] for t in tables)
 
 
 def test_kinetica_list_columns_of_first_table():

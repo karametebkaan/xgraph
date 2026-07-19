@@ -905,28 +905,53 @@ class KineticaAdapter(GraphEngineAdapter):
         except Exception:
             return []
 
+    # Schemas/collections we never surface as builder sources (Kinetica
+    # internals + xgraph's own metadata + transient temp schemas).
+    _SYSTEM_SCHEMAS = {"SYSTEM", "pg_catalog", "sys_temp", "ki_catalog", "xgraph_meta"}
+
     def list_tables(self):
-        """All Kinetica tables/relations (name + coarse type). Empty on error."""
+        """All Kinetica tables/views as fully-qualified `schema.table` (name +
+        coarse type). `show_table("")` returns only the top-level *collections*
+        (schemas); the actual tables are their children, so we expand each
+        collection one level and prefix `<schema>.<table>`. Empty on error."""
         try:
-            resp = self._db.show_table(
+            top = self._db.show_table(
                 table_name="",
                 options={"show_children": "true", "no_error_if_not_exists": "true"})
         except Exception:
             return []
-        names = resp.get("table_names", []) or []
-        descs = resp.get("table_descriptions", []) or []
+        top_names = top.get("table_names", []) or []
+        top_descs = top.get("table_descriptions", []) or []
         out = []
-        for i, name in enumerate(names):
+        for i, name in enumerate(top_names):
             if not name:
                 continue
-            d = descs[i] if i < len(descs) else []
-            if "COLLECTION" in d:
-                t = "collection"
-            elif "VIEW" in d or "MATERIALIZED_VIEW" in d:
-                t = "view"
-            else:
-                t = "table"
-            out.append({"name": name, "type": t})
+            d = top_descs[i] if i < len(top_descs) else []
+            if "COLLECTION" not in d:
+                # A table sitting at the root (rare) — surface it directly.
+                t = "view" if ("VIEW" in d or "MATERIALIZED_VIEW" in d) else "table"
+                out.append({"name": name, "type": t})
+                continue
+            if name in self._SYSTEM_SCHEMAS or name.startswith("schema_") or name.startswith("tutorial_"):
+                continue
+            try:
+                child = self._db.show_table(
+                    table_name=name,
+                    options={"show_children": "true", "no_error_if_not_exists": "true"})
+            except Exception:
+                continue
+            cnames = child.get("table_names", []) or []
+            cdescs = child.get("table_descriptions", []) or []
+            for j, cn in enumerate(cnames):
+                if not cn or cn == name:
+                    continue
+                cd = cdescs[j] if j < len(cdescs) else []
+                if "COLLECTION" in cd:
+                    continue  # nested collection — skip
+                t = "view" if ("VIEW" in cd or "MATERIALIZED_VIEW" in cd) else "table"
+                # Children come back as bare names; qualify them.
+                qualified = cn if "." in cn else (name + "." + cn)
+                out.append({"name": qualified, "type": t})
         return out
 
     def list_columns(self, table):

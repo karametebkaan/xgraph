@@ -8203,28 +8203,23 @@ function App() {
     // (or any graph not built from THIS mapping) has no relation to this form, so
     // stamping the active graph's name onto the banking mapping would mislead.
     const [createGraphName, setCreateGraphName]     = useState('banking_graph_duckdb');
-    const [createNodeTable, setCreateNodeTable]     = useState('expero.vertexes');
-    const [createNodeFile, setCreateNodeFile]       = useState('vertexes.parquet');
-    const [createNodeSql, setCreateNodeSql]         = useState(
-        'SELECT id AS node_id, label AS label, "banking_transaction:amount" AS banking_transaction_amount, ' +
-        '"wire_message:risk_score" AS wire_message_risk_score, "party:risk_score" AS party_risk_score, ' +
-        '"party:party_name" AS party_name, "bank:bank_name" AS bank_name, "bank:risk_score" AS bank_risk_score ' +
-        'FROM expero.vertexes'
-    );
-    const [createNodeIdCol, setCreateNodeIdCol]     = useState('node_id');
-    const [createNodeLabelCol, setCreateNodeLabelCol] = useState('label');
-    const [createNodeProps, setCreateNodeProps]     = useState(
-        'banking_transaction_amount,wire_message_risk_score,party_risk_score,party_name,bank_name,bank_risk_score'
-    );
-    const [createEdgeTable, setCreateEdgeTable]     = useState('expero.edges');
-    const [createEdgeFile, setCreateEdgeFile]       = useState('edges.parquet');
-    const [createEdgeSql, setCreateEdgeSql]         = useState(
-        'SELECT id AS edge_id, source_name AS node1, target_name AS node2, label AS label FROM expero.edges'
-    );
-    const [createEdgeIdCol, setCreateEdgeIdCol]     = useState('edge_id');
-    const [createEdgeSrcCol, setCreateEdgeSrcCol]   = useState('node1');
-    const [createEdgeTgtCol, setCreateEdgeTgtCol]   = useState('node2');
-    const [createEdgeTypeCol, setCreateEdgeTypeCol] = useState('label');
+    // Manual node/edge mapping form starts blank — no banking-demo defaults, so
+    // a fresh graph name (e.g. "foo") isn't shadowed by leftover expero.* values.
+    // The structured builder above is the primary path; this manual form is the
+    // escape hatch.
+    const [createNodeTable, setCreateNodeTable]     = useState('');
+    const [createNodeFile, setCreateNodeFile]       = useState('');
+    const [createNodeSql, setCreateNodeSql]         = useState('');
+    const [createNodeIdCol, setCreateNodeIdCol]     = useState('');
+    const [createNodeLabelCol, setCreateNodeLabelCol] = useState('');
+    const [createNodeProps, setCreateNodeProps]     = useState('');
+    const [createEdgeTable, setCreateEdgeTable]     = useState('');
+    const [createEdgeFile, setCreateEdgeFile]       = useState('');
+    const [createEdgeSql, setCreateEdgeSql]         = useState('');
+    const [createEdgeIdCol, setCreateEdgeIdCol]     = useState('');
+    const [createEdgeSrcCol, setCreateEdgeSrcCol]   = useState('');
+    const [createEdgeTgtCol, setCreateEdgeTgtCol]   = useState('');
+    const [createEdgeTypeCol, setCreateEdgeTypeCol] = useState('');
     const [createDdl, setCreateDdl]                 = useState(
         'CREATE OR REPLACE DIRECTED GRAPH banking_graph (\n' +
         '  -- Nodes: one or more NODES(...) clauses, e.g.\n' +
