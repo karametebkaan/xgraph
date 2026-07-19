@@ -90,6 +90,12 @@ class GraphEngineAdapter(ABC):
         """
         return {}
 
+    def register_file(self, path, table=None, fmt=None, data_source=None) -> dict:
+        """Import a file as a table/relation for the builder. Engine-specific;
+        only Kinetica implements server-side ingestion here (DuckDB/FalkorDB are
+        handled by the /register_file session path-registry, not the adapter)."""
+        raise NotImplementedError("register_file not supported for this engine")
+
     def creation_statement(self, graph) -> dict:
         """Best-effort "how was this graph created" recipe (Create panel's
         recipe viewer). Returns {"statement": <DDL text or None>, "source":

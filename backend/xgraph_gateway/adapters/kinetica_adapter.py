@@ -158,6 +158,48 @@ def _escape_sql_literal(value) -> str:
     """
     return str(value).replace("'", "''")
 
+_LOAD_FORMATS = {"parquet", "csv", "json", "shapefile", "avro"}
+
+
+def _detect_format(path: str) -> str:
+    p = str(path).lower().split("?")[0]
+    if p.endswith((".csv", ".tsv")):
+        return "csv"
+    if p.endswith((".json", ".jsonl", ".ndjson")):
+        return "json"
+    if p.endswith(".avro"):
+        return "avro"
+    if p.endswith(".shp"):
+        return "shapefile"
+    return "parquet"
+
+
+def _derive_table_name(path: str) -> str:
+    import os
+    import re
+    base = os.path.basename(str(path).split("?")[0])
+    stem = base.rsplit(".", 1)[0] if "." in base else base
+    stem = re.sub(r"[^A-Za-z0-9_]", "_", stem) or "imported"
+    if stem[0].isdigit():
+        stem = "t_" + stem
+    return stem
+
+
+def load_data_sql(table: str, path: str, fmt: str, data_source: str | None = None) -> str:
+    """LOAD DATA INTO statement. `table` validated via safe_ident; `path` and
+    `data_source` escaped as SQL string literals. DATA SOURCE clause only when
+    a name is given (remote); omitted for a Kinetica-readable path (local/KiFS)."""
+    tbl = _validate_table_ident(table)
+    f = (fmt or "parquet").lower()
+    if f not in _LOAD_FORMATS:
+        raise ValueError(f"unsupported LOAD format: {fmt!r}")
+    sql = ("LOAD DATA INTO " + tbl +
+           "\nFROM FILE PATHS '" + _escape_sql_literal(path) + "'" +
+           "\nFORMAT " + f.upper())
+    if data_source:
+        sql += "\nWITH OPTIONS (DATA SOURCE = '" + _escape_sql_literal(data_source) + "')"
+    return sql + ";"
+
 def _hop_indices(headers: list[str]) -> list[int]:
     """Column headers like NODE1_HOP_1, EDGE_LABELS_HOP_2, ... -> sorted [1, 2, ...]
     (the number of graph-traversal hops present in a gql_result)."""
