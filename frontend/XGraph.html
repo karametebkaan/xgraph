@@ -7181,6 +7181,57 @@ function ListPanel(props) {
     );
 }
 
+/* ═══════════════════ BuildPanel ═══════════════════════════
+   One "Build a graph" roof unifying Create (structured, from
+   tables/files) and Extract (from documents). A Source radio swaps
+   between the existing CreatePanel and ExtractPanel; a Mode radio
+   picks Append vs Recreate. This panel adds NO build logic — it only
+   selects which sub-panel shows and, for Documents, the buildMode it
+   receives. Structured Append is Slice B, so Append is disabled when
+   Source = Tables/files (CreatePanel already does CREATE OR REPLACE). */
+function BuildPanel(props) {
+    const [source, setSource] = useState('documents'); // 'documents' | 'tables'
+    const [mode, setMode] = useState('append');        // 'append' | 'recreate'
+    // Tables/files: structured append is Slice B — CreatePanel is always
+    // CREATE OR REPLACE, so the effective mode there is 'recreate'.
+    var effMode = source === 'tables' ? 'recreate' : mode;
+
+    var wrap = { display:'flex', flexDirection:'column', flex:1, minHeight:0, width:'100%' };
+    var bar = { display:'flex', flexWrap:'wrap', alignItems:'center', gap:18, padding:'12px 16px', borderBottom:'1px solid #eee', background:'#fafbfc' };
+    var groupLbl = { fontSize:12, fontWeight:700, color:'#636e72', marginRight:8 };
+
+    function radio(name, val, cur, set, text, disabled) {
+        return (
+            <label style={{ display:'inline-flex', alignItems:'center', gap:5, fontSize:13, cursor: disabled ? 'not-allowed' : 'pointer', opacity: disabled ? 0.45 : 1 }}
+                   title={disabled ? 'Structured append is coming in a later slice — use Recreate (CREATE OR REPLACE) for now.' : ''}>
+                <input type="radio" name={name} checked={cur === val} disabled={!!disabled}
+                       onChange={function(){ if (!disabled) set(val); }} />
+                {text}
+            </label>
+        );
+    }
+
+    return (
+        <div style={wrap}>
+            <div style={bar}>
+                <div style={{ display:'inline-flex', alignItems:'center' }}>
+                    <span style={groupLbl}>Source</span>
+                    {radio('build-source', 'tables', source, setSource, 'Tables / files', false)}
+                    {radio('build-source', 'documents', source, setSource, 'Documents (extract)', false)}
+                </div>
+                <div style={{ display:'inline-flex', alignItems:'center' }}>
+                    <span style={groupLbl}>Mode</span>
+                    {radio('build-mode', 'append', mode, setMode, 'Append', source === 'tables')}
+                    {radio('build-mode', 'recreate', effMode, setMode, 'Recreate', false)}
+                </div>
+            </div>
+            {source === 'documents'
+                ? <ExtractPanel {...props.extractProps} buildMode={effMode} />
+                : <CreatePanel {...props.createProps} />}
+        </div>
+    );
+}
+
 /* ═══════════════════ StoragePanel ════════════════════════════════════════
    Storage viewer: inspects the underlying storage backing the active graph —
    Kinetica extract tables (columns + up to 25 sample rows, via
