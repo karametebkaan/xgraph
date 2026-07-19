@@ -27,6 +27,7 @@ class SessionStore:
             "graph_engine": graph_engine,
             "compute_engine": compute_engine,
             "extract_mode": extract_mode or "sequential",
+            "files": [],
         }
         return session_id
 
@@ -34,3 +35,13 @@ class SessionStore:
         if session_id not in self._sessions:
             raise KeyError(f"unknown session: {session_id}")
         return self._sessions[session_id]
+
+    def register_file(self, session_id: str, path: str) -> list[str]:
+        """Remember a data-file path against a session so it shows up as a
+        pickable builder source. Raw path stored verbatim (resolved at
+        describe/build time). Deduped, insertion-ordered."""
+        s = self.get(session_id)  # raises KeyError for unknown session
+        files = s.setdefault("files", [])
+        if path and path not in files:
+            files.append(path)
+        return files

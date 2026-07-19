@@ -159,14 +159,39 @@ def create_app(adapter_factory=registry.get_adapter, compute=None, store=None) -
     @app.get("/tables")
     def tables(engine: str = "", session: str | None = None):
         try:
-            return _resolve_adapter(session, engine).list_tables()
+            out = list(_resolve_adapter(session, engine).list_tables())
+            s = _sess(session)
+            if s:
+                for p in (s.get("files") or []):
+                    out.append({"name": p, "type": "file"})
+            return out
         except Exception as e:
             return _err(engine, e)
 
     @app.get("/columns")
     def columns(table: str, engine: str = "", session: str | None = None):
         try:
+            s = _sess(session)
+            if s and table in (s.get("files") or []):
+                return _resolve_compute(session).describe_relation(table)
             return _resolve_adapter(session, engine).list_columns(table)
+        except Exception as e:
+            return _err(engine, e)
+
+    @app.post("/register_file")
+    def register_file(payload: dict = Body(...)):
+        engine = payload.get("engine", "")
+        session = payload.get("session")
+        path = payload.get("path")
+        try:
+            if not _sess(session):
+                raise ValueError("register_file requires a live session (connect first)")
+            if not path:
+                raise ValueError("path is required")
+            # describe_source validates readability + guards quote injection.
+            columns = _resolve_compute(session).describe_source(path)
+            store.register_file(session, path)
+            return {"name": path, "type": "file", "columns": columns}
         except Exception as e:
             return _err(engine, e)
 
