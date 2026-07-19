@@ -7192,6 +7192,8 @@ function CreatePanel(props) {
     var createEdgeTypeCol = props.createEdgeTypeCol, setCreateEdgeTypeCol = props.setCreateEdgeTypeCol;
     var createDdl = props.createDdl, setCreateDdl = props.setCreateDdl;
     var activeGraph = props.activeGraph, extractSources = props.extractSources || [], createHistory = props.createHistory || {}, onCreated = props.onCreated;
+    var graphGrammar = props.graphGrammar, tables = props.tables || [];
+    var tableColumnsCache = props.tableColumnsCache || {}, onFetchTableColumns = props.onFetchTableColumns;
 
     const [status, setStatus] = useState({ loading:false, error:null, text:null });
     // Kinetica's show_graph-derived DDL for the active graph (authoritative
@@ -7337,6 +7339,13 @@ function CreatePanel(props) {
 
             {graphEngine === 'kinetica' ? (
                 <div>
+                    <CreateHelperPanel
+                        graphGrammar={graphGrammar} tables={tables}
+                        tableColumnsCache={tableColumnsCache} onFetchTableColumns={onFetchTableColumns}
+                        graphName={createGraphName} setGraphName={setCreateGraphName}
+                        initialMode="recreate"
+                        onGenerate={function(ddl){ setCreateDdl(ddl); }}
+                    />
                     <Label>DDL</Label>
                     <textarea style={Object.assign({}, sqlBox, { minHeight:180 })} value={createDdl} onChange={function(e){ setCreateDdl(e.target.value); }} spellCheck="false" />
                     <p style={{ fontSize:11, color:'#b2bec3', margin:'0 0 10px' }}>Full DDL authoring is on you — this is passed through to Kinetica verbatim.</p>
@@ -9762,6 +9771,8 @@ function App() {
                             createDdl: createDdl, setCreateDdl: setCreateDdl,
                             activeGraph: activeGraph, extractSources: extractSources,
                             createHistory: createHistory, onCreated: recordCreate,
+                            graphGrammar: graphGrammar, tables: tables,
+                            tableColumnsCache: tableColumnsCache, onFetchTableColumns: fetchTableColumns,
                         }}
                     />
                 )}
