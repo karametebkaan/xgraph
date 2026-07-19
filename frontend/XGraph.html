@@ -9922,7 +9922,13 @@ function App() {
                         )}
                         {graphTableData ? (
                             <div style={{ flex:1, minHeight:0, display:'flex', gap:16 }}>
-                                <div style={{ flex:2, minHeight:0, display:'flex' }}>
+                                {/* minWidth:0 is load-bearing: a picked node renders CanvasGraph's
+                                    wide node-detail table (esp. Kinetica records with many address:*
+                                    columns). Without it this flex:2 pane's default min-width:auto lets
+                                    that table's min-content width force the pane to full width, squeezing
+                                    the flex:1 donut column to zero (donuts vanish). minWidth:0 lets the
+                                    pane shrink to its 2/3 share so the inner table's overflowX:auto scrolls. */}
+                                <div style={{ flex:2, minWidth:0, minHeight:0, display:'flex' }}>
                                     <CanvasGraph
                                         data={graphTableData} graphName={activeGraph} gwClient={gwClient}
                                         credentials={credentials} nodeSourceTable={nodeSourceTable} labelData={labelData}
@@ -9933,7 +9939,7 @@ function App() {
                                         onVisualize={handleVisualizeLoad} vizLoading={vizProgress.loading}
                                     />
                                 </div>
-                                <div style={{ flex:1, minHeight:0, display:'flex', flexDirection:'column', gap:16 }}>
+                                <div style={{ flex:1, minWidth:0, minHeight:0, display:'flex', flexDirection:'column', gap:16 }}>
                                     <LabelChart
                                         title="Nodes by Label" items={nodeLabelDistribution.items} total={nodeLabelDistribution.total}
                                         pickingEnabled={true} selectedLabels={selectedNodeLabels} onToggleLabel={toggleSelectedNodeLabel}
