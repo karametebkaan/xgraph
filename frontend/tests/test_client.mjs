@@ -130,6 +130,21 @@ const run = async () => {
   assert.deepEqual(reg.columns, ["id"]);
   console.log("ok: registerFile client method");
 
+  // registerFile(object): Kinetica form carries data_source/table/format
+  let regUrl2, regBody2;
+  const regClient2 = g.makeClient("http://gw", async (url, opts) => {
+    if (url === "http://gw/connect") return { ok: true, json: async () => ({ session: "s1", graphs: [] }) };
+    regUrl2 = url; regBody2 = JSON.parse(opts.body);
+    return { ok: true, json: async () => ({ name: "airports", type: "table", columns: ["id"] }) };
+  });
+  await regClient2.connect({ engine: "kinetica", conn: {} }, { engine: "duckdb", conn: {} });
+  await regClient2.registerFile({ path: "s3://b/a.parquet", data_source: "my_s3", table: "airports" });
+  assert.equal(regUrl2, "http://gw/register_file");
+  assert.equal(regBody2.path, "s3://b/a.parquet");
+  assert.equal(regBody2.data_source, "my_s3");
+  assert.equal(regBody2.table, "airports");
+  console.log("ok: registerFile options form");
+
   console.log("client OK");
 };
 run();

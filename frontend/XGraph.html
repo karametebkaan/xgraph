@@ -47,7 +47,7 @@
 const { useState, useEffect, useRef, useCallback, useMemo } = React;
 
 /* ═══════════════════════ CONSTANTS ════════════════════════ */
-const EXPLORER_VERSION = "0.8.0";  // xGraph version — bump on frontend changes so a stale browser cache is visible
+const EXPLORER_VERSION = "0.9.0";  // xGraph version — bump on frontend changes so a stale browser cache is visible
 const SAFETY_TIMEOUT_MS = 10 * 60 * 1000;
 const PALETTE = [
     { solid: '#0984e3', light: '#e1f0fb' }, { solid: '#00cec9', light: '#e0f9f8' },
@@ -6794,9 +6794,15 @@ function CreateHelperPanel(props) {
                                 <span title="Register a data file (Parquet/CSV; bare name under the data dir, absolute path, or s3://…) as a pickable source"
                                       onClick={function(){
                                           if (!props.onRegisterFile) { window.alert('File registration needs a live connection.'); return; }
-                                          var p = window.prompt('File path to register (Parquet/CSV; bare name under the data dir, absolute path, or s3://…):', '');
+                                          var p = window.prompt('File path/URL to import (s3://…, kifs://…, a Kinetica-readable path, or a bare name under the data dir):', '');
                                           if (!p) return;
-                                          props.onRegisterFile(p.trim())
+                                          var arg = p.trim();
+                                          if (props.graphEngine === 'kinetica') {
+                                              var ds = (window.prompt('DATA SOURCE name for a remote path (leave blank for a KiFS/server-readable path):', '') || '').trim();
+                                              var tbl = (window.prompt('Target table name (leave blank to derive from the filename):', '') || '').trim();
+                                              arg = { path: p.trim(), data_source: ds || undefined, table: tbl || undefined };
+                                          }
+                                          props.onRegisterFile(arg)
                                               .then(function(res){ if (res && res.name) { setChSectionTable(function(prev){ var n = Object.assign({}, prev); n[comp] = res.name; return n; }); } })
                                               .catch(function(e){ window.alert('Could not register file: ' + (e && e.message ? e.message : e)); });
                                       }}
@@ -7128,7 +7134,7 @@ function CreatePanel(props) {
                     <CreateHelperPanel
                         graphGrammar={graphGrammar} tables={tables}
                         tableColumnsCache={tableColumnsCache} onFetchTableColumns={onFetchTableColumns}
-                        onRegisterFile={onRegisterFile}
+                        onRegisterFile={onRegisterFile} graphEngine={graphEngine}
                         graphName={createGraphName} setGraphName={setCreateGraphName}
                         initialMode="recreate"
                         onGenerate={function(ddl){ setCreateDdl(ddl); }}
@@ -7142,7 +7148,7 @@ function CreatePanel(props) {
                     <CreateHelperPanel
                         graphGrammar={graphGrammar} tables={tables}
                         tableColumnsCache={tableColumnsCache} onFetchTableColumns={onFetchTableColumns}
-                        onRegisterFile={onRegisterFile}
+                        onRegisterFile={onRegisterFile} graphEngine={graphEngine}
                         graphName={createGraphName} setGraphName={setCreateGraphName}
                         initialMode="recreate" buildTarget="spec"
                         onGenerate={function(model){ handleBuildFromModel(model); }}
@@ -8109,9 +8115,9 @@ function App() {
     // Register a data-file path as a builder source (DuckDB/FalkorDB). Validates
     // server-side (describe), then refreshes the table list so it shows in the
     // section dropdowns. Returns the {name, columns} (or throws the gateway msg).
-    function registerFileGW(path) {
-        if (!path || !gwClient) return Promise.resolve(null);
-        return gwClient.registerFile(path).then(function(res) {
+    function registerFileGW(arg) {
+        if (!arg || !gwClient) return Promise.resolve(null);
+        return gwClient.registerFile(arg).then(function(res) {
             return gwClient.tables().then(function(list) {
                 if (Array.isArray(list)) setTables(list);
                 return res;
