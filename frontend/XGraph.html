@@ -7220,7 +7220,7 @@ function BuildPanel(props) {
                 </div>
                 <div style={{ display:'inline-flex', alignItems:'center' }}>
                     <span style={groupLbl}>Mode</span>
-                    {radio('build-mode', 'append', mode, setMode, 'Append', source === 'tables')}
+                    {radio('build-mode', 'append', effMode, setMode, 'Append', source === 'tables')}
                     {radio('build-mode', 'recreate', effMode, setMode, 'Recreate', false)}
                 </div>
             </div>
