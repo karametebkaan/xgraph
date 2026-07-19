@@ -47,7 +47,7 @@
 const { useState, useEffect, useRef, useCallback, useMemo } = React;
 
 /* ═══════════════════════ CONSTANTS ════════════════════════ */
-const EXPLORER_VERSION = "0.5.0";  // xGraph version — bump on frontend changes so a stale browser cache is visible
+const EXPLORER_VERSION = "0.6.0";  // xGraph version — bump on frontend changes so a stale browser cache is visible
 const SAFETY_TIMEOUT_MS = 10 * 60 * 1000;
 const PALETTE = [
     { solid: '#0984e3', light: '#e1f0fb' }, { solid: '#00cec9', light: '#e0f9f8' },
@@ -6684,6 +6684,19 @@ function CreateHelperPanel(props) {
         return '    OPTIONS => KV_PAIRS(\n' + lines.join(',\n') + '\n    )';
     }
     function chGenerate() {
+        // Non-Kinetica hosts (buildTarget='spec') consume the raw row model and
+        // translate it to a /create spec themselves — the Kinetica DDL assembly
+        // below is skipped.
+        if (props.buildTarget === 'spec') {
+            props.onGenerate({
+                graphName: (props.graphName || 'new_graph').trim(),
+                directed: chDirected,
+                rows: chRows,
+                sectionTable: chSectionTable,
+                options: chOptions,
+            });
+            return;
+        }
         var name = (props.graphName || 'new_graph').trim();
         var parts = [];
         ['NODES','EDGES','WEIGHTS','RESTRICTIONS'].forEach(function(c) {
@@ -6936,6 +6949,63 @@ function CreatePanel(props) {
         return 0;
     }
 
+    // Translate the structured builder's row model (buildTarget='spec') into the
+    // DuckDB→FalkorDB /create spec (same shape handleCreate builds from the manual
+    // form), then build. Each section uses a default table (a Parquet path) with
+    // bare column rows, or explicit `table.column` refs. Single-table-per-section;
+    // multi-table combos are Slice-C polish.
+    var handleBuildFromModel = async function(model) {
+        if (!gwClient || !model || !model.graphName) return;
+        function refFor(component, aliasWanted) {
+            var rows = (model.rows[component] || []).filter(function(r){ return r.value && r.value.trim(); });
+            var dfl = (model.sectionTable && model.sectionTable[component] || '').trim();
+            for (var i = 0; i < rows.length; i++) {
+                var r = rows[i];
+                if (aliasWanted && r.id !== aliasWanted) continue;
+                var v = r.value.trim();
+                var dot = v.lastIndexOf('.');
+                if (dot > 0) return { table: v.slice(0, dot), column: v.slice(dot + 1) };
+                if (dfl) return { table: dfl, column: v };
+            }
+            return null;
+        }
+        var nodeRef = refFor('NODES', 'NODE') || refFor('NODES', null);
+        var srcRef = refFor('EDGES', 'EDGE_NODE1');
+        var tgtRef = refFor('EDGES', 'EDGE_NODE2');
+        if (!nodeRef || !nodeRef.table || !nodeRef.column || !srcRef || !tgtRef) {
+            setStatus({ loading:false, error:true, text:'Need a NODES id and EDGES source+target (set a default table + columns, or use table.column).' });
+            return;
+        }
+        var spec = { graph: model.graphName, tables: {}, nodes: [], edges: [], node_key_property: 'NODE' };
+        spec.tables['b2_nodes'] = nodeRef.table;
+        spec.nodes.push({ sql: 'SELECT ' + nodeRef.column + ' AS NODE FROM b2_nodes', id: 'NODE', label_column: null, properties: [] });
+        spec.tables['b2_edges'] = srcRef.table;
+        spec.edges.push({ sql: 'SELECT ' + srcRef.column + ' AS SRC, ' + tgtRef.column + ' AS DST FROM b2_edges',
+                          id: null, type_column: null, source_key: 'SRC', target_key: 'DST', properties: [] });
+        setStatus({ loading:true, error:null, text:null });
+        try {
+            var res = await gwClient.create(spec);
+            if (res && res.status === 'error') throw new Error(res.message || 'create failed');
+            if (res && !res.error && onCreated) {
+                onCreated(model.graphName, graphEngine, {
+                    graphName: model.graphName, nodeTable: nodeRef.table, nodeIdCol: nodeRef.column,
+                    edgeTable: srcRef.table, edgeSrcCol: srcRef.column, edgeTgtCol: tgtRef.column,
+                });
+            }
+            var names = await gwClient.listGraphs();
+            setGraphs(names);
+            var text;
+            if (res && (res.nodes || res.edges)) {
+                text = 'Built: ' + totalCount(res.nodes) + ' nodes, ' + totalCount(res.edges) + ' edges';
+            } else {
+                text = 'Graph built' + (res && res.graph ? ' (' + res.graph + ')' : '') + '.';
+            }
+            setStatus({ loading:false, error:null, text:text });
+            setActiveAction('list');
+        } catch (err) {
+            setStatus({ loading:false, error:true, text: err.message });
+        }
+    };
     var handleCreate = async function() {
         if (!gwClient || !createGraphName) return;
         setStatus({ loading:true, error:null, text:null });
@@ -7057,6 +7127,14 @@ function CreatePanel(props) {
                 </div>
             ) : (
                 <div>
+                    <CreateHelperPanel
+                        graphGrammar={graphGrammar} tables={tables}
+                        tableColumnsCache={tableColumnsCache} onFetchTableColumns={onFetchTableColumns}
+                        graphName={createGraphName} setGraphName={setCreateGraphName}
+                        initialMode="recreate" buildTarget="spec"
+                        onGenerate={function(model){ handleBuildFromModel(model); }}
+                    />
+                    <p style={{ fontSize:11, color:'#b2bec3', margin:'14px 0 6px', borderTop:'1px solid #eee', paddingTop:10 }}>Or author the node/edge mapping manually:</p>
                     <div style={row}>
                         <div style={col}>
                             <Label>Node table</Label>
@@ -7964,6 +8042,15 @@ function App() {
             optional: [],
         },
     };
+    // DuckDB/FalkorDB grammar: id + optional label only (no Kinetica WKT/weights
+    // configs). The builder's rows use these ids; the host (handleBuildFromModel)
+    // maps NODE / EDGE_NODE1 / EDGE_NODE2 onto the /create spec.
+    const DUCKDB_GRAMMAR = {
+        NODES: { configurations: [{ label: 'Node id', required: ['NODE'] }], optional: ['NODE_LABEL'] },
+        EDGES: { configurations: [{ label: 'Edge source + target', required: ['EDGE_NODE1','EDGE_NODE2'] }], optional: ['EDGE_LABEL'] },
+        WEIGHTS: { configurations: [], optional: [] },
+        RESTRICTIONS: { configurations: [], optional: [] },
+    };
     const [graphGrammar, setGraphGrammar] = useState(DEFAULT_GRAMMAR);
     // Full per-endpoint grammar from /show/graph/grammar. Shape:
     //   { create:{components,filterparams,options}, solve:{...}, match:{...}, query:{...} }
@@ -7990,6 +8077,21 @@ function App() {
                 setTableColumnsCache(function(prev) { var n = Object.assign({}, prev); n[tableName] = cols; return n; });
             })
             .catch(function() { /* silent — leave entry as [] so we don't retry forever */ });
+    }
+    // Engine-neutral column autocomplete: Kinetica keeps the direct /get/records
+    // probe (fetchTableColumns above); DuckDB/FalkorDB go through the gateway
+    // /columns endpoint. Best-effort — manual `table.column` entry always works.
+    function fetchTableColumnsGW(tableName) {
+        if (!tableName) return;
+        if (graphEngine === 'kinetica') { return fetchTableColumns(tableName); }
+        if (Object.prototype.hasOwnProperty.call(tableColumnsCache, tableName)) return;
+        setTableColumnsCache(function(prev) { var n = Object.assign({}, prev); n[tableName] = []; return n; });
+        if (!gwClient) return;
+        gwClient.columns(tableName)
+            .then(function(cols) {
+                if (Array.isArray(cols)) setTableColumnsCache(function(prev) { var n = Object.assign({}, prev); n[tableName] = cols; return n; });
+            })
+            .catch(function() { /* leave [] — manual entry still works */ });
     }
     const [activeGraph, setActiveGraph]   = useState('');
     const [credentials, setCredentials]   = useState({ url:'', user:'', pass:'' });
@@ -8081,6 +8183,17 @@ function App() {
     // even before any graphs exist (Create is how the first one gets made),
     // whereas List stays gated on graphs.length so there's something to show.
     const [connected, setConnected] = useState(false);
+    // Populate the structured-builder table list from the gateway when connected
+    // (best effort; an empty list is fine — the builder falls back to manual
+    // source entry). Re-runs when the engine or connection changes.
+    useEffect(function() {
+        if (!gwClient || !connected) return;
+        var cancelled = false;
+        gwClient.tables()
+            .then(function(list) { if (!cancelled && Array.isArray(list)) setTables(list); })
+            .catch(function() { /* leave tables as-is */ });
+        return function() { cancelled = true; };
+    }, [gwClient, connected, graphEngine]);
     // Create panel state, pre-seeded (editable) with the banking demo mapping
     // so the FalkorDB/DuckDB-over-Parquet route works immediately against the
     // demo Parquet files.
@@ -9476,8 +9589,8 @@ function App() {
                             createDdl: createDdl, setCreateDdl: setCreateDdl,
                             activeGraph: activeGraph, extractSources: extractSources,
                             createHistory: createHistory, onCreated: recordCreate,
-                            graphGrammar: graphGrammar, tables: tables,
-                            tableColumnsCache: tableColumnsCache, onFetchTableColumns: fetchTableColumns,
+                            graphGrammar: (graphEngine === 'kinetica' ? graphGrammar : DUCKDB_GRAMMAR), tables: tables,
+                            tableColumnsCache: tableColumnsCache, onFetchTableColumns: fetchTableColumnsGW,
                         }}
                     />
                 )}
