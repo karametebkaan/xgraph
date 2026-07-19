@@ -64,6 +64,22 @@ class GraphEngineAdapter(ABC):
                 "note": "This engine stores the graph itself — inspect it via Visualize / Ontology / Query.",
                 "tables": []}
 
+    def list_tables(self) -> list[dict]:
+        """List tables/relations usable as builder section sources.
+
+        Each item is {"name": str, "type": str}. Default: no introspection
+        (empty list) so the builder degrades to manual table entry.
+        """
+        return []
+
+    def list_columns(self, table: str) -> list[str]:
+        """Column names for a table/relation (for builder autocomplete).
+
+        Default: no introspection (empty list). Never raises for an unknown
+        table -- returns [] so manual column entry still works.
+        """
+        return []
+
     def creation_statement(self, graph) -> dict:
         """Best-effort "how was this graph created" recipe (Create panel's
         recipe viewer). Returns {"statement": <DDL text or None>, "source":

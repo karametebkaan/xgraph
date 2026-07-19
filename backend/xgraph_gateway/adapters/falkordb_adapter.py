@@ -483,6 +483,20 @@ class FalkorDBAdapter(GraphEngineAdapter):
             spec["graph"], host=self._host, port=self._port, password=self._password)
         return run_build(mapping, source, sink)
 
+    def list_tables(self):
+        """FalkorDB graphs are built from DuckDB Parquet sources; the gateway
+        does not enumerate them server-side (no catalog). Return [] -- the
+        builder falls back to manual source-path entry. /register_file
+        (follow-up) will make file relations first-class."""
+        return []
+
+    def list_columns(self, table):
+        """Columns of a Parquet/CSV source (bare names resolve via
+        resolve_data_path inside describe_source). Powers autocomplete once
+        the user types a source path; [] if unreadable."""
+        from xgraph_gateway.compute.duckdb_engine import DuckDBComputeEngine
+        return DuckDBComputeEngine().describe_relation(table)
+
     def graph_sizes(self):
         return {name: self._counts(self._graph(name)) for name in self.list_graphs()}
 

@@ -182,6 +182,16 @@ class DuckDBComputeEngine:
         finally:
             con.close()
 
+    def describe_relation(self, source):
+        """Columns of a relation identified by a file path/source name.
+
+        Thin wrapper over describe_source so callers (adapters) have a single
+        'columns of this source' entry point. Returns [] on error."""
+        try:
+            return self.describe_source(source)
+        except Exception:
+            return []
+
     def preview_source(self, source, limit=25):
         """Storage viewer's "DuckDB source preview": columns + up to `limit`
         sample rows of the resolved source file. Same path-resolution +

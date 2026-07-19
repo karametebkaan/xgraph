@@ -38,3 +38,12 @@ class FakeAdapter(GraphEngineAdapter):
                 "labels": {"node_labels": node_labels, "edge_labels": edge_labels}}
     def delete_graph(self, graph):
         return {"deleted": graph}
+    def list_tables(self):
+        return [
+            {"name": "expero.vertexes", "type": "table"},
+            {"name": "expero.edges", "type": "table"},
+        ]
+    def list_columns(self, table):
+        if table == "missing":
+            return []
+        return ["NODE", "NODE_LABEL", "AMOUNT"]

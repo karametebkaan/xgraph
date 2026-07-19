@@ -905,6 +905,37 @@ class KineticaAdapter(GraphEngineAdapter):
         except Exception:
             return []
 
+    def list_tables(self):
+        """All Kinetica tables/relations (name + coarse type). Empty on error."""
+        try:
+            resp = self._db.show_table(
+                table_name="",
+                options={"show_children": "true", "no_error_if_not_exists": "true"})
+        except Exception:
+            return []
+        names = resp.get("table_names", []) or []
+        descs = resp.get("table_descriptions", []) or []
+        out = []
+        for i, name in enumerate(names):
+            if not name:
+                continue
+            d = descs[i] if i < len(descs) else []
+            if "COLLECTION" in d:
+                t = "collection"
+            elif "VIEW" in d or "MATERIALIZED_VIEW" in d:
+                t = "view"
+            else:
+                t = "table"
+            out.append({"name": name, "type": t})
+        return out
+
+    def list_columns(self, table):
+        """Column names for a Kinetica table (empty list if it doesn't exist)."""
+        try:
+            return self._current_columns(table)
+        except Exception:
+            return []
+
     def _evolve_columns(self, table: str, attr_cols: dict[str, str]) -> None:
         """ALTER TABLE ADD COLUMN for each key in `attr_cols` not already
         present on `table`. Column types never change once declared (kgr
