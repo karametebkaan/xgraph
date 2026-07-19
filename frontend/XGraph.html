@@ -136,6 +136,137 @@ function chParseRef(s) {
     if (i < 0) return { table: '', column: t };
     return { table: t.slice(0, i), column: t.slice(i + 1) };
 }
+// Parse a CREATE [OR REPLACE] [DIRECTED|UNDIRECTED] GRAPH <name> (...) statement
+// back into a Create-Helper state shape: { graphName, directed, rows, options }.
+// For each top-level NODES/EDGES/WEIGHTS/RESTRICTIONS block we find the
+// INPUT_TABLES(...) sub-selects and, inside each, the `col AS ALIAS` projections.
+// Returns null when the parse fails — caller falls back to a blank panel.
+function parseCreateGraphStmt(text) {
+    if (!text || typeof text !== 'string') return null;
+    var head = text.match(/CREATE\s+(?:OR\s+REPLACE\s+)?(DIRECTED\s+|UNDIRECTED\s+)?GRAPH\s+([A-Za-z_][\w."]*)/i);
+    if (!head) return null;
+    var directed = head[1] ? /DIRECTED/i.test(head[1]) : true;
+    var graphName = head[2].replace(/"/g, '');
+    // Helper: locate `<KEY> =>` then balance parens to capture its argument block.
+    function captureArg(key) {
+        var re = new RegExp(key + '\\s*=>\\s*', 'i');
+        var m = re.exec(text); if (!m) return null;
+        var i = text.indexOf('(', m.index + m[0].length); if (i < 0) return null;
+        var depth = 0;
+        for (var j = i; j < text.length; j++) {
+            var ch = text[j];
+            if (ch === '(') depth++;
+            else if (ch === ')') { depth--; if (depth === 0) return { start: i + 1, end: j, body: text.slice(i + 1, j) }; }
+        }
+        return null;
+    }
+    function splitTopLevelComma(s) {
+        var out = [], depth = 0, start = 0;
+        for (var i = 0; i < s.length; i++) {
+            var ch = s[i];
+            if (ch === '(') depth++;
+            else if (ch === ')') depth--;
+            else if (ch === ',' && depth === 0) { out.push(s.slice(start, i)); start = i + 1; }
+        }
+        out.push(s.slice(start));
+        return out.map(function(x){ return x.trim(); }).filter(function(x){ return x.length; });
+    }
+    var rows = { NODES: [], EDGES: [], WEIGHTS: [], RESTRICTIONS: [] };
+    ['NODES','EDGES','WEIGHTS','RESTRICTIONS'].forEach(function(comp) {
+        var inputArg = (function(){
+            // Search for `<comp> => INPUT_TABLES(...)` or `<comp> => INPUT_TABLE(...)`.
+            var re = new RegExp(comp + '\\s*=>\\s*INPUT_TABLES?\\s*', 'i');
+            var m = re.exec(text); if (!m) return null;
+            var i = text.indexOf('(', m.index + m[0].length); if (i < 0) return null;
+            var depth = 0;
+            for (var j = i; j < text.length; j++) {
+                var ch = text[j];
+                if (ch === '(') depth++;
+                else if (ch === ')') { depth--; if (depth === 0) return text.slice(i + 1, j); }
+            }
+            return null;
+        })();
+        if (!inputArg) return;
+        // Each sub-select is `(SELECT col AS ALIAS, ... FROM schema.table)`.
+        var subs = splitTopLevelComma(inputArg);
+        subs.forEach(function(sub) {
+            var s = sub.replace(/^\(/, '').replace(/\)$/, '').trim();
+            var fromMatch = /\bFROM\s+([A-Za-z_][\w."]*)/i.exec(s);
+            var tableName = fromMatch ? fromMatch[1].replace(/"/g, '') : '';
+            var selMatch = /^\s*SELECT\s+([\s\S]+?)\s+FROM\s/i.exec(s);
+            if (!selMatch || !tableName) return;
+            var projs = splitTopLevelComma(selMatch[1]);
+            projs.forEach(function(p) {
+                var pm = /^(.+?)\s+AS\s+([A-Za-z_][\w]*)\s*$/i.exec(p.trim());
+                if (!pm) return;
+                var col = pm[1].trim();
+                var alias = pm[2].trim().toUpperCase();
+                rows[comp].push({ id: alias, value: tableName + '.' + col, optional: false });
+            });
+        });
+    });
+    // OPTIONS => KV_PAIRS(key = 'value', ...)
+    var options = [];
+    var optArg = captureArg('OPTIONS');
+    if (optArg && optArg.body) {
+        // Strip leading `KV_PAIRS(`/trailing `)` if present.
+        var ob = optArg.body.trim();
+        var kvm = /^KV_PAIRS\s*\(([\s\S]*)\)\s*$/i.exec(ob);
+        if (kvm) ob = kvm[1];
+        splitTopLevelComma(ob).forEach(function(kv) {
+            var m = /^\s*([A-Za-z_][\w]*)\s*=\s*('([^']*)'|"([^"]*)"|([^,]+?))\s*$/.exec(kv);
+            if (!m) return;
+            var k = m[1];
+            var v = m[3] !== undefined ? m[3] : (m[4] !== undefined ? m[4] : (m[5] || '').trim());
+            options.push({ key: k, value: v });
+        });
+    }
+    return { graphName: graphName, directed: directed, rows: rows, options: options };
+}
+
+// Build `ALTER GRAPH <name> MODIFY ( … )` SQL from a parsed CREATE-statement
+// shape (`ch`) — mirrors `chBuildSection` / `chGenerate` in QueryPanel so the
+// Modify panel opens with the right SQL without requiring the user to click
+// Generate. Each component section groups rows by table and emits one
+// (SELECT col AS alias, … FROM table) sub-select per group.
+function buildAlterSqlFromCh(ch) {
+    var sectionTable = ch.sectionTable || {};
+    var parseRef = function(s) {
+        var t = String(s || '').trim();
+        var i = t.lastIndexOf('.');
+        return i < 0 ? { table: '', column: t } : { table: t.slice(0, i), column: t.slice(i + 1) };
+    };
+    var buildSection = function(comp) {
+        var rows = (ch.rows[comp] || []).filter(function(r){ return r.value && r.value.trim(); });
+        if (!rows.length) return '';
+        var defaultTbl = (sectionTable[comp] || '').trim();
+        var byTable = {};
+        rows.forEach(function(r){
+            var ref = parseRef(r.value);
+            // Bare column → join to section default table (if set).
+            if (!ref.table && defaultTbl) { ref = { table: defaultTbl, column: r.value.trim() }; }
+            if (!ref.table || !ref.column) return;
+            (byTable[ref.table] = byTable[ref.table] || []).push({ id: r.id, col: ref.column });
+        });
+        var subs = Object.keys(byTable).map(function(tbl){
+            var aliases = byTable[tbl].map(function(p){ return p.col + ' AS ' + p.id; }).join(', ');
+            return '        (SELECT ' + aliases + ' FROM ' + tbl + ')';
+        });
+        if (!subs.length) return '';
+        return '    ' + comp + ' => INPUT_TABLES(\n' + subs.join(',\n') + '\n    )';
+    };
+    var parts = [];
+    ['NODES','EDGES','WEIGHTS','RESTRICTIONS'].forEach(function(c){
+        var s = buildSection(c);
+        if (s) parts.push(s);
+    });
+    var opts = (ch.options || []).filter(function(o){ return o && o.key && o.key.trim() && o.value !== undefined && String(o.value).trim() !== ''; });
+    if (opts.length) {
+        var lines = opts.map(function(o){ return "        " + o.key.trim() + " = '" + String(o.value).replace(/'/g, "''") + "'"; });
+        parts.push('    OPTIONS => KV_PAIRS(\n' + lines.join(',\n') + '\n    )');
+    }
+    return 'ALTER GRAPH ' + ch.graphName + ' MODIFY (\n' + parts.join(',\n') + '\n);';
+}
 
 // Extract the node source table and original ID column from the graph creation statement
 // Parses NODES => INPUT_TABLES(...) looking for FROM <source_table> and <col> as NODE[_ID]
@@ -6730,6 +6861,312 @@ function ConnectPanel(props) {
     );
 }
 
+/* ═══════════════════ CreateHelperPanel ═══════════════════════════════════
+   Standalone extraction of the NODES/EDGES/WEIGHTS/RESTRICTIONS grammar
+   builder that used to live inline in QueryPanel (gated behind the dead
+   `createHelper` prop). Owns only the builder's own state (chRows,
+   chSectionTable, chOptions, chDirected, chMode, chExpanded, chShow); the
+   graph name is a controlled prop (shared with CreatePanel's field) and the
+   assembled DDL is handed back via onGenerate — this component has no
+   SQL box, no Run button, no results/graph view of its own. */
+function CreateHelperPanel(props) {
+    var graphGrammar = props.graphGrammar || {}; // { NODES: [{label, identifiers}], EDGES, WEIGHTS, RESTRICTIONS }
+    var availableTables = props.tables || []; // [{name, type}] — section table dropdowns
+    var tableColumnsCache = props.tableColumnsCache || {}; // { 'schema.table': [col,...] }
+    var onFetchTableColumns = props.onFetchTableColumns;
+    // Resolve the longest `schema.table` prefix of `value` that matches a known table.
+    // Used by the Create Helper to know which table's columns to suggest as the
+    // user types into a `schema.table.column` field.
+    function chPickedTable(value) {
+        var s = String(value || '');
+        var lastDot = s.lastIndexOf('.');
+        while (lastDot > 0) {
+            var maybe = s.slice(0, lastDot);
+            for (var i = 0; i < availableTables.length; i++) if (availableTables[i].name === maybe) return maybe;
+            lastDot = s.lastIndexOf('.', lastDot - 1);
+        }
+        return null;
+    }
+    const [chShow, setChShow] = useState(true);
+    const [chDirected, setChDirected] = useState(true);
+    const [chRows, setChRows] = useState({ NODES: [], EDGES: [], WEIGHTS: [], RESTRICTIONS: [] });
+    // Per-component default table (e.g., NODES: 'schema.nodes_table'). When set,
+    // a row's value can be a bare column name and the SQL builder joins it to this
+    // table. Empty string = no default; rows must use full schema.table.column form.
+    // Splitting a component across multiple tables is still possible: any row whose
+    // value contains a dot is treated as a full override.
+    const [chSectionTable, setChSectionTable] = useState({ NODES:'', EDGES:'', WEIGHTS:'', RESTRICTIONS:'' });
+    // OPTIONS rows for OPTIONS => KV_PAIRS(...). Each entry is { key, value }.
+    const [chOptions, setChOptions] = useState([]);
+    // Per-section expand state. NODES/EDGES are always rendered expanded.
+    // WEIGHTS/RESTRICTIONS auto-expand when they have rows, else collapse to a
+    // header pull-down to save vertical space. Map shape: { WEIGHTS: bool, RESTRICTIONS: bool }.
+    // Missing key = "auto" (uses the has-content heuristic).
+    const [chExpanded, setChExpanded] = useState({});
+    // Helper mode: 'recreate' → emits CREATE OR REPLACE [DIRECTED|UNDIRECTED] GRAPH …;
+    //              'modify'   → emits ALTER GRAPH <name> MODIFY ( … ). Default 'recreate'
+    // unless the host opens this panel in Modify mode (e.g. the Modify context-menu entry).
+    const [chMode, setChMode] = useState(props.initialMode === 'modify' ? 'modify' : 'recreate');
+    // Add the identifiers from a configuration to a component's row list. Required
+    // identifiers come from the selected configuration; the component's optional
+    // add-ons come too (with `optional: true` so they get a distinct placeholder).
+    function chAddConfig(component, configRequired, configLabel) {
+        if (!configRequired || !configRequired.length) return;
+        var compGrammar = (graphGrammar && graphGrammar[component]) || {};
+        var optional = compGrammar.optional || [];
+        // Tag every row added in this call with a unique groupId so the UI can
+        // render a single "remove combo" action that drops the whole group
+        // (required + its optional add-ons) in one click.
+        var gid = 'g' + Date.now().toString(36) + Math.floor(Math.random() * 1e6).toString(36);
+        var label = configLabel || '';
+        setChRows(function(prev) {
+            var next = Object.assign({}, prev);
+            var newRows = configRequired.map(function(id) { return { id: id, value: '', optional: false, groupId: gid, groupLabel: label }; })
+                .concat(optional.map(function(id) { return { id: id, value: '', optional: true, groupId: gid, groupLabel: label }; }));
+            next[component] = (prev[component] || []).concat(newRows);
+            return next;
+        });
+    }
+    function chRemoveGroup(component, groupId) {
+        if (!groupId) return;
+        setChRows(function(prev){
+            var arr = (prev[component] || []).filter(function(r){ return r.groupId !== groupId; });
+            var next = Object.assign({}, prev); next[component] = arr; return next;
+        });
+    }
+    function chUpdateRow(component, idx, value) {
+        setChRows(function(prev) {
+            var arr = (prev[component] || []).slice();
+            arr[idx] = Object.assign({}, arr[idx], { value: value });
+            var next = Object.assign({}, prev); next[component] = arr; return next;
+        });
+    }
+    function chRemoveRow(component, idx) {
+        setChRows(function(prev) {
+            var arr = (prev[component] || []).slice(); arr.splice(idx, 1);
+            var next = Object.assign({}, prev); next[component] = arr; return next;
+        });
+    }
+    // Build the SQL: group rows by table → one (SELECT col AS IDENT, ... FROM table) per group.
+    // AS aliases use the generic identifier name (NODE / NODE1 / NODE2 etc.) — Kinetica
+    // infers the typed variant from the column data, so we don't need to commit to
+    // NAME vs ID vs WKTPOINT in the SQL output.
+    function chBuildSection(component) {
+        var rows = (chRows[component] || []).filter(function(r) { return r.value && r.value.trim(); });
+        if (!rows.length) return '';
+        var defaultTbl = (chSectionTable && chSectionTable[component] || '').trim();
+        var byTable = {};
+        rows.forEach(function(r) {
+            var raw = r.value.trim();
+            var ref = chParseRef(raw);
+            // If the row has no dot AND we have a section default table, treat the
+            // value as a bare column name and join it to the default.
+            if (!ref.table && defaultTbl) { ref = { table: defaultTbl, column: raw }; }
+            if (!ref.table || !ref.column) return;
+            (byTable[ref.table] = byTable[ref.table] || []).push({ id: chGenericId(r.id, component), col: ref.column });
+        });
+        var subs = Object.keys(byTable).map(function(tbl) {
+            var aliases = byTable[tbl].map(function(p) { return p.col + ' AS ' + p.id; }).join(', ');
+            return '        (SELECT ' + aliases + ' FROM ' + tbl + ')';
+        });
+        if (!subs.length) return '';
+        return '    ' + component + ' => INPUT_TABLES(\n' + subs.join(',\n') + '\n    )';
+    }
+    function chBuildOptions() {
+        var kvs = (chOptions || []).filter(function(o){ return o && o.key && o.key.trim() && o.value !== undefined && String(o.value).trim() !== ''; });
+        if (!kvs.length) return '';
+        var lines = kvs.map(function(o){ return "        " + o.key.trim() + " = '" + String(o.value).replace(/'/g, "''") + "'"; });
+        return '    OPTIONS => KV_PAIRS(\n' + lines.join(',\n') + '\n    )';
+    }
+    function chGenerate() {
+        var name = (props.graphName || 'new_graph').trim();
+        var parts = [];
+        ['NODES','EDGES','WEIGHTS','RESTRICTIONS'].forEach(function(c) {
+            var s = chBuildSection(c);
+            if (s) parts.push(s);
+        });
+        var optsBlock = chBuildOptions();
+        if (optsBlock) parts.push(optsBlock);
+        if (!parts.length) parts.push('    NODES => INPUT_TABLES(\n        (SELECT <col> AS NODE_NAME FROM <table>)\n    )');
+        var sql;
+        if (chMode === 'modify') {
+            // ALTER GRAPH <name> MODIFY ( <same body as CREATE> )
+            sql = 'ALTER GRAPH ' + name + ' MODIFY (\n' + parts.join(',\n') + '\n);';
+        } else {
+            sql = 'CREATE OR REPLACE ' + (chDirected ? 'DIRECTED ' : 'UNDIRECTED ') + 'GRAPH ' + name + ' (\n' +
+                  parts.join(',\n') + '\n' +
+                  ');';
+        }
+        props.onGenerate(sql);
+    }
+    function chAddOption() { setChOptions(function(prev){ return (prev || []).concat([{ key: '', value: '' }]); }); }
+    function chUpdateOption(idx, field, val) {
+        setChOptions(function(prev){
+            var arr = (prev || []).slice();
+            arr[idx] = Object.assign({}, arr[idx], (field === 'key' ? { key: val } : { value: val }));
+            return arr;
+        });
+    }
+    function chRemoveOption(idx) {
+        setChOptions(function(prev){ var arr = (prev || []).slice(); arr.splice(idx, 1); return arr; });
+    }
+    return (
+        <div>
+            <div onClick={function(){ setChShow(function(p){ return !p; }); }} title="Create Helper: pick component configurations and column mappings, then Generate the CREATE GRAPH SQL" style={{ display:'flex', alignItems:'center', gap:6, cursor:'pointer', userSelect:'none', padding:'2px 0' }}>
+                <span style={{ fontSize:13, fontWeight:800, color: chShow ? '#00b894' : '#2d3436' }}>{chShow ? '▼' : '▶'} Create Helper</span>
+                {!chShow && <span style={{ fontSize:10, color:'#b2bec3' }}>— pick component configurations and column mappings</span>}
+            </div>
+            {chShow && (
+                <div style={{ padding:'8px 4px 4px', fontSize:12 }}>
+                    <div style={{ display:'grid', gridTemplateColumns:'auto 1fr', gap:'6px 12px', alignItems:'center', marginBottom:10 }}>
+                        <label style={{ color:'#636e72', fontWeight:600 }}>Graph name</label>
+                        <input value={props.graphName} onChange={function(e){ props.setGraphName(e.target.value); }} placeholder="schema.graph_name" style={{ padding:'4px 8px', border:'1px solid #dfe6e9', borderRadius:5, fontSize:12, fontFamily:'inherit', outline:'none' }}/>
+                        <label style={{ color:'#636e72', fontWeight:600 }}>Action</label>
+                        <div style={{ display:'flex', gap:12 }}>
+                            <label title="Generate CREATE OR REPLACE GRAPH … (full recreate; respects Directed/Undirected)" style={{ display:'inline-flex', alignItems:'center', gap:4, cursor:'pointer' }}><input type="radio" checked={chMode === 'recreate'} onChange={function(){ setChMode('recreate'); }}/> Recreate</label>
+                            <label title="Generate ALTER GRAPH <name> MODIFY ( … ) — patches an existing graph; Directed/Undirected is fixed at the graph's create time and is not re-emitted" style={{ display:'inline-flex', alignItems:'center', gap:4, cursor:'pointer' }}><input type="radio" checked={chMode === 'modify'} onChange={function(){ setChMode('modify'); }}/> Modify</label>
+                        </div>
+                        {chMode === 'recreate' && <label style={{ color:'#636e72', fontWeight:600 }}>Directed</label>}
+                        {chMode === 'recreate' && <div style={{ display:'flex', gap:12 }}>
+                            <label style={{ display:'inline-flex', alignItems:'center', gap:4, cursor:'pointer' }}><input type="radio" checked={chDirected} onChange={function(){ setChDirected(true); }}/> Directed</label>
+                            <label style={{ display:'inline-flex', alignItems:'center', gap:4, cursor:'pointer' }}><input type="radio" checked={!chDirected} onChange={function(){ setChDirected(false); }}/> Undirected</label>
+                        </div>}
+                    </div>
+                    {['NODES','EDGES','WEIGHTS','RESTRICTIONS'].map(function(comp) {
+                        var compGrammar = (graphGrammar && graphGrammar[comp]) || {};
+                        var configs = compGrammar.configurations || [];
+                        var rows = chRows[comp] || [];
+                        var sectionColor = comp === 'NODES' ? '#0984e3' : comp === 'EDGES' ? '#e17055' : comp === 'WEIGHTS' ? '#6c5ce7' : '#636e72';
+                        var defaultTbl = (chSectionTable && chSectionTable[comp]) || '';
+                        var defaultTblCols = defaultTbl ? (tableColumnsCache[defaultTbl] || null) : null;
+                        // EDGES is the only mandatory component — always rendered expanded.
+                        // NODES / WEIGHTS / RESTRICTIONS collapse to a pull-down to save vertical
+                        // space, auto-expanding when they have rows or a default table set
+                        // (e.g., after Modify).
+                        var collapsible = (comp !== 'EDGES');
+                        var hasContent = rows.length > 0 || !!defaultTbl;
+                        var explicit = chExpanded && Object.prototype.hasOwnProperty.call(chExpanded, comp) ? chExpanded[comp] : null;
+                        var expanded = !collapsible || (explicit !== null ? explicit : hasContent);
+                        return <div key={comp} style={{ marginBottom:10, paddingBottom:8, borderBottom:'1px solid #f1f2f6' }}>
+                            <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom: expanded ? 6 : 0, cursor: collapsible ? 'pointer' : 'default' }} onClick={collapsible ? function(){ setChExpanded(function(prev){ var n = Object.assign({}, prev); n[comp] = !expanded; return n; }); } : null}>
+                                {collapsible && <span style={{ fontSize:10, color:'#b2bec3', width:10, userSelect:'none' }}>{expanded ? '▼' : '▶'}</span>}
+                                <span style={{ fontWeight:800, color: sectionColor, fontSize:12, letterSpacing:0.3 }}>{comp}</span>
+                                {collapsible && !expanded && rows.length > 0 && <span style={{ fontSize:10, color:'#b2bec3' }}>{rows.length + ' row' + (rows.length !== 1 ? 's' : '')}</span>}
+                                {expanded && <select onClick={function(e){ e.stopPropagation(); }} onChange={function(e){ var i = parseInt(e.target.value); if (!isNaN(i) && configs[i]) { chAddConfig(comp, configs[i].required, configs[i].label); } e.target.value = ''; }} defaultValue="" style={{ flex:1, padding:'3px 6px', border:'1px solid #dfe6e9', borderRadius:5, fontSize:11, background:'#fff', fontFamily:'inherit' }}>
+                                    <option value="">Select a configuration… (+ Add)</option>
+                                    {configs.map(function(c, i){ return <option key={i} value={i}>{c.label}</option>; })}
+                                </select>}
+                            </div>
+                            {expanded && <React.Fragment>
+                            {/* Section default table — when set, the row inputs accept bare column
+                                names and are auto-joined to this table in the generated SQL. A
+                                row can still override by typing a full schema.table.column path. */}
+                            <div style={{ display:'grid', gridTemplateColumns:'auto 1fr auto', gap:8, alignItems:'center', padding:'3px 0 6px', fontSize:11 }}>
+                                <label title="When set, each row below can be a bare column name (joined to this table). A row with dots is treated as a full schema.table.column override." style={{ color:'#636e72', fontWeight:700, fontSize:10, letterSpacing:0.3, textTransform:'uppercase' }}>Default table</label>
+                                <input list={'ch-deftbl-' + comp} value={defaultTbl} onChange={function(e){
+                                    var v = e.target.value;
+                                    setChSectionTable(function(prev){ var n = Object.assign({}, prev); n[comp] = v; return n; });
+                                    if (v && onFetchTableColumns && !Object.prototype.hasOwnProperty.call(tableColumnsCache, v)) onFetchTableColumns(v);
+                                }} placeholder="schema.table (optional)" style={{ padding:'4px 8px', border:'1px dashed #dfe6e9', borderRadius:5, fontSize:11, fontFamily:'inherit', outline:'none', background: defaultTbl ? '#f8fcff' : '#fff' }}/>
+                                <datalist id={'ch-deftbl-' + comp}>
+                                    {availableTables.filter(function(t){ return t.type !== 'collection'; }).map(function(t){ return <option key={t.name} value={t.name}/>; })}
+                                </datalist>
+                                {defaultTbl && <span title="Clear default table" onClick={function(){ setChSectionTable(function(prev){ var n = Object.assign({}, prev); n[comp] = ''; return n; }); }} style={{ cursor:'pointer', color:'#b2bec3', fontSize:14, padding:'0 4px', userSelect:'none' }}>{'✕'}</span>}
+                                {!defaultTbl && <span/>}
+                            </div>
+                            {(function(){
+                                // Render rows in groups: consecutive rows that share a groupId form a
+                                // combo block (added together by one configuration pick). A group header
+                                // surfaces the combo label and a single "remove combo" trash that
+                                // drops the whole block at once. Per-row trash still works for fine
+                                // edits. Pre-existing rows without a groupId render plain.
+                                var groups = [];
+                                rows.forEach(function(r, idx){
+                                    var g = groups[groups.length - 1];
+                                    if (g && g.groupId === (r.groupId || null)) { g.items.push({ row: r, idx: idx }); return; }
+                                    groups.push({ groupId: r.groupId || null, groupLabel: r.groupLabel || '', items: [{ row: r, idx: idx }] });
+                                });
+                                return groups.map(function(group, gIdx){
+                                    var hasMultiple = group.items.length > 1;
+                                    var canRemoveAll = !!group.groupId && hasMultiple;
+                                    return <div key={'g' + gIdx} style={{ marginBottom: canRemoveAll ? 6 : 0, paddingLeft: canRemoveAll ? 6 : 0, borderLeft: canRemoveAll ? '2px solid #f1f2f6' : 'none' }}>
+                                        {canRemoveAll && (
+                                            <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', padding:'2px 0', fontSize:10, color:'#b2bec3' }}>
+                                                <span title={'Combo: ' + (group.groupLabel || '(unnamed)') + ' — ' + group.items.length + ' rows'} style={{ fontWeight:600, letterSpacing:0.3 }}>{group.groupLabel || 'combo'}</span>
+                                                <span onClick={function(){ chRemoveGroup(comp, group.groupId); }} title={'Remove the entire combo (' + group.items.length + ' rows)'} style={{ cursor:'pointer', color:'#d63031', fontSize:13, padding:'0 4px', userSelect:'none' }}>{'🗑 combo'}</span>
+                                            </div>
+                                        )}
+                                        {group.items.map(function(it){
+                                            var r = it.row, idx = it.idx;
+                                            var aliasName = chGenericId(r.id, comp);
+                                            var aliasTitle = aliasName !== r.id ? r.id + ' → ' + aliasName + ' (the section already conveys the component context; Kinetica infers the type from the column)' : r.id;
+                                            var pickedTbl = chPickedTable(r.value);
+                                            var pickedCols = pickedTbl ? (tableColumnsCache[pickedTbl] || null) : null;
+                                            var rowIsOverride = r.value && r.value.indexOf('.') !== -1;
+                                            var usingDefault = !!defaultTbl && !rowIsOverride;
+                                            return <div key={idx} style={{ display:'grid', gridTemplateColumns:'1fr auto auto auto', gap:8, alignItems:'center', padding:'3px 0' }}>
+                                                <input list={'ch-tables-' + comp + '-' + idx} value={r.value} onChange={function(e){
+                                                    var v = e.target.value;
+                                                    chUpdateRow(comp, idx, v);
+                                                    var pt = chPickedTable(v);
+                                                    if (pt && onFetchTableColumns && !Object.prototype.hasOwnProperty.call(tableColumnsCache, pt)) onFetchTableColumns(pt);
+                                                }} placeholder={r.optional ? 'Optional' : (defaultTbl ? 'column' : 'schema.table.column')} title={defaultTbl ? ('Bare column name → joined to ' + defaultTbl + '. Type with dots to override.') : 'Full path: schema.table.column'} style={{ padding:'4px 8px', border: '1px solid ' + (r.optional ? '#f1f2f6' : (usingDefault ? '#0984e3' : '#dfe6e9')), borderRadius:5, fontSize:11, fontFamily:'inherit', outline:'none', background: r.optional ? '#fafbfc' : '#fff' }}/>
+                                                <datalist id={'ch-tables-' + comp + '-' + idx}>
+                                                    {usingDefault && defaultTblCols && defaultTblCols.length
+                                                        ? defaultTblCols.map(function(col){ return <option key={defaultTbl + '|' + col} value={col}/>; })
+                                                        : (pickedTbl && pickedCols && pickedCols.length)
+                                                            ? pickedCols.map(function(col){ return <option key={pickedTbl + '|' + col} value={pickedTbl + '.' + col}/>; })
+                                                            : availableTables.filter(function(t){ return t.type !== 'collection'; }).map(function(t){ return <option key={t.name} value={t.name + '.'}/>; })}
+                                                </datalist>
+                                                <span style={{ fontSize:10, color:'#b2bec3' }}>as</span>
+                                                <span title={aliasTitle} style={{ fontSize:11, fontWeight:700, color: r.optional ? '#b2bec3' : '#2d3436', cursor: aliasName !== r.id ? 'help' : 'default' }}>{aliasName}</span>
+                                                <span onClick={function(){ chRemoveRow(comp, idx); }} title="Remove just this row" style={{ cursor:'pointer', color:'#d63031', fontSize:14, padding:'0 4px', userSelect:'none' }}>{'🗑'}</span>
+                                            </div>;
+                                        })}
+                                    </div>;
+                                });
+                            })()}
+                            </React.Fragment>}
+                        </div>;
+                    })}
+                    {/* OPTIONS — emitted as OPTIONS => KV_PAIRS(...) when any key/value is set. */}
+                    <div style={{ marginBottom:10, paddingBottom:8, borderBottom:'1px solid #f1f2f6' }}>
+                        <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:6 }}>
+                            <span style={{ fontWeight:800, color:'#fdcb6e', fontSize:12, letterSpacing:0.3 }}>OPTIONS</span>
+                            <button onClick={chAddOption} title="Add a key/value option" style={{ padding:'3px 8px', border:'1px solid #dfe6e9', borderRadius:5, cursor:'pointer', fontSize:11, background:'#fff', fontFamily:'inherit', color:'#2d3436' }}>+ Add option</button>
+                            {!(chOptions && chOptions.length) && <span style={{ fontSize:10, color:'#b2bec3' }}>OPTIONS =&gt; KV_PAIRS(key = 'value', …)</span>}
+                        </div>
+                        {(chOptions || []).map(function(o, idx) {
+                            return <div key={idx} style={{ display:'grid', gridTemplateColumns:'1fr 1fr auto', gap:8, alignItems:'center', padding:'3px 0' }}>
+                                <input list="ch-option-keys" value={o.key || ''} onChange={function(e){ chUpdateOption(idx, 'key', e.target.value); }} placeholder="option key (e.g., merge_tolerance)" style={{ padding:'4px 8px', border:'1px solid #dfe6e9', borderRadius:5, fontSize:11, fontFamily:'inherit', outline:'none' }}/>
+                                <input value={o.value || ''} onChange={function(e){ chUpdateOption(idx, 'value', e.target.value); }} placeholder="value" style={{ padding:'4px 8px', border:'1px solid #dfe6e9', borderRadius:5, fontSize:11, fontFamily:'inherit', outline:'none' }}/>
+                                <span onClick={function(){ chRemoveOption(idx); }} title="Remove" style={{ cursor:'pointer', color:'#d63031', fontSize:14, padding:'0 4px', userSelect:'none' }}>{'🗑'}</span>
+                            </div>;
+                        })}
+                        <datalist id="ch-option-keys">
+                            <option value="merge_tolerance"/>
+                            <option value="add_table_monitor"/>
+                            <option value="enable_graph_draw"/>
+                            <option value="export_create_results"/>
+                            <option value="graph_table"/>
+                            <option value="modify"/>
+                            <option value="recreate"/>
+                            <option value="restore"/>
+                            <option value="save_persist"/>
+                            <option value="server_id"/>
+                            <option value="use_rtree"/>
+                        </datalist>
+                    </div>
+                    <div style={{ display:'flex', gap:6, alignItems:'center', position:'sticky', bottom:0, background:'#fff', padding:'6px 0', borderTop:'1px solid #f1f2f6', zIndex:2 }}>
+                        <button onClick={chGenerate} style={{ padding:'6px 14px', border:'none', borderRadius:5, cursor:'pointer', fontWeight:700, color:'#fff', background:'#00b894', fontSize:12, fontFamily:'inherit' }}>Generate</button>
+                        <span style={{ fontSize:10, color:'#b2bec3' }}>edits the SQL below — refine manually before Run</span>
+                    </div>
+                </div>
+            )}
+        </div>
+    );
+}
+
 /* ═══════════════════ CreatePanel ═════════════════════════
    CREATE OR REPLACE GRAPH. FalkorDB route builds a DuckDB-over-Parquet load
    spec (pre-seeded with the banking demo mapping so it works immediately
@@ -8296,138 +8733,6 @@ function App() {
                        ');';
         queryIdCounter.current++;
         setQueryPanels(function(prev){ return prev.concat([{ id: queryIdCounter.current, initialSql: template, initialTab: null, stateRef: { current: null }, autoRun: false, hideQueryHelper: true, createHelper: true }]); });
-    }
-
-    // Parse a CREATE [OR REPLACE] [DIRECTED|UNDIRECTED] GRAPH <name> (...) statement
-    // back into a Create-Helper state shape: { graphName, directed, rows, options }.
-    // For each top-level NODES/EDGES/WEIGHTS/RESTRICTIONS block we find the
-    // INPUT_TABLES(...) sub-selects and, inside each, the `col AS ALIAS` projections.
-    // Returns null when the parse fails — caller falls back to a blank panel.
-    function parseCreateGraphStmt(text) {
-        if (!text || typeof text !== 'string') return null;
-        var head = text.match(/CREATE\s+(?:OR\s+REPLACE\s+)?(DIRECTED\s+|UNDIRECTED\s+)?GRAPH\s+([A-Za-z_][\w."]*)/i);
-        if (!head) return null;
-        var directed = head[1] ? /DIRECTED/i.test(head[1]) : true;
-        var graphName = head[2].replace(/"/g, '');
-        // Helper: locate `<KEY> =>` then balance parens to capture its argument block.
-        function captureArg(key) {
-            var re = new RegExp(key + '\\s*=>\\s*', 'i');
-            var m = re.exec(text); if (!m) return null;
-            var i = text.indexOf('(', m.index + m[0].length); if (i < 0) return null;
-            var depth = 0;
-            for (var j = i; j < text.length; j++) {
-                var ch = text[j];
-                if (ch === '(') depth++;
-                else if (ch === ')') { depth--; if (depth === 0) return { start: i + 1, end: j, body: text.slice(i + 1, j) }; }
-            }
-            return null;
-        }
-        function splitTopLevelComma(s) {
-            var out = [], depth = 0, start = 0;
-            for (var i = 0; i < s.length; i++) {
-                var ch = s[i];
-                if (ch === '(') depth++;
-                else if (ch === ')') depth--;
-                else if (ch === ',' && depth === 0) { out.push(s.slice(start, i)); start = i + 1; }
-            }
-            out.push(s.slice(start));
-            return out.map(function(x){ return x.trim(); }).filter(function(x){ return x.length; });
-        }
-        var rows = { NODES: [], EDGES: [], WEIGHTS: [], RESTRICTIONS: [] };
-        ['NODES','EDGES','WEIGHTS','RESTRICTIONS'].forEach(function(comp) {
-            var inputArg = (function(){
-                // Search for `<comp> => INPUT_TABLES(...)` or `<comp> => INPUT_TABLE(...)`.
-                var re = new RegExp(comp + '\\s*=>\\s*INPUT_TABLES?\\s*', 'i');
-                var m = re.exec(text); if (!m) return null;
-                var i = text.indexOf('(', m.index + m[0].length); if (i < 0) return null;
-                var depth = 0;
-                for (var j = i; j < text.length; j++) {
-                    var ch = text[j];
-                    if (ch === '(') depth++;
-                    else if (ch === ')') { depth--; if (depth === 0) return text.slice(i + 1, j); }
-                }
-                return null;
-            })();
-            if (!inputArg) return;
-            // Each sub-select is `(SELECT col AS ALIAS, ... FROM schema.table)`.
-            var subs = splitTopLevelComma(inputArg);
-            subs.forEach(function(sub) {
-                var s = sub.replace(/^\(/, '').replace(/\)$/, '').trim();
-                var fromMatch = /\bFROM\s+([A-Za-z_][\w."]*)/i.exec(s);
-                var tableName = fromMatch ? fromMatch[1].replace(/"/g, '') : '';
-                var selMatch = /^\s*SELECT\s+([\s\S]+?)\s+FROM\s/i.exec(s);
-                if (!selMatch || !tableName) return;
-                var projs = splitTopLevelComma(selMatch[1]);
-                projs.forEach(function(p) {
-                    var pm = /^(.+?)\s+AS\s+([A-Za-z_][\w]*)\s*$/i.exec(p.trim());
-                    if (!pm) return;
-                    var col = pm[1].trim();
-                    var alias = pm[2].trim().toUpperCase();
-                    rows[comp].push({ id: alias, value: tableName + '.' + col, optional: false });
-                });
-            });
-        });
-        // OPTIONS => KV_PAIRS(key = 'value', ...)
-        var options = [];
-        var optArg = captureArg('OPTIONS');
-        if (optArg && optArg.body) {
-            // Strip leading `KV_PAIRS(`/trailing `)` if present.
-            var ob = optArg.body.trim();
-            var kvm = /^KV_PAIRS\s*\(([\s\S]*)\)\s*$/i.exec(ob);
-            if (kvm) ob = kvm[1];
-            splitTopLevelComma(ob).forEach(function(kv) {
-                var m = /^\s*([A-Za-z_][\w]*)\s*=\s*('([^']*)'|"([^"]*)"|([^,]+?))\s*$/.exec(kv);
-                if (!m) return;
-                var k = m[1];
-                var v = m[3] !== undefined ? m[3] : (m[4] !== undefined ? m[4] : (m[5] || '').trim());
-                options.push({ key: k, value: v });
-            });
-        }
-        return { graphName: graphName, directed: directed, rows: rows, options: options };
-    }
-
-    // Build `ALTER GRAPH <name> MODIFY ( … )` SQL from a parsed CREATE-statement
-    // shape (`ch`) — mirrors `chBuildSection` / `chGenerate` in QueryPanel so the
-    // Modify panel opens with the right SQL without requiring the user to click
-    // Generate. Each component section groups rows by table and emits one
-    // (SELECT col AS alias, … FROM table) sub-select per group.
-    function buildAlterSqlFromCh(ch) {
-        var sectionTable = ch.sectionTable || {};
-        var parseRef = function(s) {
-            var t = String(s || '').trim();
-            var i = t.lastIndexOf('.');
-            return i < 0 ? { table: '', column: t } : { table: t.slice(0, i), column: t.slice(i + 1) };
-        };
-        var buildSection = function(comp) {
-            var rows = (ch.rows[comp] || []).filter(function(r){ return r.value && r.value.trim(); });
-            if (!rows.length) return '';
-            var defaultTbl = (sectionTable[comp] || '').trim();
-            var byTable = {};
-            rows.forEach(function(r){
-                var ref = parseRef(r.value);
-                // Bare column → join to section default table (if set).
-                if (!ref.table && defaultTbl) { ref = { table: defaultTbl, column: r.value.trim() }; }
-                if (!ref.table || !ref.column) return;
-                (byTable[ref.table] = byTable[ref.table] || []).push({ id: r.id, col: ref.column });
-            });
-            var subs = Object.keys(byTable).map(function(tbl){
-                var aliases = byTable[tbl].map(function(p){ return p.col + ' AS ' + p.id; }).join(', ');
-                return '        (SELECT ' + aliases + ' FROM ' + tbl + ')';
-            });
-            if (!subs.length) return '';
-            return '    ' + comp + ' => INPUT_TABLES(\n' + subs.join(',\n') + '\n    )';
-        };
-        var parts = [];
-        ['NODES','EDGES','WEIGHTS','RESTRICTIONS'].forEach(function(c){
-            var s = buildSection(c);
-            if (s) parts.push(s);
-        });
-        var opts = (ch.options || []).filter(function(o){ return o && o.key && o.key.trim() && o.value !== undefined && String(o.value).trim() !== ''; });
-        if (opts.length) {
-            var lines = opts.map(function(o){ return "        " + o.key.trim() + " = '" + String(o.value).replace(/'/g, "''") + "'"; });
-            parts.push('    OPTIONS => KV_PAIRS(\n' + lines.join(',\n') + '\n    )');
-        }
-        return 'ALTER GRAPH ' + ch.graphName + ' MODIFY (\n' + parts.join(',\n') + '\n);';
     }
 
     // Modify: open a Create-Helper panel pre-filled from an existing graph's
