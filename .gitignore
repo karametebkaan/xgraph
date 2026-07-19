@@ -31,3 +31,6 @@ data/xgraph_meta.duckdb
 
 # SDD scratch
 .superpowers/
+
+# Local dev tooling (esbuild for JSX syntax checks)
+node_modules/
