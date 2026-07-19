@@ -47,7 +47,7 @@
 const { useState, useEffect, useRef, useCallback, useMemo } = React;
 
 /* ═══════════════════════ CONSTANTS ════════════════════════ */
-const EXPLORER_VERSION = "0.7.0";  // xGraph version — bump on frontend changes so a stale browser cache is visible
+const EXPLORER_VERSION = "0.8.0";  // xGraph version — bump on frontend changes so a stale browser cache is visible
 const SAFETY_TIMEOUT_MS = 10 * 60 * 1000;
 const PALETTE = [
     { solid: '#0984e3', light: '#e1f0fb' }, { solid: '#00cec9', light: '#e0f9f8' },
@@ -6779,7 +6779,7 @@ function CreateHelperPanel(props) {
                             {/* Section default table — when set, the row inputs accept bare column
                                 names and are auto-joined to this table in the generated SQL. A
                                 row can still override by typing a full schema.table.column path. */}
-                            <div style={{ display:'grid', gridTemplateColumns:'auto 1fr auto', gap:8, alignItems:'center', padding:'3px 0 6px', fontSize:11 }}>
+                            <div style={{ display:'grid', gridTemplateColumns:'auto 1fr auto auto', gap:8, alignItems:'center', padding:'3px 0 6px', fontSize:11 }}>
                                 <label title="When set, each row below can be a bare column name (joined to this table). A row with dots is treated as a full schema.table.column override." style={{ color:'#636e72', fontWeight:700, fontSize:10, letterSpacing:0.3, textTransform:'uppercase' }}>Default table</label>
                                 <input list={'ch-deftbl-' + comp} value={defaultTbl} onChange={function(e){
                                     var v = e.target.value;
@@ -6791,6 +6791,16 @@ function CreateHelperPanel(props) {
                                 </datalist>
                                 {defaultTbl && <span title="Clear default table" onClick={function(){ setChSectionTable(function(prev){ var n = Object.assign({}, prev); n[comp] = ''; return n; }); }} style={{ cursor:'pointer', color:'#b2bec3', fontSize:14, padding:'0 4px', userSelect:'none' }}>{'✕'}</span>}
                                 {!defaultTbl && <span/>}
+                                <span title="Register a data file (Parquet/CSV; bare name under the data dir, absolute path, or s3://…) as a pickable source"
+                                      onClick={function(){
+                                          if (!props.onRegisterFile) { window.alert('File registration needs a live connection.'); return; }
+                                          var p = window.prompt('File path to register (Parquet/CSV; bare name under the data dir, absolute path, or s3://…):', '');
+                                          if (!p) return;
+                                          props.onRegisterFile(p.trim())
+                                              .then(function(res){ if (res && res.name) { setChSectionTable(function(prev){ var n = Object.assign({}, prev); n[comp] = res.name; return n; }); } })
+                                              .catch(function(e){ window.alert('Could not register file: ' + (e && e.message ? e.message : e)); });
+                                      }}
+                                      style={{ cursor:'pointer', color:'#0984e3', fontSize:11, fontWeight:700, userSelect:'none', whiteSpace:'nowrap' }}>{'＋ File'}</span>
                             </div>
                             {(function(){
                                 // Render rows in groups: consecutive rows that share a groupId form a
@@ -6912,6 +6922,7 @@ function CreatePanel(props) {
     var activeGraph = props.activeGraph, extractSources = props.extractSources || [], createHistory = props.createHistory || {}, onCreated = props.onCreated;
     var graphGrammar = props.graphGrammar, tables = props.tables || [];
     var tableColumnsCache = props.tableColumnsCache || {}, onFetchTableColumns = props.onFetchTableColumns;
+    var onRegisterFile = props.onRegisterFile;
 
     const [status, setStatus] = useState({ loading:false, error:null, text:null });
     // Kinetica's show_graph-derived DDL for the active graph (authoritative
@@ -7117,6 +7128,7 @@ function CreatePanel(props) {
                     <CreateHelperPanel
                         graphGrammar={graphGrammar} tables={tables}
                         tableColumnsCache={tableColumnsCache} onFetchTableColumns={onFetchTableColumns}
+                        onRegisterFile={onRegisterFile}
                         graphName={createGraphName} setGraphName={setCreateGraphName}
                         initialMode="recreate"
                         onGenerate={function(ddl){ setCreateDdl(ddl); }}
@@ -7130,6 +7142,7 @@ function CreatePanel(props) {
                     <CreateHelperPanel
                         graphGrammar={graphGrammar} tables={tables}
                         tableColumnsCache={tableColumnsCache} onFetchTableColumns={onFetchTableColumns}
+                        onRegisterFile={onRegisterFile}
                         graphName={createGraphName} setGraphName={setCreateGraphName}
                         initialMode="recreate" buildTarget="spec"
                         onGenerate={function(model){ handleBuildFromModel(model); }}
@@ -8092,6 +8105,18 @@ function App() {
                 if (Array.isArray(cols)) setTableColumnsCache(function(prev) { var n = Object.assign({}, prev); n[tableName] = cols; return n; });
             })
             .catch(function() { /* leave [] — manual entry still works */ });
+    }
+    // Register a data-file path as a builder source (DuckDB/FalkorDB). Validates
+    // server-side (describe), then refreshes the table list so it shows in the
+    // section dropdowns. Returns the {name, columns} (or throws the gateway msg).
+    function registerFileGW(path) {
+        if (!path || !gwClient) return Promise.resolve(null);
+        return gwClient.registerFile(path).then(function(res) {
+            return gwClient.tables().then(function(list) {
+                if (Array.isArray(list)) setTables(list);
+                return res;
+            });
+        });
     }
     const [activeGraph, setActiveGraph]   = useState('');
     const [credentials, setCredentials]   = useState({ url:'', user:'', pass:'' });
@@ -9593,6 +9618,7 @@ function App() {
                             createHistory: createHistory, onCreated: recordCreate,
                             graphGrammar: (graphEngine === 'kinetica' ? graphGrammar : DUCKDB_GRAMMAR), tables: tables,
                             tableColumnsCache: tableColumnsCache, onFetchTableColumns: fetchTableColumnsGW,
+                            onRegisterFile: registerFileGW,
                         }}
                     />
                 )}

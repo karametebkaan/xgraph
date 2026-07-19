@@ -115,6 +115,21 @@ const run = async () => {
   assert.equal(tcUrls[0], "http://gw/tables?engine=duckdb");
   assert.equal(tcUrls[1], "http://gw/columns?table=expero.vertexes&engine=duckdb");
 
+  // registerFile(): JSON POST carrying the path + session
+  let regUrl, regBody;
+  const regClient = g.makeClient("http://gw", async (url, opts) => {
+    if (url === "http://gw/connect") return { ok: true, json: async () => ({ session: "s1", graphs: [] }) };
+    regUrl = url; regBody = JSON.parse(opts.body);
+    return { ok: true, json: async () => ({ name: "v.parquet", type: "file", columns: ["id"] }) };
+  });
+  await regClient.connect({ engine: "falkordb", conn: {} }, { engine: "duckdb", conn: {} });
+  const reg = await regClient.registerFile("v.parquet");
+  assert.equal(regUrl, "http://gw/register_file");
+  assert.equal(regBody.path, "v.parquet");
+  assert.equal(regBody.session, "s1");
+  assert.deepEqual(reg.columns, ["id"]);
+  console.log("ok: registerFile client method");
+
   console.log("client OK");
 };
 run();
