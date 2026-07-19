@@ -47,7 +47,7 @@
 const { useState, useEffect, useRef, useCallback, useMemo } = React;
 
 /* ═══════════════════════ CONSTANTS ════════════════════════ */
-const EXPLORER_VERSION = "0.3.6";  // xGraph version — bump on frontend changes so a stale browser cache is visible
+const EXPLORER_VERSION = "0.4.0";  // xGraph version — bump on frontend changes so a stale browser cache is visible
 const SAFETY_TIMEOUT_MS = 10 * 60 * 1000;
 const PALETTE = [
     { solid: '#0984e3', light: '#e1f0fb' }, { solid: '#00cec9', light: '#e0f9f8' },
@@ -6536,8 +6536,7 @@ function CanvasGraph(props) {
 const ACTIONS = [
     { key: 'setup',     label: 'Setup',     reachable: function(s) { return true; } },
     { key: 'connect',   label: 'Connect',   reachable: function(s) { return true; } },
-    { key: 'create',    label: 'Create',    reachable: function(s) { return !!(s.connected || (s.graphs && s.graphs.length > 0)); } },
-    { key: 'extract',   label: 'Extract',   reachable: function(s) { return !!(s.connected || (s.graphs && s.graphs.length > 0)); } },
+    { key: 'build',     label: 'Build',     reachable: function(s) { return !!(s.connected || (s.graphs && s.graphs.length > 0)); } },
     { key: 'list',      label: 'List',      reachable: function(s) { return !!(s.graphs && s.graphs.length > 0); } },
     { key: 'interact1', label: 'Ask',  reachable: function(s) { return !!s.activeGraph; } },
     { key: 'query',     label: 'Query',     reachable: function(s) { return !!s.activeGraph; } },
@@ -9427,37 +9426,37 @@ function App() {
                         onConnect={handleConnectAxes} connectStatus={connectStatus}
                     />
                 )}
-                {activeAction === 'create' && (
-                    <CreatePanel
-                        graphEngine={graphEngine} gwClient={gwClient}
-                        setGraphs={setGraphs} setActiveAction={setActiveAction}
-                        createGraphName={createGraphName} setCreateGraphName={setCreateGraphName}
-                        createNodeTable={createNodeTable} setCreateNodeTable={setCreateNodeTable}
-                        createNodeFile={createNodeFile} setCreateNodeFile={setCreateNodeFile}
-                        createNodeSql={createNodeSql} setCreateNodeSql={setCreateNodeSql}
-                        createNodeIdCol={createNodeIdCol} setCreateNodeIdCol={setCreateNodeIdCol}
-                        createNodeLabelCol={createNodeLabelCol} setCreateNodeLabelCol={setCreateNodeLabelCol}
-                        createNodeProps={createNodeProps} setCreateNodeProps={setCreateNodeProps}
-                        createEdgeTable={createEdgeTable} setCreateEdgeTable={setCreateEdgeTable}
-                        createEdgeFile={createEdgeFile} setCreateEdgeFile={setCreateEdgeFile}
-                        createEdgeSql={createEdgeSql} setCreateEdgeSql={setCreateEdgeSql}
-                        createEdgeIdCol={createEdgeIdCol} setCreateEdgeIdCol={setCreateEdgeIdCol}
-                        createEdgeSrcCol={createEdgeSrcCol} setCreateEdgeSrcCol={setCreateEdgeSrcCol}
-                        createEdgeTgtCol={createEdgeTgtCol} setCreateEdgeTgtCol={setCreateEdgeTgtCol}
-                        createEdgeTypeCol={createEdgeTypeCol} setCreateEdgeTypeCol={setCreateEdgeTypeCol}
-                        createDdl={createDdl} setCreateDdl={setCreateDdl}
-                        activeGraph={activeGraph} extractSources={extractSources}
-                        createHistory={createHistory} onCreated={recordCreate}
-                    />
-                )}
-                {activeAction === 'extract' && (
-                    <ExtractPanel
-                        gwClient={gwClient} setGraphs={setGraphs}
-                        setActiveGraph={setActiveGraph} setActiveAction={setActiveAction}
-                        extractSources={extractSources} setExtractSources={setExtractSources}
-                        extractGraph={extractGraph} setExtractGraph={setExtractGraph}
-                        graphEngine={graphEngine}
-                        onGraphUpdated={refreshGraph}
+                {activeAction === 'build' && (
+                    <BuildPanel
+                        extractProps={{
+                            gwClient: gwClient, setGraphs: setGraphs,
+                            setActiveGraph: setActiveGraph, setActiveAction: setActiveAction,
+                            extractSources: extractSources, setExtractSources: setExtractSources,
+                            extractGraph: extractGraph, setExtractGraph: setExtractGraph,
+                            graphEngine: graphEngine,
+                            onGraphUpdated: refreshGraph,
+                        }}
+                        createProps={{
+                            graphEngine: graphEngine, gwClient: gwClient,
+                            setGraphs: setGraphs, setActiveAction: setActiveAction,
+                            createGraphName: createGraphName, setCreateGraphName: setCreateGraphName,
+                            createNodeTable: createNodeTable, setCreateNodeTable: setCreateNodeTable,
+                            createNodeFile: createNodeFile, setCreateNodeFile: setCreateNodeFile,
+                            createNodeSql: createNodeSql, setCreateNodeSql: setCreateNodeSql,
+                            createNodeIdCol: createNodeIdCol, setCreateNodeIdCol: setCreateNodeIdCol,
+                            createNodeLabelCol: createNodeLabelCol, setCreateNodeLabelCol: setCreateNodeLabelCol,
+                            createNodeProps: createNodeProps, setCreateNodeProps: setCreateNodeProps,
+                            createEdgeTable: createEdgeTable, setCreateEdgeTable: setCreateEdgeTable,
+                            createEdgeFile: createEdgeFile, setCreateEdgeFile: setCreateEdgeFile,
+                            createEdgeSql: createEdgeSql, setCreateEdgeSql: setCreateEdgeSql,
+                            createEdgeIdCol: createEdgeIdCol, setCreateEdgeIdCol: setCreateEdgeIdCol,
+                            createEdgeSrcCol: createEdgeSrcCol, setCreateEdgeSrcCol: setCreateEdgeSrcCol,
+                            createEdgeTgtCol: createEdgeTgtCol, setCreateEdgeTgtCol: setCreateEdgeTgtCol,
+                            createEdgeTypeCol: createEdgeTypeCol, setCreateEdgeTypeCol: setCreateEdgeTypeCol,
+                            createDdl: createDdl, setCreateDdl: setCreateDdl,
+                            activeGraph: activeGraph, extractSources: extractSources,
+                            createHistory: createHistory, onCreated: recordCreate,
+                        }}
                     />
                 )}
                 {activeAction === 'list' && (
