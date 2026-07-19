@@ -100,6 +100,43 @@ function extractGraphTable(originalRequest, graphName) {
     return tableName;
 }
 
+// Generic identifier display + SQL alias. Two simplifications:
+//   1. NODE / NODE1 / NODE2 substitute for the type-specific variants
+//      (NAME / ID / WKTPOINT) — Kinetica infers the actual type from the column.
+//   2. The component prefix is dropped (the section header already says it):
+//      NODE_LABEL → LABEL inside NODES; EDGE_ID → ID, EDGE_LABEL → LABEL,
+//      EDGE_WKTLINE → WKTLINE inside EDGES; WEIGHTS_VALUESPECIFIED → VALUESPECIFIED
+//      inside WEIGHTS; RESTRICTIONS_VALUE → VALUE inside RESTRICTIONS.
+function chGenericId(id, component) {
+    // Type-specific node identifiers collapse to NODE / NODE1 / NODE2.
+    if (id === 'NODE_NAME' || id === 'NODE_ID' || id === 'NODE_WKTPOINT') return 'NODE';
+    if (id === 'EDGE_NODE1_NAME' || id === 'EDGE_NODE1_ID' || id === 'EDGE_NODE1_WKTPOINT') return 'NODE1';
+    if (id === 'EDGE_NODE2_NAME' || id === 'EDGE_NODE2_ID' || id === 'EDGE_NODE2_WKTPOINT') return 'NODE2';
+    if (id === 'WEIGHTS_EDGE_NODE1_NAME' || id === 'WEIGHTS_EDGE_NODE1_ID' || id === 'WEIGHTS_EDGE_NODE1_WKTPOINT') return 'NODE1';
+    if (id === 'WEIGHTS_EDGE_NODE2_NAME' || id === 'WEIGHTS_EDGE_NODE2_ID' || id === 'WEIGHTS_EDGE_NODE2_WKTPOINT') return 'NODE2';
+    if (id === 'RESTRICTIONS_NODE_NAME' || id === 'RESTRICTIONS_NODE_ID') return 'NODE';
+    if (id === 'RESTRICTIONS_EDGE_NODE1_NAME' || id === 'RESTRICTIONS_EDGE_NODE1_ID') return 'NODE1';
+    if (id === 'RESTRICTIONS_EDGE_NODE2_NAME' || id === 'RESTRICTIONS_EDGE_NODE2_ID') return 'NODE2';
+    // Otherwise strip the section/component prefix.
+    if (component === 'NODES' && id.indexOf('NODE_') === 0) return id.slice(5);
+    if (component === 'EDGES' && id.indexOf('EDGE_') === 0) return id.slice(5);
+    if (component === 'WEIGHTS' && id.indexOf('WEIGHTS_') === 0) return id.slice(8);
+    if (component === 'RESTRICTIONS' && id.indexOf('RESTRICTIONS_') === 0) return id.slice(13);
+    // SAMPLES (match/graph): strip `SAMPLE_` prefix — every identifier in
+    // the grammar starts with SAMPLE_, and the SQL alias is the bare name
+    // (e.g., SAMPLE_WKTPOINT → WKTPOINT, SAMPLE_ORIGIN_WKTPOINT → ORIGIN_WKTPOINT).
+    if (component === 'SAMPLES' && id.indexOf('SAMPLE_') === 0) return id.slice(7);
+    return id;
+}
+// Parse "schema.table.column" → { table:"schema.table", column:"column" }.
+// Tolerates plain "table.column" (no schema) too.
+function chParseRef(s) {
+    var t = String(s || '').trim();
+    var i = t.lastIndexOf('.');
+    if (i < 0) return { table: '', column: t };
+    return { table: t.slice(0, i), column: t.slice(i + 1) };
+}
+
 // Extract the node source table and original ID column from the graph creation statement
 // Parses NODES => INPUT_TABLES(...) looking for FROM <source_table> and <col> as NODE[_ID]
 // Handles multiple sub-selects (constants + real table) by finding all FROM clauses
@@ -1938,34 +1975,6 @@ function QueryPanel(props) {
     // graph name + a one-click "open it" action that refreshes the sidebar and
     // selects the new graph. Cleared when the user reruns or edits the SQL.
     const [createSuccess, setCreateSuccess] = useState(null);
-    // Generic identifier display + SQL alias. Two simplifications:
-    //   1. NODE / NODE1 / NODE2 substitute for the type-specific variants
-    //      (NAME / ID / WKTPOINT) — Kinetica infers the actual type from the column.
-    //   2. The component prefix is dropped (the section header already says it):
-    //      NODE_LABEL → LABEL inside NODES; EDGE_ID → ID, EDGE_LABEL → LABEL,
-    //      EDGE_WKTLINE → WKTLINE inside EDGES; WEIGHTS_VALUESPECIFIED → VALUESPECIFIED
-    //      inside WEIGHTS; RESTRICTIONS_VALUE → VALUE inside RESTRICTIONS.
-    function chGenericId(id, component) {
-        // Type-specific node identifiers collapse to NODE / NODE1 / NODE2.
-        if (id === 'NODE_NAME' || id === 'NODE_ID' || id === 'NODE_WKTPOINT') return 'NODE';
-        if (id === 'EDGE_NODE1_NAME' || id === 'EDGE_NODE1_ID' || id === 'EDGE_NODE1_WKTPOINT') return 'NODE1';
-        if (id === 'EDGE_NODE2_NAME' || id === 'EDGE_NODE2_ID' || id === 'EDGE_NODE2_WKTPOINT') return 'NODE2';
-        if (id === 'WEIGHTS_EDGE_NODE1_NAME' || id === 'WEIGHTS_EDGE_NODE1_ID' || id === 'WEIGHTS_EDGE_NODE1_WKTPOINT') return 'NODE1';
-        if (id === 'WEIGHTS_EDGE_NODE2_NAME' || id === 'WEIGHTS_EDGE_NODE2_ID' || id === 'WEIGHTS_EDGE_NODE2_WKTPOINT') return 'NODE2';
-        if (id === 'RESTRICTIONS_NODE_NAME' || id === 'RESTRICTIONS_NODE_ID') return 'NODE';
-        if (id === 'RESTRICTIONS_EDGE_NODE1_NAME' || id === 'RESTRICTIONS_EDGE_NODE1_ID') return 'NODE1';
-        if (id === 'RESTRICTIONS_EDGE_NODE2_NAME' || id === 'RESTRICTIONS_EDGE_NODE2_ID') return 'NODE2';
-        // Otherwise strip the section/component prefix.
-        if (component === 'NODES' && id.indexOf('NODE_') === 0) return id.slice(5);
-        if (component === 'EDGES' && id.indexOf('EDGE_') === 0) return id.slice(5);
-        if (component === 'WEIGHTS' && id.indexOf('WEIGHTS_') === 0) return id.slice(8);
-        if (component === 'RESTRICTIONS' && id.indexOf('RESTRICTIONS_') === 0) return id.slice(13);
-        // SAMPLES (match/graph): strip `SAMPLE_` prefix — every identifier in
-        // the grammar starts with SAMPLE_, and the SQL alias is the bare name
-        // (e.g., SAMPLE_WKTPOINT → WKTPOINT, SAMPLE_ORIGIN_WKTPOINT → ORIGIN_WKTPOINT).
-        if (component === 'SAMPLES' && id.indexOf('SAMPLE_') === 0) return id.slice(7);
-        return id;
-    }
     // Add the identifiers from a configuration to a component's row list. Required
     // identifiers come from the selected configuration; the component's optional
     // add-ons come too (with `optional: true` so they get a distinct placeholder).
@@ -2039,14 +2048,6 @@ function QueryPanel(props) {
         if (/SIZE|COUNT|PRIORITY|ORDER|LEVEL|PENALTY|REGION|TRIPID/.test(a)) return '1, 2, …';
         if (/LABEL|SPECS|MAIN|ODDEVEN/.test(a)) return "'value'";
         return 'literal value';
-    }
-    // Parse "schema.table.column" → { table:"schema.table", column:"column" }.
-    // Tolerates plain "table.column" (no schema) too.
-    function chParseRef(s) {
-        var t = String(s || '').trim();
-        var i = t.lastIndexOf('.');
-        if (i < 0) return { table: '', column: t };
-        return { table: t.slice(0, i), column: t.slice(i + 1) };
     }
     // Build the SQL: group rows by table → one (SELECT col AS IDENT, ... FROM table) per group.
     // AS aliases use the generic identifier name (NODE / NODE1 / NODE2 etc.) — Kinetica
