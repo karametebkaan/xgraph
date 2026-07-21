@@ -43,29 +43,35 @@ one API, so the frontend and every query stay engine-agnostic.
 
 The action bar runs left to right:
 
-**Setup · Connect · Create · Extract · List · Load · Ask · Query · Explain · Visualize · Ontology**
+**Setup · Build · List · Query · Visualize · Ontology · Storage**
 
-- **Create** — `CREATE OR REPLACE GRAPH`: build a FalkorDB graph from Parquet/CSV via falkor's
-  loader, or run a Kinetica graph DDL. The target-graph name defaults to the active graph.
-- **Extract** — build a graph **from documents**: upload a PDF/text file (or paste text) and the LLM
-  extracts entities + relationships (open-ended ontology) that MERGE into a named graph on either
-  engine. Re-running is idempotent, and the pushed sources are remembered per graph (see below).
-- **List** — the graphs on the connected engine with node/edge counts; click to make one active, or
-  **delete** it (🗑).
-- **Ask** — natural-language question → generated query → run → English answer, kept as a per-graph
-  **conversation history**.
-- **Query** — write GQL/Cypher directly, in stacked tabs (`q1`, `q2`, …).
-- **Explain** — turn a query's results into a plain-English, domain-relevant summary, with an
-  optional focus that triggers a **post-join** (below).
+- **Setup** — pick the graph engine (FalkorDB/Kinetica), the OLAP/ingest engine (DuckDB/Kinetica),
+  and the LLM independently, then **Connect** here. Connection status (engine · gateway) then shows
+  on the graph-info line at the top.
+- **Build** — one roof for graph creation. **Tables / files**: a grammar-driven NODES/EDGES builder
+  (emits Kinetica `CREATE OR REPLACE GRAPH` DDL, or a DuckDB→FalkorDB `/create` spec) with file
+  sources you register (incl. Kinetica `LOAD DATA INTO` from a `DATA SOURCE`/KiFS path). **Documents**:
+  upload a PDF/text file (or paste text) and the LLM extracts entities + relationships (open-ended
+  ontology) that MERGE into a named graph. An **Append / Recreate** mode applies to both; extraction
+  is idempotent and remembers its sources per graph.
+- **List** — the graphs on the connected engine with node/edge counts; click to activate, **delete**
+  (🗑), or expand **⌄ SQL** to see how each graph was built.
+- **Query** — one place for every path to an answer: **Ask** in natural language (fills the editor +
+  runs + a plain-English answer), build with the **Query Helper**, or paste GQL/Cypher directly — all
+  feed one editor. Run it, then **Explain** the results in a tab (a plain-English, domain-relevant
+  summary, with an optional focus that triggers a **post-join**, below). Stacked tabs (`q1`, `q2`, …).
 - **Visualize** — progressive-paged graph render, colored by node `LABEL`, with label-selection
   and donut breakdowns.
 - **Ontology** — the live label/relationship schema, refreshed automatically when the graph changes
   or a session loads.
+- **Storage** — the backing tables (Kinetica) or DuckDB source files (nodes + edges), plus a
+  **How it was built** recipe (Kinetica `show_graph` DDL, the recorded `/create` recipe, or one
+  synthesized from the live schema).
 
-A query and its path visualization, colored by node `LABEL`, with the **Hydrate attributes** button
-that pulls wide columns (here `party_name`, `party_risk_score`) onto the returned ids:
+The unified **Query** panel — an **Ask** box turned a question into the Cypher below, and the
+**Visualization** tab renders the returned paths, colored by node `LABEL`:
 
-![Query tab: GQL/Cypher, path visualization, and attribute hydration](docs/images/query.png)
+![Unified Query: Ask → generated Cypher → Visualization tab, colored by label](docs/images/query.png)
 
 The Ontology view — the server-side schema of `banking_graph_duckdb` (16 node labels, 15 edge labels):
 
@@ -76,7 +82,7 @@ The Ontology view — the server-side schema of `banking_graph_duckdb` (16 node 
 This is the workbench's sharpest capability, and it depends on the **skinny-graph + late-hydration**
 design (see below).
 
-Run a suspicious-activity traversal in a Query tab:
+Run a suspicious-activity traversal in **Query** (type it, or let **Ask** generate it):
 
 ```cypher
 MATCH p=(a:sar)-[ab:created_for]->(b:tin)<-[bc:represented_by]-(c:party)-[cd:located_at]->(d:street_address)
@@ -85,8 +91,8 @@ RETURN a.NODE as a_node, b.NODE as b_node, ab.LABEL as ab_label,
 ```
 
 The graph is **skinny** — it returns party *ids* in `c_node`, but a party's `party_name` is not a
-graph property; it lives in a wide attribute file. So open **Explain** and type a focus that asks
-about that attribute:
+graph property; it lives in a wide attribute file. So switch to the **Explain** tab and type a focus
+that asks about that attribute:
 
 > *who has the most SAR activity (number of paths) using the party_name*
 
@@ -104,7 +110,7 @@ xGraph then, on its own:
 
 4. and synthesizes the ranked result into a domain-relevant answer.
 
-![Explain with post-join hydration](docs/images/explain-postjoin.png)
+![Explain tab in Query: focus → post-join SQL → ranked answer](docs/images/explain-postjoin.png)
 
 The count is computed by **DuckDB**, not estimated by the model — the ranking is deterministic for
 a given result set. When a focus needs no wide attribute (or no focus is given), Explain skips the
