@@ -25,6 +25,29 @@ def _err(engine: str, exc: Exception) -> JSONResponse:
         content={"error": {"code": type(exc).__name__, "message": str(exc),
                            "engine": engine, "detail": None}})
 
+
+def render_create_recipe(spec: dict) -> str:
+    """Render a /create spec as a readable 'how this graph was built' recipe.
+    Kinetica-via-gateway carries raw DDL (returned verbatim); FalkorDB carries a
+    {tables, nodes, edges} spec rendered as commented SELECT lines."""
+    if not isinstance(spec, dict):
+        return ""
+    if spec.get("ddl"):
+        return str(spec["ddl"])
+    graph = spec.get("graph", "graph")
+    lines = ['-- FalkorDB graph "' + str(graph) + '" (built via xGraph /create)']
+    for n in spec.get("nodes", []) or []:
+        if n.get("sql"):
+            lines.append("-- NODES: " + n["sql"])
+    for e in spec.get("edges", []) or []:
+        if e.get("sql"):
+            lines.append("-- EDGES: " + e["sql"])
+    tables = spec.get("tables") or {}
+    if tables:
+        lines.append("-- tables: " + ", ".join(str(k) + " = " + str(v) for k, v in tables.items()))
+    return "\n".join(lines)
+
+
 def create_app(adapter_factory=registry.get_adapter, compute=None, store=None) -> FastAPI:
     compute = compute or ComputeEngine()
     store = store if store is not None else SessionStore()
@@ -214,7 +237,17 @@ def create_app(adapter_factory=registry.get_adapter, compute=None, store=None) -
         engine = payload.get("engine", "")
         session = payload.get("session")
         try:
-            return _resolve_adapter(session, engine).load_graph(payload["spec"])
+            spec = payload["spec"]
+            result = _resolve_adapter(session, engine).load_graph(spec)
+            # Best-effort: record the recipe so List/Build can show it later.
+            try:
+                if isinstance(spec, dict) and spec.get("graph"):
+                    _resolve_compute(session).record_creation(
+                        spec["graph"], _resolve_engine(session, engine),
+                        render_create_recipe(spec), "create")
+            except Exception:
+                pass
+            return result
         except Exception as e:
             return _err(engine, e)
 
@@ -228,7 +261,13 @@ def create_app(adapter_factory=registry.get_adapter, compute=None, store=None) -
     @app.get("/graph_ddl")
     def graph_ddl(graph: str, engine: str = "", session: str | None = None):
         try:
-            return _resolve_adapter(session, engine).creation_statement(graph)
+            stmt = _resolve_adapter(session, engine).creation_statement(graph)
+            if stmt and stmt.get("statement"):
+                return stmt
+            recorded = _resolve_compute(session).get_creation(graph)
+            if recorded and recorded.get("statement"):
+                return {"statement": recorded["statement"], "source": "xgraph:create-ledger"}
+            return stmt if stmt else {"statement": None, "source": None}
         except Exception as e:
             return _err(engine, e)
 

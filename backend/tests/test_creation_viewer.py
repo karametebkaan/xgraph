@@ -32,3 +32,53 @@ def test_clear_graph_metadata_drops_creation(tmp_path):
     eng.record_creation("g1", "falkordb", "x", "create")
     eng.clear_graph_metadata("g1")
     assert eng.get_creation("g1") is None
+
+
+# ── Task 2: render_create_recipe + /create recording + /graph_ddl fallback ─
+
+from fastapi.testclient import TestClient
+from xgraph_gateway.app import create_app, render_create_recipe
+from xgraph_gateway.sessions import SessionStore
+from xgraph_gateway.adapters.fake import FakeAdapter
+
+
+def test_render_create_recipe_ddl_passthrough():
+    assert render_create_recipe({"graph": "g", "ddl": "CREATE GRAPH g (...);"}) == "CREATE GRAPH g (...);"
+
+
+def test_render_create_recipe_falkordb_spec():
+    spec = {"graph": "banking", "tables": {"b2_nodes": "vertexes.parquet", "b2_edges": "edges.parquet"},
+            "nodes": [{"sql": "SELECT id AS NODE FROM b2_nodes", "id": "NODE"}],
+            "edges": [{"sql": "SELECT src AS SRC, dst AS DST FROM b2_edges", "source_key": "SRC", "target_key": "DST"}]}
+    out = render_create_recipe(spec)
+    assert "banking" in out
+    assert "SELECT id AS NODE FROM b2_nodes" in out
+    assert "SELECT src AS SRC, dst AS DST FROM b2_edges" in out
+
+
+def _app(tmp_path):
+    from xgraph_gateway.compute.duckdb_engine import DuckDBComputeEngine
+    store = SessionStore(adapter_factory=lambda e, c=None: FakeAdapter(),
+                        compute_factory=lambda e, c=None: DuckDBComputeEngine(meta_path=str(tmp_path / "m.duckdb")))
+    return TestClient(create_app(adapter_factory=lambda e: FakeAdapter(),
+                                compute=DuckDBComputeEngine(meta_path=str(tmp_path / "m2.duckdb")),
+                                store=store))
+
+
+def test_create_records_recipe_and_graph_ddl_returns_it(tmp_path):
+    client = _app(tmp_path)
+    sid = client.post("/connect", json={"graph": {"engine": "falkordb"}, "compute": {"engine": "duckdb"}}).json()["session"]
+    spec = {"graph": "g1", "tables": {"t": "v.parquet"},
+            "nodes": [{"sql": "SELECT id AS NODE FROM t", "id": "NODE"}], "edges": []}
+    r = client.post("/create", json={"session": sid, "spec": spec})
+    assert r.status_code == 200
+    ddl = client.get("/graph_ddl", params={"session": sid, "graph": "g1"}).json()
+    assert ddl["statement"] and "SELECT id AS NODE FROM t" in ddl["statement"]
+    assert ddl["source"] == "xgraph:create-ledger"
+
+
+def test_graph_ddl_null_for_unrecorded(tmp_path):
+    client = _app(tmp_path)
+    sid = client.post("/connect", json={"graph": {"engine": "falkordb"}, "compute": {"engine": "duckdb"}}).json()["session"]
+    ddl = client.get("/graph_ddl", params={"session": sid, "graph": "never_built"}).json()
+    assert ddl["statement"] is None
