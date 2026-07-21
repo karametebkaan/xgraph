@@ -47,7 +47,7 @@
 const { useState, useEffect, useRef, useCallback, useMemo } = React;
 
 /* ═══════════════════════ CONSTANTS ════════════════════════ */
-const EXPLORER_VERSION = "0.11.0";  // xGraph version — bump on frontend changes so a stale browser cache is visible
+const EXPLORER_VERSION = "0.12.0";  // xGraph version — bump on frontend changes so a stale browser cache is visible
 const SAFETY_TIMEOUT_MS = 10 * 60 * 1000;
 const PALETTE = [
     { solid: '#0984e3', light: '#e1f0fb' }, { solid: '#00cec9', light: '#e0f9f8' },
@@ -6473,9 +6473,7 @@ const ACTIONS = [
     { key: 'setup',     label: 'Setup',     reachable: function(s) { return true; } },
     { key: 'build',     label: 'Build',     reachable: function(s) { return !!(s.connected || (s.graphs && s.graphs.length > 0)); } },
     { key: 'list',      label: 'List',      reachable: function(s) { return !!(s.graphs && s.graphs.length > 0); } },
-    { key: 'interact1', label: 'Ask',  reachable: function(s) { return !!s.activeGraph; } },
     { key: 'query',     label: 'Query',     reachable: function(s) { return !!s.activeGraph; } },
-    { key: 'interact2', label: 'Explain',  reachable: function(s) { return !!s.activeGraph; } },
     { key: 'visualize', label: 'Visualize', reachable: function(s) { return !!s.activeGraph; } },
     { key: 'ontology',  label: 'Ontology',  reachable: function(s) { return !!s.activeGraph; } },
     { key: 'storage',   label: 'Storage',   reachable: function(s) { return !!s.activeGraph; } },
@@ -7725,369 +7723,6 @@ function StoragePanel(props) {
     );
 }
 
-/* ═══════════════════ InteractAskPanel (Interact① — NL → Cypher → English) ═══
-   Full round-trip: an English question goes to the gateway's /ask endpoint,
-   which runs an LLM-driven NL→Cypher translation, executes the Cypher against
-   the active graph, and synthesizes an English answer from the results —
-   all in one call (gwClient.ask). Renders, in order: the English answer, the
-   generated Cypher (with a "Run in Query" handoff into a Query tab), a
-   compact results table (via tableFromGateway, matching the Query panel's
-   own "View Results" shape), and — if the response carries a `graph` payload
-   — a force-graph visualization colored with the SAME PALETTE-cycled
-   label→color assignment QueryPanel's own visualization uses (see
-   QueryPanel's `labelColorMap`/`getNodeColor`/`getEdgeColor` around line
-   2746), so a node/edge label is always the same color everywhere in the
-   app. ═══ */
-function InteractAskPanel(props) {
-    var gwClient = props.gwClient, activeGraph = props.activeGraph, labelData = props.labelData;
-    var onRunInQuery = props.onRunInQuery;
-    var askHistory = props.askHistory || []; var setAskHistory = props.setAskHistory;
-    var graphEngine = props.graphEngine;
-    const [question, setQuestion] = useState('');
-    const [busy, setBusy] = useState(false);
-    const [error, setError] = useState(null);
-    const [answerData, setAnswerData] = useState(null); // {question, cypher, columns, rows, graph, answer}
-    var graphContainerRef = useRef(null);
-    var graphRef = useRef(null);
-
-    var handleAsk = async function() {
-        if (!gwClient || !activeGraph || !question.trim() || busy) return;
-        setBusy(true); setError(null);
-        try {
-            var r = await gwClient.ask(activeGraph, question.trim());
-            setAnswerData(r);
-            if (setAskHistory) {
-                setAskHistory(function(prev){
-                    var next = prev.concat([{
-                        graph: activeGraph, question: question.trim(), cypher: r.cypher, answer: r.answer,
-                        engine: graphEngine,
-                        rowCount: (r.rows||[]).length, ts: new Date().toISOString(),
-                    }]);
-                    return next.slice(-50);
-                });
-            }
-        } catch (err) {
-            setError((err && err.message) || String(err));
-            setAnswerData(null);
-        } finally {
-            setBusy(false);
-        }
-    };
-
-    // ─── Same label→color assignment as QueryPanel's own visualization:
-    // PALETTE-cycled, indexed by each label combo's rank in the schema's
-    // node_labels/edge_labels (sorted by count desc). ───
-    var labelColorMap = useMemo(function() {
-        var map = {};
-        if (labelData) {
-            var nl = [].concat(labelData.node_labels || []).sort(function(a, b) { return b.count - a.count; });
-            nl.forEach(function(item, idx) {
-                var comboKey = (item.labels || []).slice().sort().join('|');
-                map['n:' + comboKey] = PALETTE[idx % PALETTE.length].solid;
-            });
-            var el = [].concat(labelData.edge_labels || []).sort(function(a, b) { return b.count - a.count; });
-            el.forEach(function(item, idx) {
-                var comboKey = (item.labels || []).slice().sort().join('|');
-                map['e:' + comboKey] = PALETTE[idx % PALETTE.length].solid;
-            });
-        }
-        return map;
-    }, [labelData]);
-    var getNodeColor = function(rawLabel) {
-        if (!rawLabel) return '#b2bec3';
-        var labels = typeof rawLabel === 'string' && rawLabel.charAt(0) === '[' ? (function(){ try { return JSON.parse(rawLabel); } catch(e) { return [rawLabel]; } })() : [rawLabel];
-        return labelColorMap['n:' + labels.slice().sort().join('|')] || '#b2bec3';
-    };
-    var getEdgeColor = function(rawLabel) {
-        if (!rawLabel) return '#636e72';
-        var labels = typeof rawLabel === 'string' && rawLabel.charAt(0) === '[' ? (function(){ try { return JSON.parse(rawLabel); } catch(e) { return [rawLabel]; } })() : [rawLabel];
-        return labelColorMap['e:' + labels.slice().sort().join('|')] || '#636e72';
-    };
-
-    var tableData = useMemo(function() {
-        if (!answerData || !answerData.columns) return { headers: [], rows: [] };
-        return window.xgraphGateway.tableFromGateway(answerData);
-    }, [answerData]);
-
-    var resultGraph = (answerData && answerData.graph) ? answerData.graph : null;
-    var hasResultGraph = !!(resultGraph && resultGraph.nodes && resultGraph.nodes.length > 0);
-    var graphData = useMemo(function() {
-        if (!hasResultGraph) return { nodes: [], links: [], maxDegree: 1 };
-        var nodeMap = {}, linkMap = {};
-        (resultGraph.nodes || []).forEach(function(n) {
-            nodeMap[n.id] = { id: n.id, label: n.label || '', color: getNodeColor(n.label), degree: 0 };
-        });
-        (resultGraph.edges || []).forEach(function(e, idx) {
-            if (!nodeMap[e.source] || !nodeMap[e.target]) return; // dangling endpoint — skip
-            var linkKey = e.id != null ? String(e.id) : (e.source + '→' + e.target + '|' + e.type + '|' + idx);
-            if (!linkMap[linkKey]) {
-                linkMap[linkKey] = { source: e.source, target: e.target, edgeLabel: e.type, color: getEdgeColor(e.type) };
-                nodeMap[e.source].degree++; nodeMap[e.target].degree++;
-            }
-        });
-        var nodes = Object.values(nodeMap), links = Object.values(linkMap), maxDegree = 1;
-        nodes.forEach(function(n) { if (n.degree > maxDegree) maxDegree = n.degree; });
-        return { nodes: nodes, links: links, maxDegree: maxDegree };
-    }, [resultGraph, labelColorMap]);
-
-    // ─── Force-graph lifecycle (mirrors QueryPanel's own graph-tab effect,
-    // trimmed down for a read-only, always-visible viz). ───
-    useEffect(function() {
-        if (!graphContainerRef.current || graphData.nodes.length === 0) return;
-        if (graphRef.current) { graphRef.current._destructor && graphRef.current._destructor(); graphRef.current = null; }
-        graphContainerRef.current.innerHTML = '';
-        var width = graphContainerRef.current.clientWidth || 600;
-        var height = graphContainerRef.current.clientHeight || 360;
-        var maxDeg = graphData.maxDegree || 1;
-        var nodeRadius = function(d) { return 4 + Math.sqrt((d.degree || 0) / maxDeg) * 14; };
-        var graph = new ForceGraph(graphContainerRef.current)
-            .width(width).height(height)
-            .backgroundColor('#0a0a1a')
-            .graphData(graphData)
-            .nodeId('id')
-            .nodeVal(function(n) { return n.degree || 1; })
-            .nodeCanvasObjectMode(function() { return 'replace'; })
-            .nodeCanvasObject(function(node, ctx, globalScale) {
-                var r = nodeRadius(node);
-                ctx.beginPath(); ctx.arc(node.x, node.y, r, 0, 2 * Math.PI, false);
-                ctx.fillStyle = node.color || '#b2bec3'; ctx.globalAlpha = 0.85; ctx.fill(); ctx.globalAlpha = 1.0;
-                if (globalScale > 0.4) {
-                    var fontSize = Math.max(r * 0.5, 3);
-                    ctx.font = 'bold ' + fontSize + 'px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = '#fff';
-                    var text = node.label || ''; if (text.length > 16) text = text.substring(0, 14) + '…';
-                    ctx.fillText(text, node.x, node.y);
-                }
-            })
-            .nodeLabel(function(n) { return n.id + (n.label ? ' [' + n.label + ']' : ''); })
-            .linkSource('source').linkTarget('target')
-            .linkColor(function(l) { return l.color || 'rgba(255,255,255,0.2)'; })
-            .linkWidth(1.5)
-            .linkLabel(function(l) { return l.edgeLabel || ''; })
-            .linkDirectionalArrowLength(6).linkDirectionalArrowRelPos(1)
-            .d3Force('charge', d3.forceManyBody().strength(-200))
-            .d3Force('link', d3.forceLink().id(function(n) { return n.id; }).distance(80));
-        graphRef.current = graph;
-        return function() { if (graphRef.current) { graphRef.current._destructor && graphRef.current._destructor(); graphRef.current = null; } };
-    }, [graphData]);
-
-    if (!activeGraph) {
-        return (
-            <div style={{ textAlign:'center', color:'#636e72' }}>
-                <h2 style={{ fontWeight:700, fontSize:20, margin:'0 0 8px' }}>Ask — plain English to Cypher</h2>
-                <p style={{ fontSize:14, color:'#b2bec3' }}>Select a graph first.</p>
-            </div>
-        );
-    }
-
-    var handleRunInQuery = function() {
-        if (answerData && answerData.cypher && onRunInQuery) onRunInQuery(answerData.cypher);
-    };
-
-    // Prior Q&As for the CURRENT (activeGraph, graphEngine) only — the same
-    // graph name can exist on a different engine with entirely different
-    // content, so filter by both, not just graph. Newest-first. Legacy
-    // entries saved before engine was recorded (no h.engine) still match via
-    // the `|| !h.engine` tolerance.
-    var convo = askHistory.filter(function(h){
-        return h.graph === activeGraph && (h.engine === graphEngine || !h.engine);
-    }).slice().reverse();
-
-    return (
-        <div style={{ width:'100%', maxWidth:900, display:'flex', flexDirection:'column', gap:14, textAlign:'left' }}>
-            <h2 style={{ fontWeight:700, fontSize:18, margin:0, color:'#2d3436' }}>Ask — plain English to Cypher</h2>
-            <div style={{ display:'flex', gap:8, alignItems:'flex-start' }}>
-                <textarea value={question} onChange={function(e){ setQuestion(e.target.value); }} rows={2}
-                    placeholder={"Ask a question about " + activeGraph + "…"}
-                    onKeyDown={function(e){ if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); handleAsk(); } }}
-                    style={{ flex:1, fontFamily:'inherit', fontSize:13, padding:8, border:'1px solid #dfe6e9', borderRadius:6, resize:'vertical' }} />
-                <button onClick={handleAsk} disabled={busy || !question.trim()} style={{
-                    padding:'8px 18px', border:'none', borderRadius:6, cursor: (busy || !question.trim()) ? 'not-allowed' : 'pointer',
-                    fontWeight:700, color:'#fff', background: (busy || !question.trim()) ? '#74b9ff' : 'linear-gradient(135deg,#0984e3,#0872c4)',
-                }}>{busy ? 'Thinking…' : 'Ask'}</button>
-            </div>
-            {error && <div style={{ color:'#d63031', fontSize:12 }}>{error}</div>}
-            {busy && <div style={{ fontSize:12, color:'#636e72' }}>Thinking… the LLM round-trip can take up to a minute.</div>}
-            {answerData && (
-                <div style={{ display:'flex', flexDirection:'column', gap:14 }}>
-                    <div style={{ background:'#eef7ff', border:'1px solid #cbe4fb', borderRadius:8, padding:12 }}>
-                        <div style={{ fontSize:11, fontWeight:700, color:'#0984e3', textTransform:'uppercase', marginBottom:4 }}>Answer</div>
-                        <div style={{ fontSize:14, color:'#2d3436', whiteSpace:'pre-wrap' }}>{answerData.answer}</div>
-                    </div>
-                    <div>
-                        <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:4 }}>
-                            <div style={{ fontSize:11, fontWeight:700, color:'#636e72', textTransform:'uppercase' }}>Generated Cypher</div>
-                            <button onClick={handleRunInQuery} disabled={!answerData.cypher} style={{
-                                padding:'3px 10px', border:'none', borderRadius:4, cursor: answerData.cypher ? 'pointer' : 'not-allowed',
-                                fontWeight:700, fontSize:11, color:'#fff', background: answerData.cypher ? '#00b894' : '#b2bec3',
-                            }}>Run in Query</button>
-                        </div>
-                        <pre style={{ margin:0, fontFamily:'monospace', fontSize:12, background:'#2d3436', color:'#dfe6e9', padding:10, borderRadius:6, overflow:'auto', maxHeight:200 }}>{answerData.cypher}</pre>
-                    </div>
-                    {!!(tableData.headers && tableData.headers.length) && (
-                        <div>
-                            <div style={{ fontSize:11, fontWeight:700, color:'#636e72', textTransform:'uppercase', marginBottom:4 }}>Results ({tableData.rows.length})</div>
-                            <div style={{ overflow:'auto', maxHeight:240, border:'1px solid #eee', borderRadius:6 }}>
-                                <table style={{ borderCollapse:'collapse', width:'100%', fontSize:12 }}>
-                                    <thead>
-                                        <tr>{tableData.headers.map(function(c) { return <th key={c} style={{ textAlign:'left', padding:'4px 8px', background:'#fafbfc', borderBottom:'1px solid #eee', position:'sticky', top:0 }}>{c}</th>; })}</tr>
-                                    </thead>
-                                    <tbody>
-                                        {tableData.rows.slice(0, 200).map(function(row, ridx) {
-                                            return <tr key={ridx}>{tableData.headers.map(function(c) { return <td key={c} style={{ padding:'4px 8px', borderBottom:'1px solid #f4f4f4' }}>{String(row[c])}</td>; })}</tr>;
-                                        })}
-                                    </tbody>
-                                </table>
-                            </div>
-                        </div>
-                    )}
-                    {hasResultGraph && (
-                        <div>
-                            <div style={{ fontSize:11, fontWeight:700, color:'#636e72', textTransform:'uppercase', marginBottom:4 }}>Visualization ({graphData.nodes.length} nodes)</div>
-                            <div ref={graphContainerRef} style={{ width:'100%', height:360, borderRadius:8, overflow:'hidden' }} />
-                        </div>
-                    )}
-                </div>
-            )}
-            {!!convo.length && (
-                <div>
-                    <div style={{ fontSize:11, fontWeight:700, color:'#636e72', textTransform:'uppercase', marginBottom:6 }}>{'Conversation · ' + activeGraph}</div>
-                    <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
-                        {convo.map(function(h, idx) {
-                            return (
-                                <div key={idx} style={{ background:'#fafbfc', border:'1px solid #eee', borderRadius:8, padding:10 }}>
-                                    <div style={{ display:'flex', alignItems:'flex-start', justifyContent:'space-between', gap:8 }}>
-                                        <div style={{ fontSize:13, fontWeight:700, color:'#2d3436' }}>{h.question}</div>
-                                        <button onClick={function(){ setQuestion(h.question); }} style={{
-                                            flex:'0 0 auto', padding:'2px 8px', border:'1px solid #dfe6e9', borderRadius:4, cursor:'pointer',
-                                            fontSize:11, fontWeight:700, color:'#0984e3', background:'#fff',
-                                        }}>Ask again</button>
-                                    </div>
-                                    <div style={{ fontSize:12, color:'#636e72', whiteSpace:'pre-wrap', marginTop:4 }}>{h.answer}</div>
-                                    <pre style={{ margin:'6px 0 0', fontFamily:'monospace', fontSize:11, background:'#2d3436', color:'#dfe6e9', padding:8, borderRadius:6, overflow:'auto', maxHeight:80 }}>{h.cypher}</pre>
-                                </div>
-                            );
-                        })}
-                    </div>
-                </div>
-            )}
-        </div>
-    );
-}
-
-/* ═══════════════════ InteractExplainPanel (Interact② — results → English) ═══
-   Explains the ACTIVE query tab's last result via the gateway's /synthesize
-   endpoint. Reads `sql`/`result` for the active tab straight from App state
-   (queryTabSql[activeQueryTab] / queryTabResult[activeQueryTab] — the latter
-   populated by QueryPanel's onResultChange prop right after each run). ═══ */
-function InteractExplainPanel(props) {
-    var gwClient = props.gwClient, activeGraph = props.activeGraph;
-    var sql = props.sql || '', result = props.result || null;
-    const [focusText, setFocusText] = useState('');
-    const [busy, setBusy] = useState(false);
-    const [error, setError] = useState(null);
-    const [resp, setResp] = useState(null); // {answer, join_sql, columns, rows, hydrated}
-    const [queryText, setQueryText] = useState(sql);
-    useEffect(function(){ setQueryText(props.sql || ''); }, [props.sql]);
-
-    var handleExplain = async function() {
-        if (!gwClient || busy) return;
-        var cypher = (queryText || '').trim();
-        setBusy(true); setError(null);
-        try {
-            var cols = result && result.columns, rws = result && result.rows;
-            // No active-query result, or the user edited/pasted a different query → run it to get rows.
-            if (!rws || cypher !== (sql || '').trim()) {
-                if (!cypher) throw new Error('Enter or paste a query to explain.');
-                var qr = await gwClient.runQuery(activeGraph, cypher);
-                cols = qr.columns; rws = qr.rows;
-            }
-            var r = await gwClient.explain(focusText.trim() || 'Explain these results', cols, rws, cypher, HYDRATE_SOURCE, activeGraph);
-            setResp(r);
-        } catch (err) {
-            setError((err && err.message) || String(err));
-            setResp(null);
-        } finally {
-            setBusy(false);
-        }
-    };
-
-    // Post-join results table (only meaningful when resp.hydrated) — same
-    // {headers, rows} shape InteractAskPanel builds from a gateway {columns,
-    // rows} response, via the same shared helper.
-    var joinTableData = useMemo(function() {
-        if (!resp || !resp.hydrated || !resp.columns) return { headers: [], rows: [] };
-        return window.xgraphGateway.tableFromGateway(resp);
-    }, [resp]);
-
-    if (!activeGraph) {
-        return (
-            <div style={{ textAlign:'center', color:'#636e72' }}>
-                <h2 style={{ fontWeight:700, fontSize:20, margin:'0 0 8px' }}>Explain — results in plain English</h2>
-                <p style={{ fontSize:14, color:'#b2bec3' }}>Select a graph first.</p>
-            </div>
-        );
-    }
-
-    return (
-        <div style={{ width:'100%', maxWidth:800, display:'flex', flexDirection:'column', gap:14, textAlign:'left' }}>
-            <h2 style={{ fontWeight:700, fontSize:18, margin:0, color:'#2d3436' }}>Explain — results in plain English</h2>
-            <div>
-                <div style={{ fontSize:11, fontWeight:700, color:'#636e72', textTransform:'uppercase', marginBottom:4 }}>Active query <span style={{ fontWeight:400, textTransform:'none', color:'#b2bec3' }}>— editable; paste one if there's no active query</span></div>
-                <textarea value={queryText} onChange={function(e){ setQueryText(e.target.value); }} spellCheck="false"
-                    onKeyDown={function(e){ if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); handleExplain(); } }}
-                    placeholder="Paste or type a query to explain…"
-                    style={{ width:'100%', boxSizing:'border-box', margin:0, fontFamily:'monospace', fontSize:12, background:'#2d3436', color:'#dfe6e9', padding:10, borderRadius:6, border:'none', minHeight:72, resize:'vertical' }} />
-            </div>
-            <React.Fragment>
-                    {result && result.rows
-                        ? <div style={{ fontSize:12, color:'#636e72' }}>{result.rows.length} row{result.rows.length === 1 ? '' : 's'} from the active query{(queryText || '').trim() !== (sql || '').trim() ? ' — edited, will re-run.' : ' available to explain.'}</div>
-                        : <div style={{ fontSize:12, color:'#636e72' }}>No active query result — the query above will be run, then explained.</div>}
-                    <div style={{ display:'flex', gap:8 }}>
-                        <input type="text" value={focusText} onChange={function(e){ setFocusText(e.target.value); }}
-                            placeholder="What to focus on (optional)…"
-                            onKeyDown={function(e){ if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); handleExplain(); } }}
-                            style={{ flex:1, fontSize:13, padding:8, border:'1px solid #dfe6e9', borderRadius:6 }} />
-                        <button onClick={handleExplain} disabled={busy} style={{
-                            padding:'8px 18px', border:'none', borderRadius:6, cursor: busy ? 'not-allowed' : 'pointer',
-                            fontWeight:700, color:'#fff', background: busy ? '#74b9ff' : 'linear-gradient(135deg,#0984e3,#0872c4)',
-                        }}>{busy ? 'Thinking…' : 'Explain in plain English'}</button>
-                    </div>
-                    {error && <div style={{ color:'#d63031', fontSize:12 }}>{error}</div>}
-                    {busy && <div style={{ fontSize:12, color:'#636e72' }}>Thinking… this can take up to a minute.</div>}
-                    {resp && resp.hydrated && (
-                        <div>
-                            <div style={{ fontSize:11, fontWeight:700, color:'#636e72', textTransform:'uppercase', marginBottom:4 }}>Post-join SQL</div>
-                            <pre style={{ margin:0, fontFamily:'monospace', fontSize:12, background:'#2d3436', color:'#dfe6e9', padding:10, borderRadius:6, overflow:'auto', maxHeight:200 }}>{resp.join_sql}</pre>
-                        </div>
-                    )}
-                    {resp && resp.hydrated && !!(joinTableData.headers && joinTableData.headers.length) && (
-                        <div>
-                            <div style={{ fontSize:11, fontWeight:700, color:'#636e72', textTransform:'uppercase', marginBottom:4 }}>Results ({joinTableData.rows.length})</div>
-                            <div style={{ overflow:'auto', maxHeight:240, border:'1px solid #eee', borderRadius:6 }}>
-                                <table style={{ borderCollapse:'collapse', width:'100%', fontSize:12 }}>
-                                    <thead>
-                                        <tr>{joinTableData.headers.map(function(c) { return <th key={c} style={{ textAlign:'left', padding:'4px 8px', background:'#fafbfc', borderBottom:'1px solid #eee', position:'sticky', top:0 }}>{c}</th>; })}</tr>
-                                    </thead>
-                                    <tbody>
-                                        {joinTableData.rows.slice(0, 200).map(function(row, ridx) {
-                                            return <tr key={ridx}>{joinTableData.headers.map(function(c) { return <td key={c} style={{ padding:'4px 8px', borderBottom:'1px solid #f4f4f4' }}>{String(row[c])}</td>; })}</tr>;
-                                        })}
-                                    </tbody>
-                                </table>
-                            </div>
-                        </div>
-                    )}
-                    {resp && (
-                        <div style={{ background:'#eef7ff', border:'1px solid #cbe4fb', borderRadius:8, padding:12 }}>
-                            <div style={{ fontSize:11, fontWeight:700, color:'#0984e3', textTransform:'uppercase', marginBottom:4 }}>Answer</div>
-                            <div style={{ fontSize:14, color:'#2d3436', whiteSpace:'pre-wrap' }}>{resp.answer}</div>
-                        </div>
-                    )}
-                </React.Fragment>
-        </div>
-    );
-}
-
 function App() {
     const [graphs, setGraphs]             = useState([]);
     // Top-level action-bar router (replaces the old Sidebar + SplitPane shell).
@@ -8253,7 +7888,6 @@ function App() {
     // Extract source memory: list of {graph, kind:'text'|'file', label, key, entities, relations, ts}
     const [extractSources, setExtractSources] = useState([]);
     // Ask conversation history: [{graph, question, cypher, answer, rowCount, ts}] — newest last. Capped.
-    const [askHistory, setAskHistory] = useState([]);
     // Create recipe memory: (graph + " " + engine) → the CreatePanel spec that
     // last built it this session — the FalkorDB fallback for "how was this
     // graph created" since FalkorDB has no server-side creation DDL to ask for.
@@ -8463,7 +8097,6 @@ function App() {
                 return { id: id, sql: queryTabSql[id] || '', helper: (st && st.helper) || null, activeTab: (st && st.activeTab) || null };
             }),
             extractSources: extractSources,
-            askHistory: askHistory,
             extractGraph: extractGraph,
             createHistory: createHistory,
         };
@@ -8495,7 +8128,6 @@ function App() {
                 setGatewayBase(s.setup.gatewayBase || GATEWAY_BASE);
                 setActiveGraph(s.activeGraph || '');
                 setExtractSources(s.extractSources || []);
-                setAskHistory(s.askHistory || []);
                 setExtractGraph(s.extractGraph || 'extracted_graph');
                 setCreateHistory(s.createHistory || {});
 
@@ -9739,14 +9371,6 @@ function App() {
                 {activeAction === 'storage' && (
                     <StoragePanel gwClient={gwClient} activeGraph={activeGraph} />
                 )}
-                {activeAction === 'interact1' && (
-                    <InteractAskPanel
-                        gwClient={gwClient} activeGraph={activeGraph} labelData={labelData}
-                        onRunInQuery={function(cypher){ addQueryTab(cypher); setActiveAction('query'); }}
-                        askHistory={askHistory} setAskHistory={setAskHistory}
-                        graphEngine={graphEngine}
-                    />
-                )}
                 {/* Query area — outer wrapper is a COLUMN so the tab strip
                     sits as a thin full-width row ACROSS THE TOP and the
                     QueryPanel(s) fill the remaining height below it (was
@@ -9819,12 +9443,6 @@ function App() {
                             })}
                         </div>
                     </div>
-                )}
-                {activeAction === 'interact2' && (
-                    <InteractExplainPanel
-                        gwClient={gwClient} activeGraph={activeGraph}
-                        sql={queryTabSql[activeQueryTab]} result={queryTabResult[activeQueryTab]}
-                    />
                 )}
                 {activeAction === 'visualize' && (
                     <div style={{ width:'100%', height:'100%', alignSelf:'stretch', display:'flex', flexDirection:'column', gap:6, minHeight:0 }}>
