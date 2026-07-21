@@ -47,7 +47,7 @@
 const { useState, useEffect, useRef, useCallback, useMemo } = React;
 
 /* ═══════════════════════ CONSTANTS ════════════════════════ */
-const EXPLORER_VERSION = "0.10.0";  // xGraph version — bump on frontend changes so a stale browser cache is visible
+const EXPLORER_VERSION = "0.11.0";  // xGraph version — bump on frontend changes so a stale browser cache is visible
 const SAFETY_TIMEOUT_MS = 10 * 60 * 1000;
 const PALETTE = [
     { solid: '#0984e3', light: '#e1f0fb' }, { solid: '#00cec9', light: '#e0f9f8' },
@@ -6372,7 +6372,6 @@ function CanvasGraph(props) {
    lives inside the Visualize action itself. */
 const ACTIONS = [
     { key: 'setup',     label: 'Setup',     reachable: function(s) { return true; } },
-    { key: 'connect',   label: 'Connect',   reachable: function(s) { return true; } },
     { key: 'build',     label: 'Build',     reachable: function(s) { return !!(s.connected || (s.graphs && s.graphs.length > 0)); } },
     { key: 'list',      label: 'List',      reachable: function(s) { return !!(s.graphs && s.graphs.length > 0); } },
     { key: 'interact1', label: 'Ask',  reachable: function(s) { return !!s.activeGraph; } },
@@ -6537,31 +6536,6 @@ function SetupPanel(props) {
                     {connectStatus.text && <p style={{ marginTop:8, fontSize:12, color: connectStatus.error ? '#d63031' : '#00b894', fontWeight:600 }}>{connectStatus.text}</p>}
                 </div>
             )}
-        </div>
-    );
-}
-
-/* ═══════════════════ ConnectPanel ═════════════════════════
-   Restates the Setup selections as a summary and offers the same
-   Connect action from the dedicated Connect action-bar tab, so a user who
-   skips straight to Connect (selections already default) can still fire
-   it without going back to Setup. */
-function ConnectPanel(props) {
-    var graphEngine = props.graphEngine, olapEngine = props.olapEngine;
-    var gatewayBase = props.gatewayBase, onConnect = props.onConnect;
-    var connectStatus = props.connectStatus || {};
-    return (
-        <div style={{ width:420, maxWidth:'100%', textAlign:'left', background:'#fff', border:'1px solid #dfe6e9', borderRadius:10, padding:24, boxShadow:'0 2px 8px rgba(0,0,0,0.04)' }}>
-            <h2 style={{ fontWeight:700, fontSize:18, margin:'0 0 12px', color:'#2d3436' }}>Connect</h2>
-            <p style={{ fontSize:13, color:'#636e72', margin:'0 0 4px' }}>Graph engine: <b>{graphEngine}</b></p>
-            <p style={{ fontSize:13, color:'#636e72', margin:'0 0 4px' }}>OLAP / ingest: <b>{olapEngine}</b></p>
-            <p style={{ fontSize:13, color:'#636e72', margin:'0 0 16px' }}>Gateway: <b>{gatewayBase}</b></p>
-            <button onClick={onConnect} disabled={connectStatus.loading} style={{
-                width:'100%', padding:'11px 0', border:'none', borderRadius:6, cursor: connectStatus.loading ? 'not-allowed' : 'pointer',
-                fontWeight:700, color:'#fff', fontSize:13, fontFamily:'inherit',
-                background: connectStatus.loading ? '#74b9ff' : 'linear-gradient(135deg,#0984e3,#0872c4)', transition:'0.2s',
-            }}>{connectStatus.loading ? 'Connecting…' : 'Connect & List'}</button>
-            {connectStatus.text && <p style={{ marginTop:10, fontSize:12, color: connectStatus.error ? '#d63031' : '#00b894', fontWeight:600 }}>{connectStatus.text}</p>}
         </div>
     );
 }
@@ -9574,17 +9548,27 @@ function App() {
                 schema (graphCounts/labelData), populated as soon as a graph
                 becomes active (see the loadSchema effect above). Thin/muted,
                 spans the full width, sits below the header row. */}
-            {activeGraph && (
+            {(connected || activeGraph) && (
                 <div style={{ flexShrink:0, padding:'4px 16px', fontSize:11, color:'#636e72', background:'#fafbfc', borderBottom:'1px solid #eee', whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>
-                    <strong style={{ color:'#2d3436', fontWeight:700 }}>{activeGraph}</strong>
+                    {/* Connection info (folded in from the old Connect tab) */}
+                    <span title={connected ? 'Connected' : 'Not connected'} style={{ color: connected ? '#00b894' : '#b2bec3', fontWeight:700 }}>{'●'}</span>
+                    <span style={{ marginLeft:5, color:'#2d3436', fontWeight:700 }}>{graphEngine}</span>
                     <span style={{ margin:'0 6px', color:'#dfe6e9' }}>{'·'}</span>
-                    {(graphCounts.nodes || 0).toLocaleString()} nodes
-                    <span style={{ margin:'0 6px', color:'#dfe6e9' }}>{'·'}</span>
-                    {(graphCounts.edges || 0).toLocaleString()} edges
-                    <span style={{ margin:'0 6px', color:'#dfe6e9' }}>{'·'}</span>
-                    {((labelData && labelData.node_labels) || []).length} node labels
-                    <span style={{ margin:'0 6px', color:'#dfe6e9' }}>{'·'}</span>
-                    {((labelData && labelData.edge_labels) || []).length} edge labels
+                    <span title="Gateway URL">{gatewayBase}</span>
+                    {activeGraph && (
+                        <span>
+                            <span style={{ margin:'0 6px', color:'#dfe6e9' }}>{'·'}</span>
+                            <strong style={{ color:'#2d3436', fontWeight:700 }}>{activeGraph}</strong>
+                            <span style={{ margin:'0 6px', color:'#dfe6e9' }}>{'·'}</span>
+                            {(graphCounts.nodes || 0).toLocaleString()} nodes
+                            <span style={{ margin:'0 6px', color:'#dfe6e9' }}>{'·'}</span>
+                            {(graphCounts.edges || 0).toLocaleString()} edges
+                            <span style={{ margin:'0 6px', color:'#dfe6e9' }}>{'·'}</span>
+                            {((labelData && labelData.node_labels) || []).length} node labels
+                            <span style={{ margin:'0 6px', color:'#dfe6e9' }}>{'·'}</span>
+                            {((labelData && labelData.edge_labels) || []).length} edge labels
+                        </span>
+                    )}
                 </div>
             )}
 
@@ -9606,12 +9590,6 @@ function App() {
                         olapConn={olapConn} setOlapConn={setOlapConn}
                         llmConn={llmConn} setLlmConn={setLlmConn}
                         gatewayBase={gatewayBase} setGatewayBase={setGatewayBase}
-                        onConnect={handleConnectAxes} connectStatus={connectStatus}
-                    />
-                )}
-                {activeAction === 'connect' && (
-                    <ConnectPanel
-                        graphEngine={graphEngine} olapEngine={olapEngine} gatewayBase={gatewayBase}
                         onConnect={handleConnectAxes} connectStatus={connectStatus}
                     />
                 )}
