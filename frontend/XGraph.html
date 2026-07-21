@@ -1618,6 +1618,29 @@ function QueryPanel(props) {
     function setSqlAndNotify(v) { setSql(v); if (props.onSqlChange) props.onSqlChange(v); }
     const [result, setResult] = useState(initialResult);
     const [error, setError] = useState(null);
+    // ── Ask (NL) avenue — folded in from the old Ask tab. Runs gwClient.ask
+    // (NL → Cypher → run → answer), fills the editor with the generated query,
+    // drives the Results/Visualization tabs, and shows the answer bubble. ──
+    const [askQuestion, setAskQuestion] = useState('');
+    const [askBusy, setAskBusy] = useState(false);
+    const [askAnswer, setAskAnswer] = useState(null);
+    const [askError, setAskError] = useState(null);
+    var handleAsk = async function() {
+        var q = askQuestion.trim();
+        if (!q || !props.gwClient || !props.graphName) return;
+        setAskBusy(true); setAskError(null); setAskAnswer(null);
+        try {
+            var res = await props.gwClient.ask(props.graphName, q);
+            if (res && res.cypher) setSqlAndNotify(res.cypher);
+            if (res && (res.columns || res.rows || res.graph)) {
+                setResult(res);
+                if (props.onResultChange) props.onResultChange(res);
+                setActiveTab('results');
+            }
+            setAskAnswer((res && res.answer) || '(no answer returned)');
+        } catch (err) { setAskError(err.message); }
+        finally { setAskBusy(false); }
+    };
     const [loading, setLoading] = useState(false);
     const [pos, setPos] = useState({ x: 120 + panelIndex * 30, y: 60 + panelIndex * 30 });
     // If a restored/initial position is off-viewport (e.g., loaded from a
@@ -2575,7 +2598,7 @@ function QueryPanel(props) {
     // (same flow as a GQL query's results).
     var executeQuery = async function(statement) {
         if (!props.gwClient || !props.graphName) { setError("Not connected to a graph."); return; }
-        setError(null); setResult(null); setLoading(true); setNodeDetail(null); setCreateSuccess(null);
+        setError(null); setResult(null); setLoading(true); setNodeDetail(null); setCreateSuccess(null); setAskAnswer(null);
         try {
             var out = await props.gwClient.runQuery(props.graphName, statement);   // {columns, rows}
             setResult(out);
@@ -3479,6 +3502,27 @@ function QueryPanel(props) {
                                 </div>
                             </div>;
                         })()}
+                    </div>
+                )}
+                {/* Ask (natural-language) avenue — folded in from the old Ask tab. */}
+                {!hideQueryHelper && (
+                    <div style={{ display:'flex', flexDirection:'column', gap:6, padding:'0 0 8px', borderBottom:'1px solid #f1f2f6', marginBottom:8 }}>
+                        <label style={{ fontSize:12, fontWeight:700, color:'#0984e3' }}>Ask (natural language)</label>
+                        <div style={{ display:'flex', gap:6, alignItems:'flex-start' }}>
+                            <textarea value={askQuestion} onChange={function(e){ setAskQuestion(e.target.value); }}
+                                onKeyDown={function(e){ if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); handleAsk(); } }}
+                                placeholder="Ask in plain English — fills the query below and runs it (e.g. which parties sent the largest wires?)"
+                                spellCheck="false" rows={2}
+                                style={{ flex:1, resize:'vertical', border:'1px solid #dfe6e9', borderRadius:6, padding:8, fontFamily:'inherit', fontSize:12, outline:'none' }}/>
+                            <button onClick={handleAsk} disabled={askBusy || !askQuestion.trim()} style={{ padding:'8px 14px', border:'none', borderRadius:6, cursor: askBusy ? 'not-allowed' : 'pointer', fontWeight:700, color:'#fff', background: askBusy ? '#74b9ff' : '#0984e3', fontSize:12, fontFamily:'inherit', whiteSpace:'nowrap' }}>{askBusy ? 'Asking…' : 'Ask'}</button>
+                        </div>
+                        {askError && <span style={{ fontSize:11, color:'#d63031' }}>{askError}</span>}
+                        {askAnswer && (
+                            <div style={{ padding:'8px 12px', background:'#eef7ff', border:'1px solid #d0e6ff', borderRadius:6, fontSize:12, color:'#2d3436', position:'relative' }}>
+                                <span style={{ position:'absolute', top:4, right:8, cursor:'pointer', color:'#b2bec3', fontSize:13 }} title="Dismiss" onClick={function(){ setAskAnswer(null); }}>{'✕'}</span>
+                                {askAnswer}
+                            </div>
+                        )}
                     </div>
                 )}
                 {/* Query Helper (suppressed when panel opened from a Table — Helper is for GQL/graph use only) */}
