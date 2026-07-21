@@ -47,7 +47,7 @@
 const { useState, useEffect, useRef, useCallback, useMemo } = React;
 
 /* ═══════════════════════ CONSTANTS ════════════════════════ */
-const EXPLORER_VERSION = "0.12.0";  // xGraph version — bump on frontend changes so a stale browser cache is visible
+const EXPLORER_VERSION = "0.13.0";  // xGraph version — bump on frontend changes so a stale browser cache is visible
 const SAFETY_TIMEOUT_MS = 10 * 60 * 1000;
 const PALETTE = [
     { solid: '#0984e3', light: '#e1f0fb' }, { solid: '#00cec9', light: '#e0f9f8' },
@@ -65,6 +65,7 @@ const VISUALIZE_PAGE_SIZE = 10000;
 // Bare name — the gateway resolves it against its data dir (repo data/, or
 // XGRAPH_DATA_DIR). Run ./scripts/unzip-data.sh once to produce data/*.parquet.
 const HYDRATE_SOURCE = "vertexes.parquet";
+const HYDRATE_EDGE_SOURCE = "edges.parquet";  // edge source file for the Storage preview (nodes + edges)
 const ENGINE_PROFILES = [
     { label: "FalkorDB (gateway)", engine: "falkordb", base: GATEWAY_BASE },
     { label: "Kinetica (validation)", engine: "kinetica", base: GATEWAY_BASE },
@@ -7193,10 +7194,12 @@ function CreatePanel(props) {
                 );
             })()}
 
-            {isExtracted && !showCreateForm ? (
+            {activeGraph && !showCreateForm ? (
                 <p style={{ fontSize:12, color:'#636e72', margin:'8px 0 0' }}>
-                    Built from documents via Extract — there's no Parquet recipe to rebuild it here. Add more with the <b>Extract</b> tab, or{' '}
-                    <a href="#" onClick={function(e){ e.preventDefault(); setShowCreateForm(true); }} style={{ color:'#0984e3', fontWeight:600 }}>build a different graph from a Parquet source →</a>
+                    {isExtracted
+                        ? <span>Built from documents via Extract — there's no Parquet recipe to rebuild it here. Add more with the <b>Extract</b> tab, or{' '}</span>
+                        : <span>The recipe above is how <b>{activeGraph}</b> was built. To build a new or replacement graph, </span>}
+                    <a href="#" onClick={function(e){ e.preventDefault(); setShowCreateForm(true); }} style={{ color:'#0984e3', fontWeight:600 }}>open the builder →</a>
                 </p>
             ) : (<React.Fragment>
             <Label>Graph name</Label>
@@ -7629,13 +7632,17 @@ function StoragePanel(props) {
     const [sourceData, setSourceData] = useState(null);
     const [sourceBusy, setSourceBusy] = useState(false);
     const [sourceError, setSourceError] = useState(null);
+    const [edgeSourceData, setEdgeSourceData] = useState(null);
+    const [recipe, setRecipe] = useState(null); // {statement, source} from /graph_ddl — "how it was built"
     // Extracted graphs store attrs ON the nodes (no external Parquet) -- the
     // /documents ledger tells us which; if present, preview the provenance
     // ledger instead of the unrelated banking vertexes.parquet.
     const [storageDocs, setStorageDocs] = useState([]);
     useEffect(function() {
-        if (!gwClient || !activeGraph) { setStorageDocs([]); return; }
+        if (!gwClient || !activeGraph) { setStorageDocs([]); setRecipe(null); return; }
         gwClient.documents(activeGraph).then(function(r){ setStorageDocs((r && r.documents) || []); }).catch(function(){ setStorageDocs([]); });
+        // "How it was built" recipe (Kinetica show_graph DDL, recorded recipe, or synthesized).
+        gwClient.graphDdl(activeGraph).then(setRecipe).catch(function(){ setRecipe(null); });
     }, [gwClient, activeGraph]);
     var isExtracted = storageDocs.length > 0;
 
@@ -7669,6 +7676,11 @@ function StoragePanel(props) {
             } finally {
                 if (!cancelled) setSourceBusy(false);
             }
+            // Edge source — best-effort; leaves the nodes preview intact if absent.
+            try {
+                var re = await gwClient.sourcePreview(HYDRATE_EDGE_SOURCE);
+                if (!cancelled) setEdgeSourceData(re);
+            } catch (e) { if (!cancelled) setEdgeSourceData(null); }
         })();
         return function(){ cancelled = true; };
     }, [gwClient]);
@@ -7692,6 +7704,18 @@ function StoragePanel(props) {
                     )
                 )}
             </div>
+            {recipe && recipe.statement && (
+                <div style={{ background:'#fff', border:'1px solid #dfe6e9', borderRadius:10, padding:24, boxShadow:'0 2px 8px rgba(0,0,0,0.04)' }}>
+                    <h2 style={{ fontWeight:700, fontSize:18, margin:'0 0 4px', color:'#2d3436' }}>How it was built</h2>
+                    <p style={{ fontSize:12, color:'#b2bec3', margin:'0 0 12px' }}>
+                        {recipe.source === 'kinetica:show_graph' ? 'CREATE GRAPH DDL from Kinetica show_graph.'
+                         : recipe.source === 'xgraph:create-ledger' ? 'Recorded when this graph was built via xGraph.'
+                         : recipe.source === 'xgraph:schema-synthesized' ? 'Synthesized from the live schema (no exact recipe was recorded).'
+                         : 'Creation recipe.'}
+                    </p>
+                    <pre style={{ margin:0, padding:12, background:'#2d3436', color:'#dfe6e9', borderRadius:6, fontSize:11, whiteSpace:'pre-wrap', overflowX:'auto', maxHeight:280, overflowY:'auto' }}>{recipe.statement}</pre>
+                </div>
+            )}
             {isExtracted ? (
                 <div style={{ background:'#fff', border:'1px solid #dfe6e9', borderRadius:10, padding:24, boxShadow:'0 2px 8px rgba(0,0,0,0.04)' }}>
                     <h2 style={{ fontWeight:700, fontSize:18, margin:'0 0 4px', color:'#2d3436' }}>Provenance — documents</h2>
@@ -7710,12 +7734,15 @@ function StoragePanel(props) {
                     <h2 style={{ fontWeight:700, fontSize:18, margin:'0 0 4px', color:'#2d3436' }}>DuckDB source preview</h2>
                     <p style={{ fontSize:12, color:'#b2bec3', margin:'0 0 16px' }}>
                         DuckDB is stateless — a query layer over files, not a persisted store — so this
-                        previews the source file (<code>{HYDRATE_SOURCE}</code>) itself, not a table.
+                        previews the source files (<code>{HYDRATE_SOURCE}</code> + <code>{HYDRATE_EDGE_SOURCE}</code>) themselves, not tables.
                     </p>
                     {sourceBusy && <p style={{ fontSize:13, color:'#636e72' }}>{'Loading source preview…'}</p>}
                     {sourceError && <p style={{ fontSize:13, color:'#d63031' }}>{sourceError}</p>}
                     {!sourceBusy && !sourceError && sourceData && (
                         <StorageTable name={HYDRATE_SOURCE} columns={sourceData.columns} rows={sourceData.rows} />
+                    )}
+                    {edgeSourceData && (
+                        <StorageTable name={HYDRATE_EDGE_SOURCE} columns={edgeSourceData.columns} rows={edgeSourceData.rows} />
                     )}
                 </div>
             )}
