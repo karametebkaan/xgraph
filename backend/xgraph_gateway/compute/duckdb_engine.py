@@ -33,6 +33,11 @@ class DuckDBComputeEngine:
                 " canonical_name VARCHAR, axis VARCHAR,"
                 " first_seen_uri VARCHAR, first_seen_ts TIMESTAMP,"
                 " PRIMARY KEY (graph, type_kind, type_name))")
+            con.execute(
+                "CREATE TABLE IF NOT EXISTS xgraph_creations ("
+                " graph VARCHAR, engine VARCHAR, statement VARCHAR,"
+                " source VARCHAR, ts TIMESTAMP,"
+                " PRIMARY KEY (graph, engine))")
             self._meta_ready = True
         return con
 
@@ -96,6 +101,41 @@ class DuckDBComputeEngine:
         finally:
             con.close()
 
+    def record_creation(self, graph, engine, statement, source):
+        """UPSERT the 'how this graph was created' recipe, keyed on
+        (graph, engine). Latest write wins."""
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        con = self._meta_con()
+        try:
+            existing = con.execute(
+                "SELECT 1 FROM xgraph_creations WHERE graph = ? AND engine = ?",
+                [graph, engine]).fetchone()
+            if existing is None:
+                con.execute("INSERT INTO xgraph_creations VALUES (?, ?, ?, ?, ?)",
+                            [graph, engine, statement, source, now])
+            else:
+                con.execute(
+                    "UPDATE xgraph_creations SET statement = ?, source = ?, ts = ?"
+                    " WHERE graph = ? AND engine = ?",
+                    [statement, source, now, graph, engine])
+            return {"graph": graph, "engine": engine, "source": source, "ts": _iso(now)}
+        finally:
+            con.close()
+
+    def get_creation(self, graph):
+        """Most-recent recorded creation recipe for `graph` (any engine)."""
+        con = self._meta_con()
+        try:
+            row = con.execute(
+                "SELECT graph, engine, statement, source, ts FROM xgraph_creations"
+                " WHERE graph = ? ORDER BY ts DESC LIMIT 1", [graph]).fetchone()
+            if not row:
+                return None
+            return {"graph": row[0], "engine": row[1], "statement": row[2],
+                    "source": row[3], "ts": _iso(row[4])}
+        finally:
+            con.close()
+
     def clear_graph_metadata(self, graph):
         """Delete all ledger + ontology rows for `graph` (idempotent -- a
         no-op, not an error, if the tables don't exist yet or the graph has
@@ -105,6 +145,7 @@ class DuckDBComputeEngine:
         try:
             con.execute("DELETE FROM xgraph_documents WHERE graph = ?", [graph])
             con.execute("DELETE FROM xgraph_ontology WHERE graph = ?", [graph])
+            con.execute("DELETE FROM xgraph_creations WHERE graph = ?", [graph])
         finally:
             con.close()
 
