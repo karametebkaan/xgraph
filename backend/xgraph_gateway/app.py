@@ -48,6 +48,27 @@ def render_create_recipe(spec: dict) -> str:
     return "\n".join(lines)
 
 
+def synthesize_recipe(graph: str, engine: str, schema: dict) -> str:
+    """Best-effort 'how this graph is built' when nothing was recorded and the
+    engine has no server-side DDL (FalkorDB): derive a representative shape from
+    the graph's own live schema (node labels + relationship types + counts).
+    Not the exact source recipe — clearly labelled as synthesized."""
+    if not isinstance(schema, dict):
+        return ""
+    labels = schema.get("labels") or []
+    rels = schema.get("rel_types") or []
+    counts = schema.get("counts") or {}
+    lines = ["-- " + str(graph) + " (" + (engine or "graph") + ") — synthesized from live schema",
+             "-- (no recorded build recipe; representative shape derived from the graph itself)"]
+    if counts:
+        lines.append("-- counts: " + ", ".join(str(k) + "=" + str(v) for k, v in counts.items()))
+    if labels:
+        lines.append("-- node labels (" + str(len(labels)) + "): " + ", ".join(map(str, labels)))
+    if rels:
+        lines.append("-- relationship types (" + str(len(rels)) + "): " + ", ".join(map(str, rels)))
+    return "\n".join(lines)
+
+
 def create_app(adapter_factory=registry.get_adapter, compute=None, store=None) -> FastAPI:
     compute = compute or ComputeEngine()
     store = store if store is not None else SessionStore()
@@ -261,12 +282,21 @@ def create_app(adapter_factory=registry.get_adapter, compute=None, store=None) -
     @app.get("/graph_ddl")
     def graph_ddl(graph: str, engine: str = "", session: str | None = None):
         try:
-            stmt = _resolve_adapter(session, engine).creation_statement(graph)
+            adapter = _resolve_adapter(session, engine)
+            stmt = adapter.creation_statement(graph)
             if stmt and stmt.get("statement"):
                 return stmt
             recorded = _resolve_compute(session).get_creation(graph)
             if recorded and recorded.get("statement"):
                 return {"statement": recorded["statement"], "source": "xgraph:create-ledger"}
+            # Nothing recorded + no live DDL (FalkorDB): synthesize a representative
+            # recipe from the graph's own schema so "how it was built" always shows.
+            try:
+                syn = synthesize_recipe(graph, _resolve_engine(session, engine), adapter.get_schema(graph))
+                if syn:
+                    return {"statement": syn, "source": "xgraph:schema-synthesized"}
+            except Exception:
+                pass
             return stmt if stmt else {"statement": None, "source": None}
         except Exception as e:
             return _err(engine, e)

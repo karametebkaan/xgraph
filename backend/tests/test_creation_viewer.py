@@ -77,8 +77,24 @@ def test_create_records_recipe_and_graph_ddl_returns_it(tmp_path):
     assert ddl["source"] == "xgraph:create-ledger"
 
 
-def test_graph_ddl_null_for_unrecorded(tmp_path):
+def test_graph_ddl_synthesizes_when_unrecorded(tmp_path):
+    # No recorded recipe + no live DDL (FakeAdapter) → synthesized from schema.
     client = _app(tmp_path)
     sid = client.post("/connect", json={"graph": {"engine": "falkordb"}, "compute": {"engine": "duckdb"}}).json()["session"]
     ddl = client.get("/graph_ddl", params={"session": sid, "graph": "never_built"}).json()
-    assert ddl["statement"] is None
+    assert ddl["source"] == "xgraph:schema-synthesized"
+    assert ddl["statement"] and "synthesized from live schema" in ddl["statement"]
+    # carries the live labels / rel types from get_schema
+    assert "bank" in ddl["statement"] and "performed" in ddl["statement"]
+
+
+def test_synthesize_recipe_unit():
+    from xgraph_gateway.app import synthesize_recipe
+    out = synthesize_recipe("g1", "falkordb",
+                            {"labels": ["bank", "party"], "rel_types": ["performed"],
+                             "counts": {"nodes": 2, "edges": 1}})
+    assert "g1" in out and "falkordb" in out
+    assert "bank" in out and "party" in out
+    assert "performed" in out
+    assert "nodes=2" in out and "edges=1" in out
+    assert synthesize_recipe("g", "falkordb", None) == ""

@@ -33,10 +33,15 @@ def test_fake_adapter_inherits_default_creation_statement():
 def _client():
     return TestClient(create_app(adapter_factory=lambda e: FakeAdapter()))
 
-def test_graph_ddl_endpoint_returns_default_shape():
+def test_graph_ddl_endpoint_synthesizes_from_schema():
+    # No live DDL + no recorded recipe → synthesized from the adapter's schema
+    # (FakeAdapter.get_schema returns labels/rel_types), so "how it was built"
+    # always shows something instead of a bare null.
     r = _client().get("/graph_ddl", params={"engine": "fake", "graph": "g"})
     assert r.status_code == 200
-    assert r.json() == {"statement": None, "source": None}
+    body = r.json()
+    assert body["source"] == "xgraph:schema-synthesized"
+    assert body["statement"] and "bank" in body["statement"]
 
 def test_graph_ddl_endpoint_error_returns_envelope():
     def boom(e):
