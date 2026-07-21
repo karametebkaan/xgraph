@@ -26,25 +26,46 @@ def _err(engine: str, exc: Exception) -> JSONResponse:
                            "engine": engine, "detail": None}})
 
 
+def _falkordb_sink_cypher(node_key: str = "NODE") -> str:
+    """The exact Cypher the FalkorDB sink runs per 5,000-row batch (nodes then
+    edges), keyed on the node-key property. Rows come from Step-1's SELECT; ids
+    and props are passed as $rows parameters (not interpolated)."""
+    k = node_key or "NODE"
+    return ("UNWIND $rows AS row\n"
+            "MERGE (n:Entity {" + k + ": row.id})\n"
+            "SET n:<Label>, n.LABEL = $label, n += row.props;\n"
+            "\n"
+            "UNWIND $rows AS row\n"
+            "MATCH (a:Entity {" + k + ": row.n1}), (b:Entity {" + k + ": row.n2})\n"
+            "MERGE (a)-[r:<TYPE> {id: row.id}]->(b)\n"
+            "SET r.LABEL = $type, r += row.props;")
+
+
 def render_create_recipe(spec: dict) -> str:
     """Render a /create spec as a readable 'how this graph was built' recipe.
-    Kinetica-via-gateway carries raw DDL (returned verbatim); FalkorDB carries a
-    {tables, nodes, edges} spec rendered as commented SELECT lines."""
+    Kinetica-via-gateway carries raw DDL (returned verbatim). FalkorDB shows the
+    two-stage build: Step 1 the DuckDB SELECT(s) that produce rows, Step 2 the
+    Cypher UNWIND/MERGE sink that writes them."""
     if not isinstance(spec, dict):
         return ""
     if spec.get("ddl"):
         return str(spec["ddl"])
     graph = spec.get("graph", "graph")
-    lines = ['-- FalkorDB graph "' + str(graph) + '" (built via xGraph /create)']
+    nk = spec.get("node_key_property", "NODE")
+    lines = ['-- FalkorDB graph "' + str(graph) + '" — built via xGraph /create', "--",
+             "-- Step 1 · DuckDB reads source rows (one SELECT per node/edge table over the registered files):"]
     for n in spec.get("nodes", []) or []:
         if n.get("sql"):
-            lines.append("-- NODES: " + n["sql"])
+            lines.append("    " + n["sql"])
     for e in spec.get("edges", []) or []:
         if e.get("sql"):
-            lines.append("-- EDGES: " + e["sql"])
+            lines.append("    " + e["sql"])
     tables = spec.get("tables") or {}
     if tables:
-        lines.append("-- tables: " + ", ".join(str(k) + " = " + str(v) for k, v in tables.items()))
+        lines.append("-- source tables: " + ", ".join(str(k) + " = " + str(v) for k, v in tables.items()))
+    lines += ["--",
+              "-- Step 2 · Cypher sink writes each batch into FalkorDB (idempotent MERGE):",
+              _falkordb_sink_cypher(nk)]
     return "\n".join(lines)
 
 
@@ -58,10 +79,19 @@ def synthesize_recipe(graph: str, engine: str, schema: dict) -> str:
     labels = schema.get("labels") or []
     rels = schema.get("rel_types") or []
     counts = schema.get("counts") or {}
-    lines = ["-- " + str(graph) + " (" + (engine or "graph") + ") — synthesized from live schema",
-             "-- (no recorded build recipe; representative shape derived from the graph itself)"]
+    lines = ["-- " + str(graph) + " (" + (engine or "graph") + ") — how it was built",
+             "-- (representative; no exact recipe recorded — shape derived from the live schema)"]
     if counts:
         lines.append("-- counts: " + ", ".join(str(k) + "=" + str(v) for k, v in counts.items()))
+    if (engine or "").lower() != "kinetica":
+        # FalkorDB two-stage build: source SELECT → Cypher UNWIND/MERGE sink.
+        lines += ["--",
+                  "-- Step 1 · DuckDB (or Kinetica) reads source rows — one SELECT per node/edge source, e.g.:",
+                  "    SELECT <id> AS NODE, <label> AS LABEL, <attrs...> FROM '<node source>'",
+                  "    SELECT <id>, <src> AS n1, <tgt> AS n2, <type> AS LABEL FROM '<edge source>'",
+                  "--",
+                  "-- Step 2 · Cypher sink writes each batch into FalkorDB (idempotent MERGE):",
+                  _falkordb_sink_cypher("NODE")]
     if labels:
         lines.append("-- node labels (" + str(len(labels)) + "): " + ", ".join(map(str, labels)))
     if rels:

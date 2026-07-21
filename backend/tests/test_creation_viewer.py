@@ -54,6 +54,9 @@ def test_render_create_recipe_falkordb_spec():
     assert "banking" in out
     assert "SELECT id AS NODE FROM b2_nodes" in out
     assert "SELECT src AS SRC, dst AS DST FROM b2_edges" in out
+    # Step 2: the Cypher sink is shown too
+    assert "MERGE (n:Entity {NODE: row.id})" in out
+    assert "MATCH (a:Entity {NODE: row.n1})" in out
 
 
 def _app(tmp_path):
@@ -83,7 +86,9 @@ def test_graph_ddl_synthesizes_when_unrecorded(tmp_path):
     sid = client.post("/connect", json={"graph": {"engine": "falkordb"}, "compute": {"engine": "duckdb"}}).json()["session"]
     ddl = client.get("/graph_ddl", params={"session": sid, "graph": "never_built"}).json()
     assert ddl["source"] == "xgraph:schema-synthesized"
-    assert ddl["statement"] and "synthesized from live schema" in ddl["statement"]
+    assert ddl["statement"] and "how it was built" in ddl["statement"]
+    # shows the two-stage FalkorDB build: SELECT + Cypher sink
+    assert "SELECT" in ddl["statement"] and "MERGE (n:Entity" in ddl["statement"]
     # carries the live labels / rel types from get_schema
     assert "bank" in ddl["statement"] and "performed" in ddl["statement"]
 
