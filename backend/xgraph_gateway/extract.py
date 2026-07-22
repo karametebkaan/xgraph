@@ -133,7 +133,8 @@ _EXTRACT_SCHEMA = {
                 "properties": {
                     "source": {"type": "string", "description": "Must equal an entity `name` from this same chunk."},
                     "target": {"type": "string", "description": "Must equal an entity `name` from this same chunk."},
-                    "label": {"type": "string", "description": "UPPER_SNAKE relationship type, e.g. WORKS_AT, LOCATED_IN."},
+                    "label": {"type": "string", "description": "UPPER_SNAKE relationship type, e.g. WORKS_AT, LOCATED_IN, SON_OF."},
+                    "axis": {"type": "string", "description": "Coarse UPPER_SNAKE category grouping this relationship label, e.g. FAMILY (SON_OF/WIFE_OF), EMPLOYMENT (WORKS_FOR), LOCATION (LOCATED_IN)."},
                     "attrs": {"type": "object", "description": "Optional extra attributes about the relationship."},
                 },
                 "required": ["source", "target", "label"],
@@ -156,7 +157,9 @@ def _prompt(chunk_text: str, hint: Optional[str]) -> str:
         "- Give each entity a concise Title-Case `label` (e.g. Person, Organization, "
         "Location, Event) that names its type.\n"
         "- Give each relationship an UPPER_SNAKE `label` (e.g. WORKS_AT, LOCATED_IN, "
-        "FOUNDED_BY) describing how the two entities relate.\n"
+        "FOUNDED_BY, SON_OF) describing how the two entities relate, AND an `axis` — a "
+        "coarse UPPER_SNAKE category grouping related labels (FAMILY for SON_OF/WIFE_OF, "
+        "EMPLOYMENT for WORKS_FOR, LOCATION for LOCATED_IN).\n"
         "- Optionally add `facets`: classifying dimensions of an entity beyond its "
         "structural type, each `{name, axis}` (e.g. a Company with "
         "`{\"name\":\"AI\",\"axis\":\"Industry\"}`). Keep the structural type in `label`.\n"
@@ -167,7 +170,7 @@ def _prompt(chunk_text: str, hint: Optional[str]) -> str:
         f"{hint_block}\n"
         "Return JSON only (no markdown fences, no commentary) with `entities` "
         "(each `{name, label, facets?, attrs?}`) and `relations` (each "
-        "`{source, target, label, attrs?}`).\n\n"
+        "`{source, target, label, axis, attrs?}`).\n\n"
         f"Passage:\n{chunk_text}"
     )
 
@@ -306,11 +309,12 @@ def extract_document(text: str, hint: Optional[str] = None, llm: Optional[LLMFun
                 continue  # dangling: endpoint not among this chunk's entities
             src_id = name_to_id[src_name]
             dst_id = name_to_id[dst_name]
+            axis = (r.get("axis") or "").strip() or None
             rid = hashlib.sha1(f"{src_id}|{dst_id}|{label}".encode("utf-8")).hexdigest()[:16]
             if rid not in relations:
                 attrs = r.get("attrs") or {}
                 relations[rid] = {"id": rid, "src": src_id, "dst": dst_id, "label": label,
-                                   "attrs": dict(attrs)}
+                                   "axis": axis, "attrs": dict(attrs)}
 
     ents, rels = _merge_partial_names(list(entities.values()), list(relations.values()))
     return {"entities": ents, "relations": rels, "truncated": truncated}

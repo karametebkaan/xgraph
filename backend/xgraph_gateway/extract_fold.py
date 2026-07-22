@@ -142,6 +142,6 @@ def fold_labels(store, graph, entities, relations, source_uri, llm=None):
         e["label_raw"] = label_raw
     for r in relations:
         r["label"] = _resolve_one(store, graph, "relation",
-                                  r.get("label", ""), _RELATION_AXIS, llm, cache, report,
+                                  r.get("label", ""), (r.get("axis") or _RELATION_AXIS), llm, cache, report,
                                   source_uri, pre_canon)
     return report
