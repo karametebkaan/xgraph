@@ -1,0 +1,1 @@
+anthropic[vertex]   # AnthropicVertex client for the sdk+vertex LLM route
