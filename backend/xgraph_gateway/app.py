@@ -1,6 +1,7 @@
 from __future__ import annotations
 import hashlib
 import os
+import re
 from fastapi import FastAPI, Body, File, Form, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
@@ -67,6 +68,49 @@ def render_create_recipe(spec: dict) -> str:
               "-- Step 2 · Cypher sink writes each batch into FalkorDB (idempotent MERGE):",
               _falkordb_sink_cypher(nk)]
     return "\n".join(lines)
+
+
+def graph_source_relations(recipe: dict) -> list[dict]:
+    """Derive the real source relations a graph was built from, as
+    [{"name", "path", "role"}]. Primary: the structured spec's `tables`
+    map, with role inferred from which node/edge SELECT references each path.
+    Fallback: parse the recipe statement's `-- source tables: n = p, ...`
+    line (role unknown). Neither present -> []."""
+    if not isinstance(recipe, dict):
+        return []
+    spec = recipe.get("spec")
+    if isinstance(spec, dict) and isinstance(spec.get("tables"), dict) and spec["tables"]:
+        node_sql = " ".join(str(n.get("sql", "")) for n in (spec.get("nodes") or []))
+        edge_sql = " ".join(str(e.get("sql", "")) for e in (spec.get("edges") or []))
+        out = []
+
+        def _refs(token, path, sql):
+            if path and path in sql:
+                return True
+            if not token:
+                return False
+            return re.search(r'(?<!\w)' + re.escape(token) + r'(?!\w)', sql) is not None
+
+        for name, path in spec["tables"].items():
+            p, nm = str(path), str(name)
+            in_nodes, in_edges = _refs(nm, p, node_sql), _refs(nm, p, edge_sql)
+            role = "nodes" if in_nodes and not in_edges else (
+                "edges" if in_edges and not in_nodes else None)
+            out.append({"name": nm, "path": p, "role": role})
+        return out
+    # Legacy fallback: parse the rendered recipe text.
+    stmt = recipe.get("statement") or ""
+    for line in stmt.splitlines():
+        marker = "-- source tables:"
+        if marker in line:
+            body = line.split(marker, 1)[1].strip()
+            out = []
+            for pair in body.split(","):
+                if "=" in pair:
+                    name, _, path = pair.partition("=")
+                    out.append({"name": name.strip(), "path": path.strip(), "role": None})
+            return out
+    return []
 
 
 def synthesize_recipe(graph: str, engine: str, schema: dict) -> str:
@@ -295,7 +339,7 @@ def create_app(adapter_factory=registry.get_adapter, compute=None, store=None) -
                 if isinstance(spec, dict) and spec.get("graph"):
                     _resolve_compute(session).record_creation(
                         spec["graph"], _resolve_engine(session, engine),
-                        render_create_recipe(spec), "create")
+                        render_create_recipe(spec), "create", spec=spec)
             except Exception:
                 pass
             return result
@@ -315,19 +359,29 @@ def create_app(adapter_factory=registry.get_adapter, compute=None, store=None) -
             adapter = _resolve_adapter(session, engine)
             stmt = adapter.creation_statement(graph)
             if stmt and stmt.get("statement"):
+                stmt.setdefault("spec", None)
+                stmt.setdefault("sources", [])
                 return stmt
             recorded = _resolve_compute(session).get_creation(graph)
             if recorded and recorded.get("statement"):
-                return {"statement": recorded["statement"], "source": "xgraph:create-ledger"}
+                return {"statement": recorded["statement"],
+                        "source": "xgraph:create-ledger",
+                        "spec": recorded.get("spec"),
+                        "sources": graph_source_relations(recorded)}
             # Nothing recorded + no live DDL (FalkorDB): synthesize a representative
             # recipe from the graph's own schema so "how it was built" always shows.
             try:
                 syn = synthesize_recipe(graph, _resolve_engine(session, engine), adapter.get_schema(graph))
                 if syn:
-                    return {"statement": syn, "source": "xgraph:schema-synthesized"}
+                    return {"statement": syn, "source": "xgraph:schema-synthesized",
+                            "spec": None, "sources": []}
             except Exception:
                 pass
-            return stmt if stmt else {"statement": None, "source": None}
+            if stmt:
+                stmt.setdefault("spec", None)
+                stmt.setdefault("sources", [])
+                return stmt
+            return {"statement": None, "source": None, "spec": None, "sources": []}
         except Exception as e:
             return _err(engine, e)
 
