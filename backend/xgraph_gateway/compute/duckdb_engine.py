@@ -1,5 +1,6 @@
 from __future__ import annotations
 import duckdb
+import json
 from datetime import datetime, timezone
 from xgraph_gateway import config
 from xgraph_gateway.config import resolve_data_path
@@ -36,8 +37,14 @@ class DuckDBComputeEngine:
             con.execute(
                 "CREATE TABLE IF NOT EXISTS xgraph_creations ("
                 " graph VARCHAR, engine VARCHAR, statement VARCHAR,"
-                " source VARCHAR, ts TIMESTAMP,"
+                " source VARCHAR, ts TIMESTAMP, spec_json VARCHAR,"
                 " PRIMARY KEY (graph, engine))")
+            # Migration for DBs created before spec_json existed. Idempotent:
+            # ADD COLUMN raises if it already exists, so swallow that one case.
+            try:
+                con.execute("ALTER TABLE xgraph_creations ADD COLUMN spec_json VARCHAR")
+            except Exception:
+                pass
             self._meta_ready = True
         return con
 
@@ -101,38 +108,49 @@ class DuckDBComputeEngine:
         finally:
             con.close()
 
-    def record_creation(self, graph, engine, statement, source):
+    def record_creation(self, graph, engine, statement, source, spec=None):
         """UPSERT the 'how this graph was created' recipe, keyed on
-        (graph, engine). Latest write wins."""
+        (graph, engine). Latest write wins. `spec` (the structured /create
+        spec) is stored as JSON in spec_json; None -> NULL (legacy shape)."""
         now = datetime.now(timezone.utc).replace(tzinfo=None)
+        spec_json = json.dumps(spec) if spec is not None else None
         con = self._meta_con()
         try:
             existing = con.execute(
                 "SELECT 1 FROM xgraph_creations WHERE graph = ? AND engine = ?",
                 [graph, engine]).fetchone()
             if existing is None:
-                con.execute("INSERT INTO xgraph_creations VALUES (?, ?, ?, ?, ?)",
-                            [graph, engine, statement, source, now])
+                con.execute(
+                    "INSERT INTO xgraph_creations VALUES (?, ?, ?, ?, ?, ?)",
+                    [graph, engine, statement, source, now, spec_json])
             else:
                 con.execute(
-                    "UPDATE xgraph_creations SET statement = ?, source = ?, ts = ?"
-                    " WHERE graph = ? AND engine = ?",
-                    [statement, source, now, graph, engine])
+                    "UPDATE xgraph_creations SET statement = ?, source = ?,"
+                    " ts = ?, spec_json = ? WHERE graph = ? AND engine = ?",
+                    [statement, source, now, spec_json, graph, engine])
             return {"graph": graph, "engine": engine, "source": source, "ts": _iso(now)}
         finally:
             con.close()
 
     def get_creation(self, graph):
-        """Most-recent recorded creation recipe for `graph` (any engine)."""
+        """Most-recent recorded creation recipe for `graph` (any engine),
+        including the parsed structured spec (None when not recorded)."""
         con = self._meta_con()
         try:
             row = con.execute(
-                "SELECT graph, engine, statement, source, ts FROM xgraph_creations"
-                " WHERE graph = ? ORDER BY ts DESC LIMIT 1", [graph]).fetchone()
+                "SELECT graph, engine, statement, source, ts, spec_json"
+                " FROM xgraph_creations WHERE graph = ?"
+                " ORDER BY ts DESC LIMIT 1", [graph]).fetchone()
             if not row:
                 return None
+            spec = None
+            if row[5]:
+                try:
+                    spec = json.loads(row[5])
+                except Exception:
+                    spec = None
             return {"graph": row[0], "engine": row[1], "statement": row[2],
-                    "source": row[3], "ts": _iso(row[4])}
+                    "source": row[3], "ts": _iso(row[4]), "spec": spec}
         finally:
             con.close()
 

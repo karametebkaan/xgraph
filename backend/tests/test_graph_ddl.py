@@ -151,3 +151,78 @@ def test_live_kinetica_banking_graph_creation_statement_if_present(live_kinetica
         pytest.skip("expero.banking_graph not present")
     out = live_kinetica_adapter.creation_statement(banking)
     assert out["statement"]
+
+
+# ---------------------------------------------------------------------------
+# graph_source_relations: derive per-graph source files from a recipe.
+# ---------------------------------------------------------------------------
+
+from xgraph_gateway.app import graph_source_relations
+from xgraph_gateway.compute.duckdb_engine import DuckDBComputeEngine
+
+
+def test_source_relations_from_spec_infers_roles():
+    recipe = {"spec": {
+        "tables": {"acct": "/data/accounts.parquet", "wires": "/data/wires.csv"},
+        "nodes": [{"sql": "SELECT id AS NODE FROM acct"}],
+        "edges": [{"sql": "SELECT s AS n1, t AS n2 FROM wires"}],
+    }}
+    out = graph_source_relations(recipe)
+    by_name = {r["name"]: r for r in out}
+    assert by_name["acct"]["path"] == "/data/accounts.parquet"
+    assert by_name["acct"]["role"] == "nodes"
+    assert by_name["wires"]["role"] == "edges"
+
+
+def test_source_relations_role_no_prefix_false_positive():
+    recipe = {"spec": {
+        "tables": {"wire": "/data/wire.parquet", "wires": "/data/wires.parquet"},
+        "nodes": [{"sql": "SELECT id AS NODE FROM wire"}],
+        "edges": [{"sql": "SELECT s AS n1, t AS n2 FROM wires"}],
+    }}
+    by_name = {r["name"]: r for r in graph_source_relations(recipe)}
+    assert by_name["wire"]["role"] == "nodes"
+    assert by_name["wires"]["role"] == "edges"
+
+
+def test_source_relations_spec_role_none_when_unreferenced():
+    recipe = {"spec": {"tables": {"x": "/data/x.parquet"}, "nodes": [], "edges": []}}
+    assert graph_source_relations(recipe) == [
+        {"name": "x", "path": "/data/x.parquet", "role": None}]
+
+
+def test_source_relations_falls_back_to_recipe_text():
+    recipe = {"spec": None, "statement":
+              "-- FalkorDB graph\n"
+              "-- source tables: acct = /data/accounts.parquet, wires = /data/wires.csv\n"
+              "-- Step 2 ..."}
+    out = graph_source_relations(recipe)
+    assert {"name": "acct", "path": "/data/accounts.parquet", "role": None} in out
+    assert {"name": "wires", "path": "/data/wires.csv", "role": None} in out
+
+
+def test_source_relations_empty_when_nothing_recorded():
+    assert graph_source_relations({"spec": None, "statement": "-- no sources"}) == []
+    assert graph_source_relations({}) == []
+
+
+# ---------------------------------------------------------------------------
+# /graph_ddl: ledger branch carries spec + resolved sources.
+# ---------------------------------------------------------------------------
+
+def test_graph_ddl_endpoint_returns_sources_from_ledger(tmp_path):
+    compute = DuckDBComputeEngine(meta_path=str(tmp_path / "meta.duckdb"))
+    spec = {"graph": "g", "tables": {"acct": "/data/accounts.parquet"},
+            "nodes": [{"sql": "SELECT id AS NODE FROM '/data/accounts.parquet'"}],
+            "edges": []}
+    compute.record_creation("g", "fake", "-- recipe", "create", spec=spec)
+    # FakeAdapter.creation_statement returns {statement: None} so the endpoint
+    # falls through to the ledger branch.
+    c = TestClient(create_app(adapter_factory=lambda e: FakeAdapter(), compute=compute))
+    r = c.get("/graph_ddl", params={"engine": "fake", "graph": "g"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["source"] == "xgraph:create-ledger"
+    assert body["spec"]["graph"] == "g"
+    assert {"name": "acct", "path": "/data/accounts.parquet",
+            "role": "nodes"} in body["sources"]

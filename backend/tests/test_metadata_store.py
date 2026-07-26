@@ -280,3 +280,46 @@ def test_kinetica_record_type_null_axis_and_canonical_roundtrip(kinetica_engine)
         assert eng.get_canonicals(g, "entity") == [None]
     finally:
         list(eng._src.rows(f"DELETE FROM {_ONTOLOGY_TABLE} WHERE graph = '{g}'"))
+
+
+def test_record_creation_roundtrips_spec(tmp_path):
+    eng = _engine(tmp_path)
+    spec = {"graph": "g1", "nodes": [{"sql": "SELECT * FROM 'a.parquet'"}],
+            "tables": {"a": "/data/a.parquet"}}
+    eng.record_creation("g1", "falkordb", "-- recipe", "create", spec=spec)
+    row = eng.get_creation("g1")
+    assert row["spec"] == spec
+
+
+def test_record_creation_without_spec_reads_back_none(tmp_path):
+    eng = _engine(tmp_path)
+    eng.record_creation("g1", "falkordb", "-- recipe", "create")
+    row = eng.get_creation("g1")
+    assert row["spec"] is None
+
+
+def test_creation_spec_survives_upsert(tmp_path):
+    eng = _engine(tmp_path)
+    eng.record_creation("g1", "falkordb", "-- v1", "create", spec={"graph": "g1", "v": 1})
+    eng.record_creation("g1", "falkordb", "-- v2", "create", spec={"graph": "g1", "v": 2})
+    assert eng.get_creation("g1")["spec"] == {"graph": "g1", "v": 2}
+
+
+def test_get_creation_migrates_legacy_table_without_spec_json(tmp_path):
+    import duckdb
+    meta = str(tmp_path / "meta.duckdb")
+    # Simulate a pre-spec_json DB: create the ledger with the OLD column set.
+    con = duckdb.connect(meta)
+    con.execute("CREATE TABLE xgraph_creations ("
+                " graph VARCHAR, engine VARCHAR, statement VARCHAR,"
+                " source VARCHAR, ts TIMESTAMP, PRIMARY KEY (graph, engine))")
+    con.execute("INSERT INTO xgraph_creations VALUES "
+                "('old', 'falkordb', '-- legacy', 'create', now())")
+    con.close()
+    eng = DuckDBComputeEngine(meta_path=meta)
+    row = eng.get_creation("old")           # must not raise; migration adds the column
+    assert row["statement"] == "-- legacy"
+    assert row["spec"] is None
+    # New writes on the migrated table carry spec.
+    eng.record_creation("new", "falkordb", "-- new", "create", spec={"graph": "new"})
+    assert eng.get_creation("new")["spec"] == {"graph": "new"}
