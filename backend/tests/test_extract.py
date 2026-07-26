@@ -309,15 +309,27 @@ def test_extract_chunks_run_concurrently_and_preserve_order():
     assert names == [f"E{i}" for i in range(6)]  # in order, none lost
 
 
-def test_llm_backend_prefers_sdk_when_api_key_set(monkeypatch):
+def test_llm_backend_defaults_to_cli_and_uses_sdk_only_when_selected(monkeypatch):
+    # New dispatch contract (vertex-llm-route): mechanism defaults to `cli`;
+    # auth is derived from env (apikey when ANTHROPIC_API_KEY is set). So a
+    # bare API key routes through the CLI (key passed in its env), NOT the SDK.
+    # The SDK path is taken only when mechanism=sdk is explicitly selected.
     from xgraph_gateway import llm as llmmod
-    monkeypatch.setattr(llmmod, "_llm_claude_sdk", lambda p, s, m=None: "SDK")
-    monkeypatch.setattr(llmmod, "_llm_claude_cli", lambda p, s, m=None: "CLI")
+    llmmod._OVERRIDE = {}
+    monkeypatch.setattr(llmmod, "_llm_claude_sdk", lambda p, s, m=None, cfg=None: "SDK")
+    monkeypatch.setattr(llmmod, "_llm_claude_cli", lambda p, s, m=None, cfg=None: "CLI")
     monkeypatch.setattr(llmmod.shutil, "which", lambda _x: "/usr/bin/claude")
+    for k in ("CLAUDE_CODE_USE_VERTEX", "XGRAPH_LLM"):
+        monkeypatch.delenv(k, raising=False)
+    # API key set, no override -> cli + apikey -> CLI path.
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    assert llmmod._llm("hi") == "CLI"
+    # Explicitly choosing the SDK mechanism -> SDK path.
+    llmmod.set_llm_config({"mechanism": "sdk", "auth": "apikey", "api_key": "sk-test"})
     assert llmmod._llm("hi") == "SDK"
+    llmmod._OVERRIDE = {}
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    assert llmmod._llm("hi") == "CLI"  # no key -> CLI (default dev path)
+    assert llmmod._llm("hi") == "CLI"  # no key -> cli + cli-login -> CLI
 
 
 def test_extract_document_whole_mode_is_one_call_and_keeps_cross_paragraph_relations():
