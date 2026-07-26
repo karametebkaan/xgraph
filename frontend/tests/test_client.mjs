@@ -145,6 +145,28 @@ const run = async () => {
   assert.equal(regBody2.table, "airports");
   console.log("ok: registerFile options form");
 
+  // getLlmStatus()/setLlmConfig(): gateway-global — plain base+path, NO session
+  // param or body key even after a connect() has set a session.
+  const llmUrls = [], llmBodies = [];
+  const llmClient = g.makeClient("http://gw", fakeFetch((url, body) => {
+    llmUrls.push(url);
+    if (body) llmBodies.push(body);
+    if (body && body.graph && body.compute) return { session: "s1", graphs: [] };
+    return { mechanism: "cli", auth: "vertex", has_api_key: false };
+  }));
+  await llmClient.connect({ engine: "falkordb", conn: {} }, { engine: "duckdb", conn: {} });
+  const st = await llmClient.getLlmStatus();
+  assert.equal(st.auth, "vertex");
+  assert.equal(llmUrls[llmUrls.length - 1], "http://gw/llm_status");
+  assert.ok(!llmUrls[llmUrls.length - 1].includes("session="), "llm_status must not carry a session param");
+
+  await llmClient.setLlmConfig({ mechanism: "cli", auth: "vertex", project: "p" });
+  assert.equal(llmUrls[llmUrls.length - 1], "http://gw/llm_config");
+  const llmBody = llmBodies[llmBodies.length - 1];
+  assert.equal(llmBody.project, "p");
+  assert.ok(!("session" in llmBody), "llm_config body must not carry a session");
+  console.log("ok: llm status/config client");
+
   console.log("client OK");
 };
 run();

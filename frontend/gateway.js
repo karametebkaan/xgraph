@@ -162,6 +162,9 @@
         formData.append("hint", hint || "");
         return postFormWithAuth("/extract", formData);
       },
+      // LLM route config is gateway-global (not per session/engine) — plain base+path.
+      getLlmStatus: function () { return getJSON(base + "/llm_status"); },
+      setLlmConfig: function (cfg) { return postJSON("/llm_config", cfg || {}); },
     };
   }
 
