@@ -12,6 +12,22 @@ from . import extract
 from . import extract_fold
 from .compute.duckdb_engine import ComputeEngine
 from .sessions import SessionStore
+from pathlib import Path
+
+
+def _load_backend_env(path: "str | None" = None) -> Path:
+    """Load backend/.env into os.environ (override=False) so the LLM route
+    defaults (Vertex project/region, etc.) are present no matter which shell
+    launched the gateway. No-op if the file is absent."""
+    p = Path(path) if path else Path(__file__).resolve().parent.parent / ".env"
+    if p.exists():
+        from dotenv import load_dotenv
+        load_dotenv(p, override=False)
+    return p
+
+
+_load_backend_env()
+
 
 def _status_for(exc: Exception) -> int:
     msg = str(exc).lower()
