@@ -110,33 +110,50 @@ def llm_status() -> dict:
 def _llm(prompt: str, *, schema: Optional[dict] = None, model: Optional[str] = None) -> Any:
     """Return a dict (when schema given) or str. Honors XGRAPH_LLM=stub.
 
-    `model` (optional) overrides the model for THIS call — used to run the cheap,
-    high-volume paths (extraction, fold-checks) on a fast model while leaving the
-    reasoning paths (ask/explain) on the default. Falls back to XGRAPH_LLM_MODEL,
-    then the backend default."""
+    Route (mechanism × auth) comes from resolve_llm_config() — override > env >
+    default. `model` overrides the per-call model."""
     if os.environ.get("XGRAPH_LLM") == "stub":
         raise RuntimeError(
             "XGRAPH_LLM=stub: ask/explain need a real LLM backend "
             "(claude CLI or ANTHROPIC_API_KEY)")
-    # Prefer the SDK when an API key is explicitly set -- a persistent client
-    # with no per-call CLI cold-start (faster on high-volume extraction). With
-    # no key, fall back to the `claude` CLI (the default dev path, no key needed).
-    if os.environ.get("ANTHROPIC_API_KEY"):
-        return _llm_claude_sdk(prompt, schema, model)
-    if shutil.which("claude"):
-        return _llm_claude_cli(prompt, schema, model)
-    raise RuntimeError("no LLM backend: set ANTHROPIC_API_KEY or install the `claude` CLI")
+    cfg = validate_llm_config(resolve_llm_config())
+    if cfg["mechanism"] == "sdk":
+        return _llm_claude_sdk(prompt, schema, model, cfg)
+    if not shutil.which("claude"):
+        raise RuntimeError("mechanism=cli but no `claude` CLI on PATH — pick SDK or install the CLI")
+    return _llm_claude_cli(prompt, schema, model, cfg)
 
 
-def _llm_claude_cli(prompt: str, schema: Optional[dict], model: Optional[str] = None) -> Any:
+def _cli_env(cfg: dict) -> dict:
+    """A copy of os.environ with exactly the auth vars the chosen route needs —
+    so the `claude` subprocess authenticates the same way regardless of how the
+    gateway itself was launched."""
+    env = dict(os.environ)
+    if cfg["auth"] == "vertex":
+        env["CLAUDE_CODE_USE_VERTEX"] = "1"
+        if cfg.get("project"):
+            env["ANTHROPIC_VERTEX_PROJECT_ID"] = cfg["project"]
+        if cfg.get("region"):
+            env["CLOUD_ML_REGION"] = cfg["region"]
+        env.pop("ANTHROPIC_API_KEY", None)
+    elif cfg["auth"] == "apikey":
+        env["ANTHROPIC_API_KEY"] = cfg["api_key"]
+        env.pop("CLAUDE_CODE_USE_VERTEX", None)
+    else:  # cli-login: use the CLI's own stored credentials
+        env.pop("ANTHROPIC_API_KEY", None)
+        env.pop("CLAUDE_CODE_USE_VERTEX", None)
+    return env
+
+
+def _llm_claude_cli(prompt: str, schema: Optional[dict], model: Optional[str], cfg: dict) -> Any:
     cmd = ["claude", "-p", "--output-format", "json"]
     if schema is not None:
         cmd += ["--json-schema", json.dumps(schema)]
-    model = model or os.environ.get("XGRAPH_LLM_MODEL")
-    if model:
-        cmd += ["--model", model]
+    m = model or cfg.get("model")
+    if m:
+        cmd += ["--model", m]
     cmd.append(prompt)
-    proc = subprocess.run(cmd, capture_output=True, text=True,
+    proc = subprocess.run(cmd, capture_output=True, text=True, env=_cli_env(cfg),
                           timeout=int(os.environ.get("XGRAPH_LLM_TIMEOUT", "180")))
     if proc.returncode != 0:
         raise RuntimeError(f"claude -p failed (rc={proc.returncode}): {proc.stderr.strip()[:400]}")
@@ -149,14 +166,17 @@ def _llm_claude_cli(prompt: str, schema: Optional[dict], model: Optional[str] = 
     return wrapper.get("result", "")
 
 
-def _llm_claude_sdk(prompt: str, schema: Optional[dict], model: Optional[str] = None) -> Any:
+def _llm_claude_sdk(prompt: str, schema: Optional[dict], model: Optional[str], cfg: dict) -> Any:
     import anthropic
-    client = anthropic.Anthropic()
-    model = model or os.environ.get("XGRAPH_LLM_MODEL", "claude-opus-4-7")
-    resp = client.messages.create(model=model, max_tokens=2048,
+    if cfg["auth"] == "vertex":
+        client = anthropic.AnthropicVertex(project_id=cfg["project"], region=cfg["region"])
+    else:
+        client = anthropic.Anthropic(api_key=cfg.get("api_key") or None)
+    m = model or cfg.get("model") or _DEFAULT_MODEL
+    resp = client.messages.create(model=m, max_tokens=2048,
                                   messages=[{"role": "user", "content": prompt}])
     text = "".join(b.text for b in resp.content if b.type == "text")
     if schema is None:
         return text
-    m = re.search(r"\{.*\}", text, re.DOTALL)
-    return json.loads(m.group(0)) if m else {}
+    mobj = re.search(r"\{.*\}", text, re.DOTALL)
+    return json.loads(mobj.group(0)) if mobj else {}
