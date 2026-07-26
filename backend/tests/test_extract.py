@@ -257,7 +257,8 @@ def test_read_document_pdf():
     assert "Hello World" in text
 
 
-def test_extract_get_llm_binds_fast_model(monkeypatch):
+def test_extract_get_llm_binds_build_model(monkeypatch):
+    # Build (extraction) is quality-critical → runs on the heavier Opus tier.
     from xgraph_gateway import extract, llm as llmmod
     captured = {}
     def fake_llm(prompt, *, schema=None, model=None):
@@ -267,10 +268,11 @@ def test_extract_get_llm_binds_fast_model(monkeypatch):
     monkeypatch.setattr(extract, "_llm_fn", None)
     extract._get_llm()("hi", schema={})
     assert captured["model"] == extract.EXTRACT_MODEL
-    assert "haiku" in extract.EXTRACT_MODEL
+    assert "opus" in extract.EXTRACT_MODEL
 
 
-def test_fold_get_llm_binds_fast_model(monkeypatch):
+def test_fold_get_llm_binds_build_model(monkeypatch):
+    # Fold-checks are a graph-quality decision (part of building) → Opus too.
     from xgraph_gateway import extract_fold, llm as llmmod
     captured = {}
     def fake_llm(prompt, *, schema=None, model=None):
@@ -279,11 +281,13 @@ def test_fold_get_llm_binds_fast_model(monkeypatch):
     monkeypatch.setattr(llmmod, "_llm", fake_llm)
     monkeypatch.setattr(extract_fold, "_llm_fn", None)
     extract_fold._get_llm()("hi", schema={})
-    assert "haiku" in captured["model"]
+    assert captured["model"] == extract_fold._FOLD_MODEL
+    assert "opus" in captured["model"]
 
 
-def test_nlcypher_get_llm_keeps_default_model(monkeypatch):
-    # ask/explain path must NOT pin a model (keeps the default/Opus).
+def test_nlcypher_get_llm_binds_fast_model(monkeypatch):
+    # ask/explain path (nl2cypher / synthesize / join-SQL) is light and
+    # latency-sensitive → pins the fast (Haiku) tier.
     from xgraph_gateway import nlcypher, llm as llmmod
     captured = {"model": "SENTINEL"}
     def fake_llm(prompt, *, schema=None, model=None):
@@ -292,7 +296,8 @@ def test_nlcypher_get_llm_keeps_default_model(monkeypatch):
     monkeypatch.setattr(llmmod, "_llm", fake_llm)
     monkeypatch.setattr(nlcypher, "_llm_fn", None)
     nlcypher._get_llm()("hi")
-    assert captured["model"] is None
+    assert captured["model"] == llmmod.fast_model()
+    assert "haiku" in captured["model"]
 
 
 def test_extract_chunks_run_concurrently_and_preserve_order():

@@ -39,6 +39,10 @@ class DuckDBComputeEngine:
                 " graph VARCHAR, engine VARCHAR, statement VARCHAR,"
                 " source VARCHAR, ts TIMESTAMP, spec_json VARCHAR,"
                 " PRIMARY KEY (graph, engine))")
+            con.execute(
+                "CREATE TABLE IF NOT EXISTS xgraph_document_texts ("
+                " graph VARCHAR, doc_uri VARCHAR, text VARCHAR,"
+                " char_len INTEGER, PRIMARY KEY (graph, doc_uri))")
             # Migration for DBs created before spec_json existed. Idempotent:
             # ADD COLUMN raises if it already exists, so swallow that one case.
             try:
@@ -108,6 +112,50 @@ class DuckDBComputeEngine:
         finally:
             con.close()
 
+    def record_document_text(self, graph, doc_uri, text):
+        """Upsert the FULL source text for a document, keyed on
+        (graph, doc_uri). Idempotent (DELETE then INSERT). Best-effort
+        provenance -- callers wrap this so a failure never breaks /extract."""
+        text = text or ""
+        con = self._meta_con()
+        try:
+            con.execute(
+                "DELETE FROM xgraph_document_texts WHERE graph = ? AND doc_uri = ?",
+                [graph, doc_uri])
+            con.execute(
+                "INSERT INTO xgraph_document_texts VALUES (?, ?, ?, ?)",
+                [graph, doc_uri, text, len(text)])
+        finally:
+            con.close()
+
+    def has_document_text(self, graph, doc_uri):
+        """Cheap existence check for the /extract reuse-path backfill."""
+        con = self._meta_con()
+        try:
+            row = con.execute(
+                "SELECT 1 FROM xgraph_document_texts"
+                " WHERE graph = ? AND doc_uri = ?", [graph, doc_uri]).fetchone()
+            return row is not None
+        finally:
+            con.close()
+
+    def get_document_text(self, graph, doc_uri, limit=None):
+        """Return {doc_uri, text, char_len, truncated} with text sliced to
+        `limit` (full text when limit is None or >= length); None if no row."""
+        con = self._meta_con()
+        try:
+            row = con.execute(
+                "SELECT text, char_len FROM xgraph_document_texts"
+                " WHERE graph = ? AND doc_uri = ?", [graph, doc_uri]).fetchone()
+            if row is None:
+                return None
+            text, char_len = row[0] or "", row[1] or 0
+            sliced = text if limit is None else text[:limit]
+            return {"doc_uri": doc_uri, "text": sliced, "char_len": char_len,
+                    "truncated": char_len > len(sliced)}
+        finally:
+            con.close()
+
     def record_creation(self, graph, engine, statement, source, spec=None):
         """UPSERT the 'how this graph was created' recipe, keyed on
         (graph, engine). Latest write wins. `spec` (the structured /create
@@ -164,6 +212,7 @@ class DuckDBComputeEngine:
             con.execute("DELETE FROM xgraph_documents WHERE graph = ?", [graph])
             con.execute("DELETE FROM xgraph_ontology WHERE graph = ?", [graph])
             con.execute("DELETE FROM xgraph_creations WHERE graph = ?", [graph])
+            con.execute("DELETE FROM xgraph_document_texts WHERE graph = ?", [graph])
         finally:
             con.close()
 

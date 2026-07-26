@@ -245,3 +245,42 @@ def test_prompts_require_scalar_identity_return_and_untyped_related():
     # untyped relationship for "related to" questions
     assert "(a)-[r]-(b)" in fp
     assert "(a)-[r]-(b)" in kp
+
+
+def test_kinetica_prompt_requires_graph_table_wrapper_form():
+    # The Kinetica dialect must steer the LLM to the SELECT ... FROM graph_table(...)
+    # wrapper (MATCH/RETURN inlined; aggregation/GROUP BY/ORDER BY in the OUTER SELECT),
+    # NOT a bare `GRAPH "g" MATCH ... RETURN ...` (which ignores ORDER BY/aggregation).
+    kp = _capture_prompt("kinetica")
+    assert "graph_table" in kp                       # the wrapper is named
+    assert "FROM graph_table" in kp                  # the SELECT ... FROM shape
+    assert "OUTER SELECT" in kp                      # aggregation/order belong outside
+    # The FalkorDB dialect must NOT mention graph_table (Cypher has no such wrapper).
+    fp = _capture_prompt("falkordb")
+    assert "graph_table" not in fp
+
+
+def test_kinetica_graph_table_query_passes_readonly_validation():
+    # A realistic wrapped Kinetica query (aggregation in the outer SELECT) must
+    # survive the read-only guard — SELECT/graph_table is not a write.
+    q = ('SELECT bank, ROUND(SUM(amount),2) AS total FROM graph_table ( '
+         'GRAPH "expero.banking_graph" MATCH (a:bank)-[:performed]->(w:wire_message) '
+         'RETURN a.bank_name AS bank, w.wire_message_risk_score AS amount ) '
+         'GROUP BY bank ORDER BY total DESC')
+    ok, reason = nlcypher.validate_cypher(q, _SCHEMA)
+    assert ok, reason
+
+
+def test_ask_explain_nlcypher_uses_fast_tier_for_all_engines(monkeypatch):
+    # Ask/Explain (nl2cypher / synthesize / join-SQL) pins the fast Haiku tier
+    # via nlcypher._get_llm — engine-agnostic, so Kinetica Ask/Explain is fast too.
+    from xgraph_gateway import nlcypher as nl, llm as llmmod
+    captured = {"model": "SENTINEL"}
+    def fake_llm(prompt, *, schema=None, model=None):
+        captured["model"] = model
+        return {"cypher": "SELECT 1"}
+    monkeypatch.setattr(llmmod, "_llm", fake_llm)
+    monkeypatch.setattr(nl, "_llm_fn", None)
+    nl.generate_cypher(_SCHEMA, "kinetica", "who?", graph="g")
+    assert captured["model"] == llmmod.fast_model()
+    assert "haiku" in captured["model"]

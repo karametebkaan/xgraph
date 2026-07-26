@@ -19,16 +19,22 @@ _llm_fn: Optional[LLMFunc] = None
 
 
 def _get_llm() -> LLMFunc:
-    """Lazily bind the local `_llm` the first time a real call is needed.
+    """Lazily bind the local `_llm` (on the FAST model) the first time a real
+    call is needed. These are light, latency-sensitive interactive calls
+    (nl2cypher / synthesize / join-SQL) — the fast tier keeps Ask/Explain snappy
+    while extraction/building stays on the heavier default model.
 
     Deferred (rather than a top-level import) so importing this module never
     requires the `claude` CLI to be present, and so tests can inject a fake
-    `llm` and never shell out.
+    `llm` (called without a `model` kwarg) and never shell out.
     """
     global _llm_fn
     if _llm_fn is None:
-        from .llm import _llm
-        _llm_fn = _llm
+        from .llm import _llm, fast_model
+
+        def _fast(prompt, schema=None):
+            return _llm(prompt, schema=schema, model=fast_model())
+        _llm_fn = _fast
     return _llm_fn
 
 
@@ -103,24 +109,55 @@ Target dialect: openCypher, as implemented by FalkorDB. Rules (MUST follow):
 """
 
 _DIALECT_KINETICA = """\
-Target dialect: Kinetica GQL. Rules (MUST follow):
-- Start the query with: GRAPH "{graph}" MATCH ... RETURN ...  (the graph name IS quoted).
+Target dialect: Kinetica GQL, wrapped as a SQL SELECT over graph_table(). Rules (MUST follow):
+- ALWAYS emit this exact TWO-LEVEL shape — the graph pattern goes INSIDE graph_table(), and every
+  aggregate / GROUP BY / ORDER BY / LIMIT goes in the OUTER SELECT:
+    SELECT <columns and/or aggregates>
+    FROM graph_table (
+      GRAPH "{graph}"
+      MATCH <pattern>
+      RETURN [DISTINCT] <inner scalar columns, each with an AS alias>
+    )
+    [WHERE <filter on the returned aliases>]
+    [GROUP BY <alias(es)>]
+    [ORDER BY <alias> DESC]
+    [LIMIT <n>]
+  NEVER emit a bare `GRAPH "..." MATCH ... RETURN ...` without the `SELECT ... FROM graph_table( ... )`
+  wrapper — a bare GQL statement does not honor ORDER BY / GROUP BY / aggregation.
+- Inside graph_table() put ONLY `GRAPH "{graph}" MATCH ... RETURN ...` (the graph name IS quoted).
+  Do NOT put GROUP BY, ORDER BY, LIMIT, or aggregate functions (SUM/COUNT/MIN/MAX/AVG) inside
+  graph_table(); those belong ONLY in the OUTER SELECT.
+- The inner RETURN must project (with an `AS` alias) EVERY column the outer SELECT references —
+  including any column used only for ORDER BY, GROUP BY, or an aggregate. Example (order organizations
+  by a person's age — age MUST be returned by the inner RETURN so the outer ORDER BY can use it):
+    SELECT name, type
+    FROM graph_table ( GRAPH "{graph}" MATCH (p:Person)-[:WORKS_AT]->(o:Organization)
+      RETURN o.entity_name AS name, o.LABEL AS type, p.age AS age )
+    ORDER BY age DESC
+    LIMIT 1
+- Put aggregates in the OUTER SELECT over the inner aliases, e.g. total/max over transactions:
+    SELECT bank, ROUND(SUM(amount),2) AS total_transaction, MAX(risk) AS max_risk
+    FROM graph_table ( GRAPH "{graph}" MATCH (a:bank)-[:performed]->(w:wire_message)-[:is_for_transaction]->(t:banking_transaction)
+      RETURN a.bank_name AS bank, t.banking_transaction_amount AS amount, w.wire_message_risk_score AS risk )
+    GROUP BY bank
+    ORDER BY total_transaction DESC
 - Predicates may be written inline in the node pattern, e.g. (a:bank WHERE a.NODE = '...'),
-  or as a trailing WHERE after the MATCH — either is fine.
-- ALWAYS RETURN the human-readable identity of every entity the question is about as SCALAR columns —
-  its name property AND its label, e.g. `RETURN b.entity_name AS name, b.LABEL AS type`. Do NOT return
-  a bare node object; the English answer is built from the scalar columns.
+  or as a trailing WHERE inside graph_table after the MATCH — either is fine.
+- ALWAYS project the human-readable identity of every entity the question is about as inner scalar
+  columns and surface them in the outer SELECT — its name property AND its label, e.g.
+  `RETURN b.entity_name AS name, b.LABEL AS type`. Do NOT return a bare node object; the English
+  answer is built from the scalar columns.
 - For "who/what is related to / connected to / neighbours of X" questions that do NOT name a specific
   relationship, use an UNTYPED relationship `(a)-[r]-(b)` (both directions) so ALL relationship types
   are captured — do not pick a single named type.
 - Reversed edges are kept verbatim: (e)<-[:manages]-(g) stays exactly like that.
-- GROUP BY is implicit: the non-aggregated RETURN columns are the grouping keys; never
-  write a GROUP BY keyword. Use ROUND(SUM(...), 0) etc. for aggregates as needed.
-- Wrap column-number ORDER BY as an alias instead (ORDER BY <alias> DESC), not ORDER BY 3.
+- In the OUTER SELECT, ORDER BY a column ALIAS (ORDER BY total_transaction DESC), never a bare column
+  number (not `ORDER BY 3`).
 - Kinetica GQL does NOT support `EXISTS {{ ... }}` subquery blocks or negated path patterns
   (`WHERE NOT (a)-[...]->(...)`). For a "NOT related to X" question, match the relationship and
   negate a SCALAR predicate instead, e.g.:
-    GRAPH "{graph}" MATCH (p:Person)-[:WORKS_AT]->(o:Organization) WHERE o.entity_name <> 'Kinetica' RETURN p.entity_name
+    SELECT person FROM graph_table ( GRAPH "{graph}" MATCH (p:Person)-[:WORKS_AT]->(o:Organization)
+      WHERE o.entity_name <> 'Kinetica' RETURN p.entity_name AS person )
   (this returns nodes linked to a DIFFERENT value; it cannot express "linked to nothing").
 - Match names/free-text LOOSELY and case-INSENSITIVELY with `LOWER(...) LIKE` and a lowercased
   wildcard pattern, NOT exact `=` (Kinetica LIKE is case-sensitive):
@@ -132,7 +169,7 @@ Target dialect: Kinetica GQL. Rules (MUST follow):
   an explicit id/key. Never reference a property that is not listed for that label.
 - Read-only ONLY: never CREATE/MERGE/DELETE/SET/REMOVE/DROP/etc.
 - Use ONLY the node labels and relationship types listed in the schema below. Add a
-  sensible LIMIT (<= 100) unless the question calls for an aggregate over everything.
+  sensible LIMIT (<= 100) in the OUTER SELECT unless the question calls for an aggregate over everything.
 """
 
 

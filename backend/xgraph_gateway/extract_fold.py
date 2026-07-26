@@ -17,8 +17,10 @@ LLMFunc = Callable[..., Any]
 _ENTITY_AXIS = "EntityType"
 _RELATION_AXIS = "RelationType"
 
-# Fold-checks are trivial yes/no synonym decisions — run on the fast model too.
-_FOLD_MODEL = os.environ.get("XGRAPH_EXTRACT_MODEL", "claude-haiku-4-5-20251001")
+# Fold-checks decide whether two names are the same entity — a graph-quality
+# decision, part of building — so keep them on the heavier model like extraction.
+# Shares the XGRAPH_EXTRACT_MODEL knob so one setting tunes all of building.
+_FOLD_MODEL = os.environ.get("XGRAPH_EXTRACT_MODEL", "claude-opus-4-8")
 
 _llm_fn: Optional[LLMFunc] = None
 

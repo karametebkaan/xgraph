@@ -25,7 +25,17 @@ VALID_COMBOS = {
     ("cli", "vertex"), ("cli", "apikey"), ("cli", "cli-login"),
     ("sdk", "apikey"), ("sdk", "vertex"),
 }
+# The general/default model — used for the heavier work (extraction/building,
+# and any call that doesn't ask for the fast tier). Override with XGRAPH_LLM_MODEL.
 _DEFAULT_MODEL = "claude-opus-4-8"
+# The fast tier — for the light interactive Query/Explain calls (nl2cypher,
+# synthesize, join-SQL). Override with XGRAPH_LLM_FAST_MODEL.
+_FAST_MODEL = "claude-haiku-4-5-20251001"
+
+
+def fast_model() -> str:
+    """Model for light, latency-sensitive interactive calls (ask/explain)."""
+    return os.environ.get("XGRAPH_LLM_FAST_MODEL") or _FAST_MODEL
 
 
 def _env_truthy(name: str) -> bool:
@@ -63,8 +73,6 @@ def resolve_llm_config() -> dict:
         model, src["model"] = o["model"], "override"
     elif os.environ.get("XGRAPH_LLM_MODEL"):
         model, src["model"] = os.environ["XGRAPH_LLM_MODEL"], "env"
-    elif os.environ.get("ANTHROPIC_DEFAULT_OPUS_MODEL"):
-        model, src["model"] = os.environ["ANTHROPIC_DEFAULT_OPUS_MODEL"], "env"
     else:
         model, src["model"] = _DEFAULT_MODEL, "default"
 
@@ -103,8 +111,8 @@ def llm_status() -> dict:
     """Safe projection for the UI — never includes the raw api_key."""
     eff = resolve_llm_config()
     return {"mechanism": eff["mechanism"], "auth": eff["auth"], "project": eff["project"],
-            "region": eff["region"], "model": eff["model"], "sources": eff["sources"],
-            "has_api_key": bool(eff.get("api_key"))}
+            "region": eff["region"], "model": eff["model"], "fast_model": fast_model(),
+            "sources": eff["sources"], "has_api_key": bool(eff.get("api_key"))}
 
 
 def _llm(prompt: str, *, schema: Optional[dict] = None, model: Optional[str] = None) -> Any:
@@ -122,6 +130,21 @@ def _llm(prompt: str, *, schema: Optional[dict] = None, model: Optional[str] = N
     if not shutil.which("claude"):
         raise RuntimeError("mechanism=cli but no `claude` CLI on PATH — pick SDK or install the CLI")
     return _llm_claude_cli(prompt, schema, model, cfg)
+
+
+def warmup() -> None:
+    """Best-effort: fire one tiny LLM call so the CLI spin-up + GCP ADC token
+    exchange + Vertex cold start happen BEFORE the user's first Ask/Explain
+    (otherwise that first call pays ~a minute of cold start). No-ops on any
+    failure, when the LLM is stubbed, or when XGRAPH_LLM_WARMUP is falsy."""
+    if os.environ.get("XGRAPH_LLM") == "stub":
+        return
+    if os.environ.get("XGRAPH_LLM_WARMUP", "1").lower() in ("0", "false", "no"):
+        return
+    try:
+        _llm("ok")
+    except Exception:
+        pass
 
 
 def _cli_env(cfg: dict) -> dict:

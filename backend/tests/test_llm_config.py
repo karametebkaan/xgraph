@@ -22,6 +22,13 @@ def test_default_is_cli_login_when_nothing_set():
     assert cfg["sources"]["auth"] == "default"
 
 
+def test_fast_model_is_haiku_and_status_exposes_both():
+    assert llm.fast_model() == "claude-haiku-4-5-20251001"
+    st = llm.llm_status()
+    assert st["model"] == "claude-opus-4-8"          # default/build tier
+    assert st["fast_model"] == "claude-haiku-4-5-20251001"  # ask/explain tier
+
+
 def test_env_vertex_becomes_default_auth(monkeypatch):
     monkeypatch.setenv("CLAUDE_CODE_USE_VERTEX", "1")
     monkeypatch.setenv("ANTHROPIC_VERTEX_PROJECT_ID", "proj-x")

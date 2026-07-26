@@ -34,3 +34,6 @@ data/xgraph_meta.duckdb
 
 # Local dev tooling (esbuild for JSX syntax checks)
 node_modules/
+
+# Claude Code local settings + worktrees
+.claude/

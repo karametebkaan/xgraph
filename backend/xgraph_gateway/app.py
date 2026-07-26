@@ -455,6 +455,14 @@ def create_app(adapter_factory=registry.get_adapter, compute=None, store=None) -
             # row -- see below) both correctly fall through to re-extraction.
             if existing is not None and existing.get("sha256") == sha:
                 record = store.record_document(graph, doc_uri, sha, source_type)
+                # Backfill text for a graph extracted before this feature (or
+                # whose text row was lost) when the same bytes are re-submitted.
+                # Only when missing, so normal reuse does no extra work.
+                try:
+                    if not store.has_document_text(graph, doc_uri):
+                        store.record_document_text(graph, doc_uri, doc)
+                except Exception:
+                    pass
                 doc_info = {"doc_uri": doc_uri, "sha256": sha, **record}
                 return {"graph": graph, "entities": 0, "relations": 0,
                         "entities_new": 0, "relations_new": 0,
@@ -472,6 +480,13 @@ def create_app(adapter_factory=registry.get_adapter, compute=None, store=None) -
             # ledger row exists, so resubmitting the same bytes retries
             # cleanly instead of being a permanent no-op.
             record = store.record_document(graph, doc_uri, sha, source_type)
+            # Best-effort full-text provenance -- must never fail the extract
+            # result (ingest + ledger already succeeded). Separate table so the
+            # /documents list stays light; served on demand by /document_text.
+            try:
+                store.record_document_text(graph, doc_uri, doc)
+            except Exception:
+                pass
             doc_info = {"doc_uri": doc_uri, "sha256": sha, **record}
             return {"graph": graph, "entities": out["nodes"], "relations": out["edges"],
                     "entities_new": out.get("nodes_created", out["nodes"]),
@@ -486,6 +501,20 @@ def create_app(adapter_factory=registry.get_adapter, compute=None, store=None) -
     def documents(graph: str, engine: str = "", session: str | None = None):
         try:
             return {"documents": _resolve_compute(session).list_documents(graph)}
+        except Exception as e:
+            return _err(engine, e)
+
+    @app.get("/document_text")
+    def document_text(graph: str, doc_uri: str, engine: str = "",
+                      session: str | None = None, limit: int = 20000):
+        try:
+            got = _resolve_compute(session).get_document_text(graph, doc_uri, limit)
+            if got is None:
+                # No stored text (pre-feature graph or failed capture). Return
+                # an empty shape rather than an error so the panel can render a
+                # "not captured" note without special-casing an error envelope.
+                return {"doc_uri": doc_uri, "text": "", "char_len": 0, "truncated": False}
+            return got
         except Exception as e:
             return _err(engine, e)
 
@@ -545,6 +574,12 @@ def create_app(adapter_factory=registry.get_adapter, compute=None, store=None) -
             return llm.llm_status()
         except Exception as e:
             return _err("", e)
+
+    @app.on_event("startup")
+    def _warmup_llm():
+        # Warm the LLM path in the background so the first Ask/Explain isn't cold.
+        import threading
+        threading.Thread(target=llm.warmup, daemon=True).start()
 
     @app.post("/hydrate")
     def hydrate(payload: dict = Body(...)):

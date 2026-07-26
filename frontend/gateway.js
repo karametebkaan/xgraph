@@ -142,6 +142,12 @@
       documents: function (graph) { return getJSON(q("/documents?graph=" + encodeURIComponent(graph))); },
       graphDdl: function (graph) { return getJSON(q("/graph_ddl?graph=" + encodeURIComponent(graph))); },
       sourcePreview: function (source) { return getJSON(q("/source_preview?source=" + encodeURIComponent(source))); },
+      documentText: function (graph, docUri, limit) {
+        var qs = "/document_text?graph=" + encodeURIComponent(graph) +
+                 "&doc_uri=" + encodeURIComponent(docUri) +
+                 (limit != null ? "&limit=" + encodeURIComponent(limit) : "");
+        return getJSON(q(qs));
+      },
       tables: function () { return getJSON(q("/tables")); },
       columns: function (table) { return getJSON(q("/columns?table=" + encodeURIComponent(table))); },
       grammar: function () { return getJSON(q("/grammar")); },

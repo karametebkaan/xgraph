@@ -36,8 +36,40 @@ server-side.
   Parquet (`compute.run_join`) → aggregated table → `synthesize`. Auto-triggers when a focus +
   hydrate source are present; falls back to the plain semantic answer otherwise. Endpoint `/explain`,
   panel surfaces the generated SQL + ranked table.
+- **LLM route + two-tier model (2026-07-26): done (uncommitted working tree).** The LLM backend is a
+  gateway-global, in-memory route config in `llm.py` — Mechanism (`cli`|`sdk`) × Auth
+  (`vertex`|`apikey`|`cli-login`), resolved override > env > `backend/.env` > default (default route =
+  Vertex). `app.py` loads `backend/.env` at startup and exposes `GET /llm_status` (safe projection,
+  `has_api_key` bool only — never the key) + `POST /llm_config`. The Setup panel has an **interactive
+  two-axis picker** (Mechanism × Auth + Vertex project/region or API-key field + Build-model) driven by
+  `gateway.js` `getLlmStatus()`/`setLlmConfig()`. The route is **applied by Connect** (folded into
+  `handleConnectAxes` so Setup has one commit button — no separate Apply); a bad route surfaces in the
+  LLM status line without blocking the graph connect. The footer status bar shows the live route + both
+  model tiers. Plan/spec: `docs/superpowers/{plans,specs}/*vertex-llm-route*`.
+  - **Two model tiers:** **Build** (extract + fold, quality-critical) runs on **Opus**
+    (`claude-opus-4-8`, `XGRAPH_EXTRACT_MODEL` in `extract.py`/`extract_fold.py`); **Ask/Explain**
+    (nl2cypher, synthesize, join-SQL — light, latency-sensitive) run on the **fast Haiku** tier
+    (`llm.fast_model()` = `claude-haiku-4-5-20251001`, `XGRAPH_LLM_FAST_MODEL`; `nlcypher._get_llm`
+    pins it). `llm_status()` exposes both `model` and `fast_model`.
+  - **Warmup:** `llm.warmup()` fires one tiny call in a daemon thread on gateway startup so the first
+    Ask/Explain skips CLI + GCP ADC + Vertex cold start. Disable with `XGRAPH_LLM_WARMUP=0`.
+- **Storage source-text + three UX fixes (2026-07-26): done (frontend v0.18.2).**
+  - **Extracted source text in Storage:** `/extract` persists the full source text (file + pasted)
+    into `xgraph_document_texts(graph,doc_uri,text,char_len)`; `GET /document_text` serves it (default
+    20000-char cap); StoragePanel provenance rows expand to show it. `gateway.js documentText()`.
+  - **Query-tab `+` crash fixed:** the tab-strip `+` wired `onClick={addQueryTab}`, so React passed a
+    SyntheticEvent as `initialSql`; `QueryPanel` then seeded `sql` with an event object and
+    `sql.trim()` threw, blowing the session. `addQueryTab` now guards `typeof initialSql === 'string'`.
+  - **Kinetica Ask/Explain dialect:** `nlcypher._DIALECT_KINETICA` now steers the LLM to the
+    `SELECT … FROM graph_table(GRAPH "g" MATCH … RETURN …) [WHERE/GROUP BY/ORDER BY/LIMIT]` wrapper
+    (bare GQL ignores ORDER BY/aggregation); FalkorDB stays plain openCypher. Ask/Explain already runs
+    on the fast Haiku tier for all engines (locked by a test).
+  - **Unsaved-graph warning:** switching graphs (List select) or building one (Build/extract) when a
+    graph is loaded pops a confirm modal — "The current graph `<foo>` and its queries will be lost
+    unless Saved" (Save & Continue / Continue / Cancel) — mirroring the explorer project's
+    confirm-before-lose pattern (`confirmSessionChange` / `sessionChangePrompt` in `XGraph.html`).
 - **`README.md`** documents the project and features the Explain post-join use case (screenshots in
-  `docs/images/`).
+  `docs/images/`; the Setup shot is the live Kinetica `expero.banking_graph` route).
 - Design spec and implementation plans live in `docs/superpowers/specs/` and
   `docs/superpowers/plans/` — these are **local and uncommitted** (see the no-commit rule below), so
   read them from disk, not git.

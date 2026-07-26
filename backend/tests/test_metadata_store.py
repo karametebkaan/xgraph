@@ -323,3 +323,56 @@ def test_get_creation_migrates_legacy_table_without_spec_json(tmp_path):
     # New writes on the migrated table carry spec.
     eng.record_creation("new", "falkordb", "-- new", "create", spec={"graph": "new"})
     assert eng.get_creation("new")["spec"] == {"graph": "new"}
+
+
+# ---------------------------------------------------------------------------
+# Document text storage (extracted source-text persistence)
+# ---------------------------------------------------------------------------
+
+def test_document_text_round_trip(tmp_path):
+    eng = _engine(tmp_path)
+    eng.record_document_text("g1", "doc:a", "hello world")
+    got = eng.get_document_text("g1", "doc:a")
+    assert got == {"doc_uri": "doc:a", "text": "hello world",
+                   "char_len": 11, "truncated": False}
+
+
+def test_document_text_limit_slices_and_flags_truncated(tmp_path):
+    eng = _engine(tmp_path)
+    eng.record_document_text("g1", "doc:a", "abcdefghij")  # 10 chars
+    got = eng.get_document_text("g1", "doc:a", limit=4)
+    assert got["text"] == "abcd"
+    assert got["char_len"] == 10
+    assert got["truncated"] is True
+    # limit >= length -> not truncated, full text
+    full = eng.get_document_text("g1", "doc:a", limit=10)
+    assert full["text"] == "abcdefghij"
+    assert full["truncated"] is False
+
+
+def test_document_text_upsert_replaces(tmp_path):
+    eng = _engine(tmp_path)
+    eng.record_document_text("g1", "doc:a", "first")
+    eng.record_document_text("g1", "doc:a", "second version")
+    got = eng.get_document_text("g1", "doc:a")
+    assert got["text"] == "second version"
+    assert got["char_len"] == 14
+
+
+def test_has_document_text(tmp_path):
+    eng = _engine(tmp_path)
+    assert eng.has_document_text("g1", "doc:a") is False
+    eng.record_document_text("g1", "doc:a", "x")
+    assert eng.has_document_text("g1", "doc:a") is True
+
+
+def test_get_document_text_missing_returns_none(tmp_path):
+    eng = _engine(tmp_path)
+    assert eng.get_document_text("g1", "nope") is None
+
+
+def test_clear_graph_metadata_removes_text(tmp_path):
+    eng = _engine(tmp_path)
+    eng.record_document_text("g1", "doc:a", "hello")
+    eng.clear_graph_metadata("g1")
+    assert eng.get_document_text("g1", "doc:a") is None

@@ -167,6 +167,22 @@ const run = async () => {
   assert.ok(!("session" in llmBody), "llm_config body must not carry a session");
   console.log("ok: llm status/config client");
 
+  // documentText -> GET /document_text with encoded graph/doc_uri (+ optional limit)
+  const dtUrls = [];
+  const dtClient = g.makeClient("http://gw", "falkordb", fakeFetch((url) => {
+    dtUrls.push(url);
+    if (url.startsWith("http://gw/document_text")) {
+      return { doc_uri: "text:abc", text: "hello", char_len: 5, truncated: false };
+    }
+    return {};
+  }));
+  const dt = await dtClient.documentText("g one", "text:abc", 4);
+  assert.deepEqual(dt, { doc_uri: "text:abc", text: "hello", char_len: 5, truncated: false });
+  const dtUrl = dtUrls[dtUrls.length - 1];
+  assert.ok(dtUrl.includes("graph=g%20one"), "graph is URL-encoded");
+  assert.ok(dtUrl.includes("doc_uri=text%3Aabc"), "doc_uri is URL-encoded");
+  assert.ok(dtUrl.includes("limit=4"), "limit is included when provided");
+
   console.log("client OK");
 };
 run();

@@ -1,4 +1,5 @@
 from __future__ import annotations
+import os
 from falkordb import FalkorDB
 from falkordb import Node as FalkorNode
 from falkordb import Edge as FalkorEdge
@@ -323,7 +324,17 @@ class FalkorDBAdapter(GraphEngineAdapter):
         self._host = host
         self._port = port
         self._password = password
-        self._db = FalkorDB(host=host, port=port, password=password)
+        # Socket timeouts so an unresponsive/wedged server fails fast into the
+        # gateway's 502/504 envelope instead of hanging Connect forever. A wedged
+        # server accepts the TCP handshake (connect_timeout is not enough) but
+        # never answers commands -- socket_timeout bounds that read. It must
+        # exceed the 60s server-side query timeout (run_query timeout=60000), so
+        # default 65s; connect is fast, so 5s. Both env-overridable.
+        self._db = FalkorDB(
+            host=host, port=port, password=password,
+            socket_connect_timeout=float(os.environ.get("XGRAPH_FALKORDB_CONNECT_TIMEOUT", "5")),
+            socket_timeout=float(os.environ.get("XGRAPH_FALKORDB_SOCKET_TIMEOUT", "65")),
+        )
 
     def _graph(self, graph):
         return self._db.select_graph(graph)

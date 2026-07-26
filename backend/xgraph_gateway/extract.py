@@ -17,9 +17,11 @@ from typing import Any, Callable, Optional
 
 LLMFunc = Callable[..., Any]
 
-# Extraction is high-volume and structural, not reasoning-heavy — run it on a
-# fast, cheap model by default (overridable). ask/explain keep the default.
-EXTRACT_MODEL = os.environ.get("XGRAPH_EXTRACT_MODEL", "claude-haiku-4-5-20251001")
+# Extraction/building is the quality-critical step (entity + relation extraction
+# from prose), so default it to the heavier model. Override with
+# XGRAPH_EXTRACT_MODEL (e.g. a Haiku id) to trade quality for speed/cost.
+# The light interactive ask/explain calls use the fast tier instead (nlcypher).
+EXTRACT_MODEL = os.environ.get("XGRAPH_EXTRACT_MODEL", "claude-opus-4-8")
 
 _llm_fn: Optional[LLMFunc] = None
 

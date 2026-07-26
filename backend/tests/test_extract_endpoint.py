@@ -293,3 +293,56 @@ def test_stale_session_falls_back_to_engine(tmp_path):
     r = _client(tmp_path).get("/graphs", params={"session": "s999", "engine": "fake"})
     assert r.status_code == 200
     assert r.json() == ["demo_graph"]  # FakeAdapter.list_graphs()
+
+
+def test_extract_persists_document_text(monkeypatch, tmp_path):
+    _patch_extract_document(monkeypatch)
+    client = _client(tmp_path)
+    r = client.post("/extract", data={"graph": "g1", "text": "hello source text", "engine": "fake"})
+    assert r.status_code == 200
+    doc_uri = r.json()["document"]["doc_uri"]
+    got = client.get("/document_text", params={"graph": "g1", "doc_uri": doc_uri})
+    assert got.status_code == 200
+    body = got.json()
+    assert body["text"] == "hello source text"
+    assert body["char_len"] == len("hello source text")
+    assert body["truncated"] is False
+
+
+def test_document_text_limit_truncates(monkeypatch, tmp_path):
+    _patch_extract_document(monkeypatch)
+    client = _client(tmp_path)
+    client.post("/extract", data={"graph": "g1", "text": "abcdefghij", "engine": "fake"})
+    doc_uri = "text:" + __import__("hashlib").sha256("abcdefghij".encode()).hexdigest()[:12]
+    got = client.get("/document_text", params={"graph": "g1", "doc_uri": doc_uri, "limit": 4})
+    body = got.json()
+    assert body["text"] == "abcd"
+    assert body["char_len"] == 10
+    assert body["truncated"] is True
+
+
+def test_document_text_missing_returns_empty(tmp_path):
+    got = _client(tmp_path).get("/document_text", params={"graph": "g1", "doc_uri": "text:nope"})
+    assert got.status_code == 200
+    assert got.json() == {"doc_uri": "text:nope", "text": "", "char_len": 0, "truncated": False}
+
+
+def test_extract_reuse_backfills_missing_text(monkeypatch, tmp_path):
+    # First extraction stores text normally. Simulate a pre-feature graph by
+    # deleting the text row, then re-submit identical bytes: the reuse
+    # short-circuit (entities == 0) must backfill the text.
+    _patch_extract_document(monkeypatch)
+    compute = DuckDBComputeEngine(meta_path=str(tmp_path / "meta.duckdb"))
+    client = TestClient(create_app(adapter_factory=lambda e: FakeAdapter(), compute=compute))
+    r1 = client.post("/extract", data={"graph": "g1", "text": "reuse me", "engine": "fake"})
+    doc_uri = r1.json()["document"]["doc_uri"]
+    compute.clear_graph_metadata("g1")  # wipes text row (and ledger)
+    # re-record ONLY the ledger row so the reuse short-circuit path is taken
+    import hashlib
+    sha = hashlib.sha256("reuse me".encode()).hexdigest()
+    compute.record_document("g1", doc_uri, sha, "text")
+    assert compute.has_document_text("g1", doc_uri) is False
+    r2 = client.post("/extract", data={"graph": "g1", "text": "reuse me", "engine": "fake"})
+    assert r2.json()["document"]["reused"] is True
+    assert compute.has_document_text("g1", doc_uri) is True
+    assert compute.get_document_text("g1", doc_uri)["text"] == "reuse me"

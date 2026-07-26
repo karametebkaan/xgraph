@@ -47,7 +47,7 @@
 const { useState, useEffect, useRef, useCallback, useMemo } = React;
 
 /* ═══════════════════════ CONSTANTS ════════════════════════ */
-const EXPLORER_VERSION = "0.15.0";  // xGraph version — bump on frontend changes so a stale browser cache is visible
+const EXPLORER_VERSION = "0.18.2";  // xGraph version — bump on frontend changes so a stale browser cache is visible
 const SAFETY_TIMEOUT_MS = 10 * 60 * 1000;
 const PALETTE = [
     { solid: '#0984e3', light: '#e1f0fb' }, { solid: '#00cec9', light: '#e0f9f8' },
@@ -6524,13 +6524,17 @@ function SetupPanel(props) {
     var olapEngine = props.olapEngine, setOlapEngine = props.setOlapEngine;
     var olapConn = props.olapConn, setOlapConn = props.setOlapConn;
     var llmConn = props.llmConn, setLlmConn = props.setLlmConn;
-    var llmStatus = props.llmStatus, onApplyLlm = props.onApplyLlm;
+    var llmStatus = props.llmStatus;
     var gatewayBase = props.gatewayBase, setGatewayBase = props.setGatewayBase;
     var onConnect = props.onConnect, connectStatus = props.connectStatus || {};
 
     var inp = { width:'100%', padding:'9px 11px', border:'1px solid #dfe6e9', borderRadius:6, boxSizing:'border-box', fontSize:13, marginBottom:10, background:'#fff', outline:'none', fontFamily:'inherit' };
     var radioLbl = { display:'inline-flex', alignItems:'center', gap:5, cursor:'pointer', fontSize:13, fontWeight:600, color:'#2d3436', marginRight:18 };
     var group = { marginBottom:20, paddingBottom:16, borderBottom:'1px solid #f1f2f6' };
+    // Columnar Setup: Graph | OLAP/Ingest | LLM are side-by-side cards (they wrap
+    // to a single column on narrow screens); Connect spans all three below.
+    var col = { flex:'1 1 270px', minWidth:0, boxSizing:'border-box', border:'1px solid #eef0f2', borderRadius:8, padding:16, background:'#fbfcfd' };
+    var colTitle = { fontWeight:800, fontSize:12, letterSpacing:'0.4px', textTransform:'uppercase', color:'#0984e3', margin:'0 0 12px', paddingBottom:8, borderBottom:'2px solid #eaeef1' };
 
     var setGraphField = function(k, v) { setGraphConn(function(prev){ var n = Object.assign({}, prev); n[k] = v; return n; }); };
     var setOlapField = function(k, v) { setOlapConn(function(prev){ var n = Object.assign({}, prev); n[k] = v; return n; }); };
@@ -6539,15 +6543,29 @@ function SetupPanel(props) {
     var pwType = showPw ? 'text' : 'password';
 
     return (
-        <div style={{ width:460, maxWidth:'100%', textAlign:'left', background:'#fff', border:'1px solid #dfe6e9', borderRadius:10, padding:24, boxShadow:'0 2px 8px rgba(0,0,0,0.04)' }}>
-            <h2 style={{ fontWeight:700, fontSize:18, margin:'0 0 10px', color:'#2d3436' }}>Setup</h2>
-            <label style={{ display:'flex', alignItems:'center', gap:6, fontSize:12, color:'#636e72', margin:'0 0 16px', cursor:'pointer' }}>
-                <input type="checkbox" checked={showPw} onChange={function(e){ setShowPw(e.target.checked); }} /> Show passwords
-            </label>
+        <div style={{ width:'100%', maxWidth:980, margin:'0 auto', textAlign:'left', background:'#fff', border:'1px solid #dfe6e9', borderRadius:10, padding:24, boxShadow:'0 2px 8px rgba(0,0,0,0.04)' }}>
+            <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', margin:'0 0 16px' }}>
+                <h2 style={{ fontWeight:700, fontSize:18, margin:0, color:'#2d3436' }}>Setup</h2>
+                <button type="button" onClick={function(){ setShowPw(!showPw); }}
+                    title={showPw ? 'Hide passwords' : 'Show passwords'}
+                    aria-label={showPw ? 'Hide passwords' : 'Show passwords'} aria-pressed={showPw}
+                    style={{ display:'inline-flex', alignItems:'center', justifyContent:'center', width:32, height:32, padding:0, borderRadius:6, cursor:'pointer', background: showPw ? '#e1f0fb' : 'transparent', border:'1px solid ' + (showPw ? '#74b9ff' : '#dfe6e9'), color: showPw ? '#0984e3' : '#636e72', transition:'0.15s' }}>
+                    {showPw ? (
+                        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+                    ) : (
+                        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                    )}
+                </button>
+            </div>
+
+            {/* Three columns: Graph | OLAP/Ingest | LLM — each an explicit card.
+                They wrap to one column on narrow screens; Connect spans all
+                three at the centered bottom. */}
+            <div style={{ display:'flex', gap:16, flexWrap:'wrap', alignItems:'stretch' }}>
 
             {/* Graph engine */}
-            <div style={group}>
-                <Label>Graph engine</Label>
+            <div style={col}>
+                <div style={colTitle}>Graph</div>
                 <div style={{ marginBottom:10 }}>
                     <label style={radioLbl}><input type="radio" checked={graphEngine === 'falkordb'} onChange={function(){ setGraphEngine('falkordb'); }}/> FalkorDB</label>
                     <label style={radioLbl}><input type="radio" checked={graphEngine === 'kinetica'} onChange={function(){ setGraphEngine('kinetica'); }}/> Kinetica</label>
@@ -6574,8 +6592,8 @@ function SetupPanel(props) {
             </div>
 
             {/* OLAP / ingest */}
-            <div style={group}>
-                <Label>OLAP / ingest</Label>
+            <div style={col}>
+                <div style={colTitle}>OLAP / Ingest</div>
                 <div style={{ marginBottom:10 }}>
                     <label style={radioLbl}><input type="radio" checked={olapEngine === 'duckdb'} onChange={function(){ setOlapEngine('duckdb'); }}/> DuckDB</label>
                     <label style={radioLbl}><input type="radio" checked={olapEngine === 'kinetica'} onChange={function(){ setOlapEngine('kinetica'); }}/> Kinetica</label>
@@ -6596,10 +6614,12 @@ function SetupPanel(props) {
                 )}
             </div>
 
-            {/* LLM route — Mechanism × Auth. Config is gateway-global; Apply
-                POSTs /llm_config and the status line reflects /llm_status. */}
-            <div style={group}>
-                <Label>LLM route</Label>
+            {/* LLM route — Mechanism × Auth. Config is gateway-global and is
+                applied by Connect (one commit button on Setup); the status line
+                reflects /llm_status. Model is the Build tier (extract/fold,
+                Opus); Ask/Explain use the fast tier (Haiku), shown below. */}
+            <div style={col}>
+                <div style={colTitle}>LLM</div>
                 <div style={{ display:'flex', gap:12, marginBottom:10 }}>
                     <div style={{ flex:1 }}>
                         <Label>Mechanism</Label>
@@ -6634,21 +6654,20 @@ function SetupPanel(props) {
                 ) : (
                     <p style={{ fontSize:12, color:'#b2bec3', margin:'0 0 8px' }}>Uses the claude CLI's own stored login.</p>
                 )}
-                <Label>Model (optional)</Label>
+                <Label>Build model (optional)</Label>
                 <input style={inp} value={llmConn.model || ''} onChange={function(e){ setLlmField('model', e.target.value); }} placeholder="claude-opus-4-8" />
-                <button type="button" onClick={onApplyLlm} style={{
-                    padding:'8px 16px', border:'none', borderRadius:6, cursor:'pointer',
-                    fontWeight:700, color:'#fff', fontSize:12, fontFamily:'inherit',
-                    background:'linear-gradient(135deg,#0984e3,#0872c4)',
-                }}>Apply LLM route</button>
+                <p style={{ fontSize:11, color:'#b2bec3', margin:'2px 0 0' }}>Applied when you click <strong>Connect</strong> below.</p>
                 {llmStatus && (llmStatus.error ? (
                     <p style={{ fontSize:11, color:'#d63031', margin:'8px 0 0', fontWeight:600 }}>LLM: {llmStatus.error}</p>
                 ) : (
                     <p style={{ fontSize:11, color:'#00b894', margin:'8px 0 0', fontWeight:600 }}>
                         LLM: {llmStatus.mechanism} · {llmStatus.auth}
                         {llmStatus.project ? ' · ' + llmStatus.project : ''}
-                        {llmStatus.model ? ' · ' + llmStatus.model : ''}
                         {llmStatus.auth === 'apikey' ? (llmStatus.has_api_key ? ' · key set' : ' · NO key') : ''}
+                        <br />
+                        <span style={{ color:'#636e72', fontWeight:600 }}>
+                            Build={llmStatus.model || '?'} · Ask/Explain={llmStatus.fast_model || '?'}
+                        </span>
                     </p>
                 ))}
                 <Label>Extraction mode</Label>
@@ -6660,22 +6679,24 @@ function SetupPanel(props) {
                 <p style={{ fontSize:11, color:'#b2bec3', margin:'4px 0 0' }}>Sequential: one paragraph per LLM call (default). Parallel: paragraphs concurrent. Whole-doc: one call — keeps relations that span paragraphs.</p>
             </div>
 
-            {/* Gateway URL — unchanged from the pre-shell Sidebar. */}
-            <div style={{ marginBottom:18 }}>
-                <Label>Gateway URL</Label>
-                <input style={Object.assign({}, inp, { marginBottom:0 })} value={gatewayBase} onChange={function(e){ setGatewayBase(e.target.value); }} placeholder="http://localhost:8090" />
-            </div>
+            </div>{/* end columns row */}
 
-            {onConnect && (
-                <div>
-                    <button onClick={onConnect} disabled={connectStatus.loading} style={{
-                        width:'100%', padding:'11px 0', border:'none', borderRadius:6, cursor: connectStatus.loading ? 'not-allowed' : 'pointer',
-                        fontWeight:700, color:'#fff', fontSize:13, fontFamily:'inherit',
-                        background: connectStatus.loading ? '#74b9ff' : 'linear-gradient(135deg,#0984e3,#0872c4)', transition:'0.2s',
-                    }}>{connectStatus.loading ? 'Connecting…' : 'Connect'}</button>
-                    {connectStatus.text && <p style={{ marginTop:8, fontSize:12, color: connectStatus.error ? '#d63031' : '#00b894', fontWeight:600 }}>{connectStatus.text}</p>}
-                </div>
-            )}
+            {/* Gateway URL + Connect — span all three columns, centered bottom.
+                Connect applies the graph + OLAP connections AND the LLM route. */}
+            <div style={{ maxWidth:460, margin:'20px auto 0' }}>
+                <Label>Gateway URL</Label>
+                <input style={inp} value={gatewayBase} onChange={function(e){ setGatewayBase(e.target.value); }} placeholder="http://localhost:8090" />
+                {onConnect && (
+                    <div>
+                        <button onClick={onConnect} disabled={connectStatus.loading} style={{
+                            width:'100%', padding:'12px 0', border:'none', borderRadius:6, cursor: connectStatus.loading ? 'not-allowed' : 'pointer',
+                            fontWeight:700, color:'#fff', fontSize:14, fontFamily:'inherit',
+                            background: connectStatus.loading ? '#74b9ff' : 'linear-gradient(135deg,#0984e3,#0872c4)', transition:'0.2s',
+                        }}>{connectStatus.loading ? 'Connecting…' : 'Connect'}</button>
+                        {connectStatus.text && <p style={{ marginTop:8, fontSize:12, textAlign:'center', color: connectStatus.error ? '#d63031' : '#00b894', fontWeight:600 }}>{connectStatus.text}</p>}
+                    </div>
+                )}
+            </div>
         </div>
     );
 }
@@ -7677,6 +7698,8 @@ function StoragePanel(props) {
     // /documents ledger tells us which; if present, preview the provenance
     // ledger instead of the unrelated banking vertexes.parquet.
     const [storageDocs, setStorageDocs] = useState([]);
+    const [openDoc, setOpenDoc] = useState(null);      // doc_uri currently expanded (or null)
+    const [docText, setDocText] = useState({});        // doc_uri -> {text,char_len,truncated} | {error} | 'loading'
     // Per-graph "Data in" source files, from /graph_ddl's `sources` list, each
     // previewed via gwClient.sourcePreview(path). Replaces the old hardcoded
     // node/edge Parquet previews that ignored the active graph.
@@ -7739,6 +7762,19 @@ function StoragePanel(props) {
         : ((recipe && recipe.source === 'kinetica:show_graph') ? 'Built via Kinetica DDL'
         : 'Built externally / route not recorded'));
 
+    function toggleDoc(docUri) {
+        if (openDoc === docUri) { setOpenDoc(null); return; }
+        setOpenDoc(docUri);
+        if (docText[docUri] === undefined) {
+            setDocText(function (prev) { var n = Object.assign({}, prev); n[docUri] = 'loading'; return n; });
+            gwClient.documentText(activeGraph, docUri).then(function (r) {
+                setDocText(function (prev) { var n = Object.assign({}, prev); n[docUri] = r; return n; });
+            }).catch(function (err) {
+                setDocText(function (prev) { var n = Object.assign({}, prev); n[docUri] = { error: (err && err.message) || String(err) }; return n; });
+            });
+        }
+    }
+
     return (
         <div style={{ width:'100%', maxWidth:900, textAlign:'left', display:'flex', flexDirection:'column', gap:20, margin:'0 auto', overflow:'auto', padding:'0 4px' }}>
             <div style={{ background:'#fff', border:'1px solid #dfe6e9', borderRadius:10, padding:24, boxShadow:'0 2px 8px rgba(0,0,0,0.04)' }}>
@@ -7780,9 +7816,29 @@ function StoragePanel(props) {
                         Built from {storageDocs.length} document{storageDocs.length === 1 ? '' : 's'} via Extract — attributes live on the graph nodes (no external Parquet source).
                     </p>
                     {storageDocs.map(function(d, i){
-                        return <div key={i} style={{ fontSize:13, color:'#2d3436', padding:'6px 0', borderBottom:'1px solid #f1f2f6' }}>
-                            {(d.source_type === 'file' ? '📄 ' : '✎ ') + d.doc_uri}
-                            <span style={{ fontSize:11, color:'#b2bec3', marginLeft:8 }}>· {d.status} · ingested {String(d.last_ingested_ts || '').slice(0,19).replace('T',' ')}</span>
+                        var open = openDoc === d.doc_uri;
+                        var t = docText[d.doc_uri];
+                        return <div key={i} style={{ borderBottom:'1px solid #f1f2f6' }}>
+                            <div onClick={function(){ toggleDoc(d.doc_uri); }}
+                                 style={{ fontSize:13, color:'#2d3436', padding:'6px 0', cursor:'pointer', userSelect:'none' }}>
+                                <span style={{ color:'#b2bec3', marginRight:6 }}>{open ? '▾' : '▸'}</span>
+                                {(d.source_type === 'file' ? '📄 ' : '✎ ') + d.doc_uri}
+                                <span style={{ fontSize:11, color:'#b2bec3', marginLeft:8 }}>· {d.status} · ingested {String(d.last_ingested_ts || '').slice(0,19).replace('T',' ')}</span>
+                            </div>
+                            {open && (
+                                <div style={{ padding:'0 0 10px' }}>
+                                    {t === 'loading' && <span style={{ fontSize:11, color:'#b2bec3' }}>Loading text…</span>}
+                                    {t && t.error && <span style={{ fontSize:11, color:'#d63031' }}>{t.error}</span>}
+                                    {t && !t.error && t !== 'loading' && (t.char_len > 0 ? (
+                                        <div>
+                                            <pre style={{ margin:0, padding:12, background:'#2d3436', color:'#dfe6e9', borderRadius:6, fontSize:11, whiteSpace:'pre-wrap', maxHeight:320, overflow:'auto' }}>{t.text}</pre>
+                                            {t.truncated && <div style={{ fontSize:11, color:'#b2bec3', marginTop:4 }}>{'showing first ' + t.text.length.toLocaleString() + ' of ' + t.char_len.toLocaleString() + ' characters'}</div>}
+                                        </div>
+                                    ) : (
+                                        <span style={{ fontSize:11, color:'#b2bec3' }}>Source text not captured for this document (extracted before text was stored — re-run Extract on the same document to capture it).</span>
+                                    ))}
+                                </div>
+                            )}
                         </div>;
                     })}
                 </div>
@@ -8002,7 +8058,14 @@ function App() {
         var nextId = 'q' + Math.max(queryTabs.length + 1, maxN + 1);
         setQueryTabs(function(prev) { return prev.concat([nextId]); });
         setActiveQueryTab(nextId);
-        if (initialSql != null) {
+        // Only a real query string seeds the new tab. The tab-strip "+" wires
+        // this as `onClick={addQueryTab}`, so React hands us a SyntheticEvent as
+        // the first arg — storing that as the tab's SQL made QueryPanel seed
+        // `sql` with an event object, and the first `sql.trim()` threw
+        // "sql.trim is not a function", blowing the whole session. A typeof
+        // guard ignores the event while still honoring the "Run in Query"
+        // string handoff.
+        if (typeof initialSql === 'string' && initialSql) {
             setQueryTabSql(function(m) { var n = Object.assign({}, m); n[nextId] = initialSql; return n; });
         }
         return nextId;
@@ -8028,28 +8091,16 @@ function App() {
     // belonging to the *other* engine are simply ignored when building the
     // /connect payload. Shared by SetupPanel and ConnectPanel.
     const [graphEngine, setGraphEngine] = useState('falkordb');
-    const [graphConn, setGraphConn]     = useState({ host:'localhost', port:'6379', password:'', url:'http://127.0.0.1:9191', user:'admin' });
+    const [graphConn, setGraphConn]     = useState({ host:'localhost', port:'6379', password:'IL3@rnF@lcorDB', url:'http://127.0.0.1:9191', user:'admin' });
     const [olapEngine, setOlapEngine]   = useState('duckdb');
     const [olapConn, setOlapConn]       = useState({ url:'http://127.0.0.1:9191', user:'admin', password:'' });
     const [llmEngine, setLlmEngine]     = useState('claude'); // single option today; kept for the later LLM slice
     const [llmConn, setLlmConn]         = useState({ apiKey:'', extractMode:'sequential' });
-    // LLM route (gateway-global): applyLlm POSTs /llm_config; llmStatus mirrors /llm_status.
+    // LLM route (gateway-global, in-memory — not per-session): applied as part
+    // of Connect (see handleConnectAxes), so Setup has one commit button.
+    // llmStatus mirrors /llm_status — both the Build tier `model` and the
+    // Ask/Explain `fast_model`.
     const [llmStatus, setLlmStatus] = useState(null);
-    const applyLlm = React.useCallback(async function () {
-        try {
-            await gwClient.setLlmConfig({
-                mechanism: llmConn.mechanism || 'cli',
-                auth: llmConn.auth || 'vertex',
-                project: llmConn.project || '',
-                region: llmConn.region || '',
-                model: llmConn.model || '',
-                api_key: llmConn.apiKey || '',
-            });
-            setLlmStatus(await gwClient.getLlmStatus());
-        } catch (e) {
-            setLlmStatus({ error: String(e && e.message || e) });
-        }
-    }, [gwClient, llmConn]);
     React.useEffect(function () {
         gwClient.getLlmStatus().then(setLlmStatus).catch(function () { setLlmStatus(null); });
     }, [gwClient]);
@@ -8117,6 +8168,22 @@ function App() {
     var handleConnectAxes = async function() {
         setConnectStatus({ text:'Connecting…', error:false, loading:true });
         try {
+            // Apply the gateway-global LLM route from the Setup picker — folded
+            // into Connect so Setup has one commit button, not two. A bad route
+            // surfaces in the LLM status line but does NOT block the graph connect.
+            try {
+                await gwClient.setLlmConfig({
+                    mechanism: llmConn.mechanism || 'cli',
+                    auth: llmConn.auth || 'vertex',
+                    project: llmConn.project || '',
+                    region: llmConn.region || '',
+                    model: llmConn.model || '',
+                    api_key: llmConn.apiKey || '',
+                });
+                setLlmStatus(await gwClient.getLlmStatus());
+            } catch (e) {
+                setLlmStatus({ error: String(e && e.message || e) });
+            }
             var graph = { engine: graphEngine, conn: graphConn };
             // Kinetica graph + Kinetica OLAP share one login — don't ask twice.
             var computeConn = (olapEngine === 'kinetica' && graphEngine === 'kinetica') ? graphConn : olapConn;
@@ -9227,12 +9294,17 @@ function App() {
         reader.readAsText(file);
     };
 
-    // Session change confirmation — stores pending action, shows banner
-    const [sessionChangePrompt, setSessionChangePrompt] = useState(null); // null or { action: function }
+    // Session change confirmation — stores pending action, shows banner.
+    // Guards user-initiated graph switches (List select, Build/extract) so the
+    // current graph + its query tabs aren't silently discarded. Fires straight
+    // through when there's nothing to lose (no active graph, no loaded
+    // dashboard) or when the target IS the current graph (extract-into-same,
+    // re-selecting the open graph) — those don't replace the session.
+    const [sessionChangePrompt, setSessionChangePrompt] = useState(null); // null or { graph, action }
 
-    var confirmSessionChange = function(action) {
-        if (!activeGraph || !labelData) { action(); return; }
-        setSessionChangePrompt({ action: action });
+    var confirmSessionChange = function(action, targetGraph) {
+        if (!activeGraph || !labelData || (targetGraph && targetGraph === activeGraph)) { action(); return; }
+        setSessionChangePrompt({ graph: activeGraph, action: action });
     };
 
     var hasDashboard = !!labelData;
@@ -9363,6 +9435,38 @@ function App() {
                     background: toast.type === 'error' ? '#d63031' : toast.type === 'warn' ? '#e17055' : toast.type === 'success' ? '#00b894' : '#0984e3',
                 }}>{toast.message}</div>
             )}
+            {/* Unsaved-graph warning — shown before a user-initiated graph switch
+                (List select / Build) replaces the current session. Save & Continue
+                persists the Setup + query tabs first (same as the header 💾 Save),
+                Continue discards, Cancel aborts the switch. Mirrors the explorer
+                project's confirm-before-lose pattern. */}
+            {sessionChangePrompt && (
+                <React.Fragment>
+                    <div onClick={function(){ setSessionChangePrompt(null); }}
+                        style={{ position:'fixed', inset:0, zIndex:9100, background:'rgba(0,0,0,0.28)' }} />
+                    <div style={{
+                        position:'fixed', top:'26vh', left:'50%', transform:'translateX(-50%)', zIndex:9101,
+                        width:'min(500px,88vw)', background:'#fff', borderRadius:10, padding:22,
+                        boxShadow:'0 10px 40px rgba(0,0,0,0.35)', border:'1px solid #dfe6e9',
+                    }}>
+                        <div style={{ fontSize:14, fontWeight:700, color:'#d63031', marginBottom:10 }}>{'⚠️'} Unsaved graph session</div>
+                        <div style={{ fontSize:13, color:'#2d3436', lineHeight:1.5, marginBottom:18 }}>
+                            The current graph <strong>{sessionChangePrompt.graph}</strong> and its queries will be lost unless Saved.
+                        </div>
+                        <div style={{ display:'flex', gap:8, justifyContent:'flex-end', flexWrap:'wrap' }}>
+                            <button onClick={function(){ var a = sessionChangePrompt.action; saveLiteSession(); setSessionChangePrompt(null); a(); }} style={{
+                                padding:'8px 14px', border:'none', borderRadius:6, cursor:'pointer', fontSize:12, fontWeight:700, color:'#fff', background:'#0984e3',
+                            }}>{'💾'} Save &amp; Continue</button>
+                            <button onClick={function(){ var a = sessionChangePrompt.action; setSessionChangePrompt(null); a(); }} style={{
+                                padding:'8px 14px', border:'none', borderRadius:6, cursor:'pointer', fontSize:12, fontWeight:700, color:'#fff', background:'#00b894',
+                            }}>Continue</button>
+                            <button onClick={function(){ setSessionChangePrompt(null); }} style={{
+                                padding:'8px 14px', border:'1px solid #dfe6e9', borderRadius:6, cursor:'pointer', fontSize:12, fontWeight:700, color:'#2d3436', background:'#fff',
+                            }}>Cancel</button>
+                        </div>
+                    </div>
+                </React.Fragment>
+            )}
             {/* Header / wordmark + ActionBar on ONE row — the sidebar that used
                 to carry the wordmark is gone; logo+wordmark sit on the left,
                 the action-bar buttons flow inline to their right so the nav
@@ -9399,9 +9503,19 @@ function App() {
                 <div style={{ flexShrink:0, padding:'4px 16px', fontSize:11, color:'#636e72', background:'#fafbfc', borderBottom:'1px solid #eee', whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>
                     {/* Connection info (folded in from the old Connect tab) */}
                     <span title={connected ? 'Connected' : 'Not connected'} style={{ color: connected ? '#00b894' : '#b2bec3', fontWeight:700 }}>{'●'}</span>
-                    <span style={{ marginLeft:5, color:'#2d3436', fontWeight:700 }}>{graphEngine}</span>
+                    <span style={{ marginLeft:5, color:'#2d3436', fontWeight:700 }} title="Graph engine">{graphEngine}</span>
+                    {olapEngine && <>
+                        <span style={{ margin:'0 6px', color:'#dfe6e9' }}>{'·'}</span>
+                        <span title="Compute / OLAP engine">{olapEngine}</span>
+                    </>}
                     <span style={{ margin:'0 6px', color:'#dfe6e9' }}>{'·'}</span>
                     <span title="Gateway URL">{gatewayBase}</span>
+                    {llmStatus && !llmStatus.error && <>
+                        <span style={{ margin:'0 6px', color:'#dfe6e9' }}>{'·'}</span>
+                        <span title={'LLM: ' + llmStatus.mechanism + ' · ' + llmStatus.auth + ' · Ask/Explain=' + (llmStatus.fast_model || '?') + ' · Build=' + (llmStatus.model || '?') + ' — edit backend/.env to change'}>
+                            {'LLM: ' + llmStatus.mechanism + '·' + llmStatus.auth + ((llmStatus.fast_model || llmStatus.model) ? '·' + (llmStatus.fast_model || llmStatus.model).replace('claude-','').split('-')[0] : '')}
+                        </span>
+                    </>}
                     {activeGraph && (
                         <span>
                             <span style={{ margin:'0 6px', color:'#dfe6e9' }}>{'·'}</span>
@@ -9436,7 +9550,7 @@ function App() {
                         olapEngine={olapEngine} setOlapEngine={setOlapEngine}
                         olapConn={olapConn} setOlapConn={setOlapConn}
                         llmConn={llmConn} setLlmConn={setLlmConn}
-                        llmStatus={llmStatus} onApplyLlm={applyLlm}
+                        llmStatus={llmStatus}
                         gatewayBase={gatewayBase} setGatewayBase={setGatewayBase}
                         onConnect={handleConnectAxes} connectStatus={connectStatus}
                     />
@@ -9449,7 +9563,7 @@ function App() {
                             extractSources: extractSources, setExtractSources: setExtractSources,
                             extractGraph: extractGraph, setExtractGraph: setExtractGraph,
                             graphEngine: graphEngine,
-                            onGraphUpdated: refreshGraph,
+                            onGraphUpdated: function(g){ confirmSessionChange(function(){ refreshGraph(g); }, g); },
                         }}
                         createProps={{
                             graphEngine: graphEngine, gwClient: gwClient,
@@ -9481,7 +9595,7 @@ function App() {
                     <ListPanel
                         graphs={graphs} activeGraph={activeGraph} graphSizes={graphSizes}
                         gwClient={gwClient}
-                        onSelectGraph={function(name){ setActiveGraph(name); setActiveAction('ontology'); }}
+                        onSelectGraph={function(name){ confirmSessionChange(function(){ setActiveGraph(name); setActiveAction('ontology'); }, name); }}
                         onDeleteGraph={handleDeleteGraph}
                     />
                 )}
