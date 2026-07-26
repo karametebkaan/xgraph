@@ -10,6 +10,7 @@ from . import registry
 from . import nlcypher
 from . import extract
 from . import extract_fold
+from . import llm
 from .compute.duckdb_engine import ComputeEngine
 from .sessions import SessionStore
 from pathlib import Path
@@ -532,6 +533,18 @@ def create_app(adapter_factory=registry.get_adapter, compute=None, store=None) -
             return {"answer": answer}
         except Exception as e:
             return _err(engine, e)
+
+    @app.get("/llm_status")
+    def llm_status_ep():
+        return llm.llm_status()
+
+    @app.post("/llm_config")
+    def llm_config_ep(payload: dict = Body(...)):
+        try:
+            llm.set_llm_config(payload)
+            return llm.llm_status()
+        except Exception as e:
+            return _err("", e)
 
     @app.post("/hydrate")
     def hydrate(payload: dict = Body(...)):
