@@ -47,7 +47,7 @@
 const { useState, useEffect, useRef, useCallback, useMemo } = React;
 
 /* ═══════════════════════ CONSTANTS ════════════════════════ */
-const EXPLORER_VERSION = "0.14.0";  // xGraph version — bump on frontend changes so a stale browser cache is visible
+const EXPLORER_VERSION = "0.15.0";  // xGraph version — bump on frontend changes so a stale browser cache is visible
 const SAFETY_TIMEOUT_MS = 10 * 60 * 1000;
 const PALETTE = [
     { solid: '#0984e3', light: '#e1f0fb' }, { solid: '#00cec9', light: '#e0f9f8' },
@@ -6524,6 +6524,7 @@ function SetupPanel(props) {
     var olapEngine = props.olapEngine, setOlapEngine = props.setOlapEngine;
     var olapConn = props.olapConn, setOlapConn = props.setOlapConn;
     var llmConn = props.llmConn, setLlmConn = props.setLlmConn;
+    var llmStatus = props.llmStatus, onApplyLlm = props.onApplyLlm;
     var gatewayBase = props.gatewayBase, setGatewayBase = props.setGatewayBase;
     var onConnect = props.onConnect, connectStatus = props.connectStatus || {};
 
@@ -6595,19 +6596,61 @@ function SetupPanel(props) {
                 )}
             </div>
 
-            {/* LLM — single option for now (Claude); the connect payload's
-                llm block is future-proofed for the later LLM slice. */}
+            {/* LLM route — Mechanism × Auth. Config is gateway-global; Apply
+                POSTs /llm_config and the status line reflects /llm_status. */}
             <div style={group}>
-                <Label>LLM</Label>
-                <div style={{ marginBottom:8 }}>
-                    <button type="button" disabled style={{
-                        padding:'6px 14px', border:'1px solid #0984e3', borderRadius:16, cursor:'default',
-                        fontSize:12, fontWeight:700, color:'#fff', background:'#0984e3', fontFamily:'inherit',
-                    }}>Claude</button>
+                <Label>LLM route</Label>
+                <div style={{ display:'flex', gap:12, marginBottom:10 }}>
+                    <div style={{ flex:1 }}>
+                        <Label>Mechanism</Label>
+                        <select style={inp} value={llmConn.mechanism || 'cli'} onChange={function(e){ setLlmField('mechanism', e.target.value); }}>
+                            <option value="cli">claude CLI</option>
+                            <option value="sdk">Anthropic SDK</option>
+                        </select>
+                    </div>
+                    <div style={{ flex:1 }}>
+                        <Label>Auth</Label>
+                        <select style={inp} value={llmConn.auth || 'vertex'} onChange={function(e){ setLlmField('auth', e.target.value); }}>
+                            <option value="vertex">GCP Vertex</option>
+                            <option value="apikey">API key</option>
+                            {(llmConn.mechanism || 'cli') === 'cli' ? <option value="cli-login">CLI login</option> : null}
+                        </select>
+                    </div>
                 </div>
-                <Label>API key</Label>
-                <input type={pwType} autoComplete="new-password" style={Object.assign({}, inp, { marginBottom:6 })} value={llmConn.apiKey || ''} onChange={function(e){ setLlmField('apiKey', e.target.value); }} placeholder="(optional — falls back to claude CLI / env)" />
-                <p style={{ fontSize:11, color:'#b2bec3', margin:'0 0 12px' }}>via claude CLI / Anthropic SDK (SDK used when an API key is set) · extraction on Haiku</p>
+                {(llmConn.auth || 'vertex') === 'vertex' ? (
+                    <div>
+                        <Label>Vertex project</Label>
+                        <input style={inp} value={llmConn.project || ''} onChange={function(e){ setLlmField('project', e.target.value); }} placeholder="team-warehouse-workhorses-dev" />
+                        <Label>Region</Label>
+                        <input style={inp} value={llmConn.region || ''} onChange={function(e){ setLlmField('region', e.target.value); }} placeholder="global" />
+                        <p style={{ fontSize:11, color:'#b2bec3', margin:'0 0 8px' }}>Auth uses server-side GCP ADC (gcloud application-default). The browser sends only project/region.</p>
+                    </div>
+                ) : (llmConn.auth || 'vertex') === 'apikey' ? (
+                    <div>
+                        <Label>API key</Label>
+                        <input type={pwType} autoComplete="new-password" style={inp} value={llmConn.apiKey || ''} onChange={function(e){ setLlmField('apiKey', e.target.value); }} placeholder="sk-ant-…" />
+                        <p style={{ fontSize:11, color:'#b2bec3', margin:'0 0 8px' }}>Sent to the gateway over localhost. Not stored in /llm_status.</p>
+                    </div>
+                ) : (
+                    <p style={{ fontSize:12, color:'#b2bec3', margin:'0 0 8px' }}>Uses the claude CLI's own stored login.</p>
+                )}
+                <Label>Model (optional)</Label>
+                <input style={inp} value={llmConn.model || ''} onChange={function(e){ setLlmField('model', e.target.value); }} placeholder="claude-opus-4-8" />
+                <button type="button" onClick={onApplyLlm} style={{
+                    padding:'8px 16px', border:'none', borderRadius:6, cursor:'pointer',
+                    fontWeight:700, color:'#fff', fontSize:12, fontFamily:'inherit',
+                    background:'linear-gradient(135deg,#0984e3,#0872c4)',
+                }}>Apply LLM route</button>
+                {llmStatus && (llmStatus.error ? (
+                    <p style={{ fontSize:11, color:'#d63031', margin:'8px 0 0', fontWeight:600 }}>LLM: {llmStatus.error}</p>
+                ) : (
+                    <p style={{ fontSize:11, color:'#00b894', margin:'8px 0 0', fontWeight:600 }}>
+                        LLM: {llmStatus.mechanism} · {llmStatus.auth}
+                        {llmStatus.project ? ' · ' + llmStatus.project : ''}
+                        {llmStatus.model ? ' · ' + llmStatus.model : ''}
+                        {llmStatus.auth === 'apikey' ? (llmStatus.has_api_key ? ' · key set' : ' · NO key') : ''}
+                    </p>
+                ))}
                 <Label>Extraction mode</Label>
                 <div style={{ marginTop:4 }}>
                     <label style={radioLbl}><input type="radio" checked={(llmConn.extractMode || 'sequential') === 'sequential'} onChange={function(){ setLlmField('extractMode', 'sequential'); }}/> Sequential</label>
@@ -7990,6 +8033,26 @@ function App() {
     const [olapConn, setOlapConn]       = useState({ url:'http://127.0.0.1:9191', user:'admin', password:'' });
     const [llmEngine, setLlmEngine]     = useState('claude'); // single option today; kept for the later LLM slice
     const [llmConn, setLlmConn]         = useState({ apiKey:'', extractMode:'sequential' });
+    // LLM route (gateway-global): applyLlm POSTs /llm_config; llmStatus mirrors /llm_status.
+    const [llmStatus, setLlmStatus] = useState(null);
+    const applyLlm = React.useCallback(async function () {
+        try {
+            await gwClient.setLlmConfig({
+                mechanism: llmConn.mechanism || 'cli',
+                auth: llmConn.auth || 'vertex',
+                project: llmConn.project || '',
+                region: llmConn.region || '',
+                model: llmConn.model || '',
+                api_key: llmConn.apiKey || '',
+            });
+            setLlmStatus(await gwClient.getLlmStatus());
+        } catch (e) {
+            setLlmStatus({ error: String(e && e.message || e) });
+        }
+    }, [gwClient, llmConn]);
+    React.useEffect(function () {
+        gwClient.getLlmStatus().then(setLlmStatus).catch(function () { setLlmStatus(null); });
+    }, [gwClient]);
     const [connectStatus, setConnectStatus] = useState({ text:'', error:false, loading:false });
     // Flips true on a successful /connect — gates the Create action-bar tab
     // even before any graphs exist (Create is how the first one gets made),
@@ -9373,6 +9436,7 @@ function App() {
                         olapEngine={olapEngine} setOlapEngine={setOlapEngine}
                         olapConn={olapConn} setOlapConn={setOlapConn}
                         llmConn={llmConn} setLlmConn={setLlmConn}
+                        llmStatus={llmStatus} onApplyLlm={applyLlm}
                         gatewayBase={gatewayBase} setGatewayBase={setGatewayBase}
                         onConnect={handleConnectAxes} connectStatus={connectStatus}
                     />
