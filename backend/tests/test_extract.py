@@ -324,7 +324,7 @@ def test_llm_backend_defaults_to_cli_and_uses_sdk_only_when_selected(monkeypatch
     monkeypatch.setattr(llmmod, "_llm_claude_sdk", lambda p, s, m=None, cfg=None: "SDK")
     monkeypatch.setattr(llmmod, "_llm_claude_cli", lambda p, s, m=None, cfg=None: "CLI")
     monkeypatch.setattr(llmmod.shutil, "which", lambda _x: "/usr/bin/claude")
-    for k in ("CLAUDE_CODE_USE_VERTEX", "XGRAPH_LLM"):
+    for k in ("CLAUDE_CODE_USE_VERTEX", "XGRAPH_LLM", "XGRAPH_LLM_MECHANISM"):
         monkeypatch.delenv(k, raising=False)
     # API key set, no override -> cli + apikey -> CLI path.
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")

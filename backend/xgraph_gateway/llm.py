@@ -54,7 +54,7 @@ def resolve_llm_config() -> dict:
             src[field] = "env"; return os.environ[env_key]
         src[field] = "default"; return default
 
-    mechanism = pick("mechanism", default="cli")
+    mechanism = pick("mechanism", "XGRAPH_LLM_MECHANISM", default="cli")
 
     if o.get("auth"):
         auth, src["auth"] = o["auth"], "override"

@@ -8,7 +8,8 @@ def _reset(monkeypatch):
     # Start each test from a clean override + a known-empty LLM env.
     llm._OVERRIDE = {}
     for k in ("CLAUDE_CODE_USE_VERTEX", "ANTHROPIC_API_KEY", "ANTHROPIC_VERTEX_PROJECT_ID",
-              "CLOUD_ML_REGION", "XGRAPH_LLM_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL"):
+              "CLOUD_ML_REGION", "XGRAPH_LLM_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL",
+              "XGRAPH_LLM_MECHANISM"):
         monkeypatch.delenv(k, raising=False)
     yield
     llm._OVERRIDE = {}
@@ -57,6 +58,22 @@ def test_warmup_noop_when_disabled(monkeypatch):
     monkeypatch.setenv("XGRAPH_LLM_WARMUP", "0")
     llm.warmup()
     assert calls == []
+
+
+def test_mechanism_defaults_to_cli():
+    assert llm.resolve_llm_config()["mechanism"] == "cli"
+
+
+def test_env_mechanism_sdk_overrides_default(monkeypatch):
+    # backend/.env can pin the mechanism (e.g. sdk for the fast in-process route)
+    # so the gateway defaults to it without a UI switch. Precedence: override > env > default.
+    monkeypatch.setenv("XGRAPH_LLM_MECHANISM", "sdk")
+    monkeypatch.setenv("CLAUDE_CODE_USE_VERTEX", "1")
+    monkeypatch.setenv("ANTHROPIC_VERTEX_PROJECT_ID", "proj-x")
+    cfg = llm.resolve_llm_config()
+    assert cfg["mechanism"] == "sdk"
+    assert cfg["sources"]["mechanism"] == "env"
+    llm.validate_llm_config(cfg)  # sdk+vertex is a valid combo
 
 
 def test_env_vertex_becomes_default_auth(monkeypatch):
