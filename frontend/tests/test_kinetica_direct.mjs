@@ -55,6 +55,32 @@ const run = async () => {
     [{ NODE1_NAME: "", NODE2_NAME: "alice", EDGE_LABEL: '["R"]' }]
   );
 
+  // kineticaLabelData: parse labeljson from show/graph into labelData shape
+  const labelJson = JSON.stringify({
+    node_labels: [{ labels: ["Person"], count: 3 }, { labels: ["Org"], count: 1 }],
+    edge_labels: [{ labels: ["WORKS_AT"], count: 2 }],
+    total_labeled_nodes: 4, total_labeled_edges: 2,
+  });
+  let seenShowGraph = null;
+  const fakeFetchLabels = async (url, opts) => {
+    seenShowGraph = { url, body: JSON.parse(opts.body), headers: opts.headers };
+    return { ok: true, json: async () => ({ info: { labeljson: labelJson } }) };
+  };
+  const ld = await g.kineticaLabelData("http://ki", "expero.banking_graph",
+    { user: "admin", pass: "pw" }, { fetch: fakeFetchLabels });
+  assert.deepEqual(ld.node_labels, [{ labels: ["Person"], count: 3 }, { labels: ["Org"], count: 1 }]);
+  assert.deepEqual(ld.edge_labels, [{ labels: ["WORKS_AT"], count: 2 }]);
+  assert.equal(ld.total_labeled_nodes, 4);
+  assert.equal(seenShowGraph.url, "http://ki/show/graph");
+  assert.equal(seenShowGraph.body.graph_name, "expero.banking_graph");
+  assert.equal(seenShowGraph.body.options.export_graph_schema, "true");
+  assert.equal(seenShowGraph.headers["Authorization"], "Basic " + g.kbtoa("admin:pw"));
+
+  // kineticaLabelData: failure → null (caller falls back)
+  const ldNull = await g.kineticaLabelData("http://ki", "g", {},
+    { fetch: async () => ({ ok: false, status: 500, json: async () => ({}) }) });
+  assert.equal(ldNull, null);
+
   console.log("test_kinetica_direct: OK");
 };
 run();

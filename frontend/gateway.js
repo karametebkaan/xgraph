@@ -95,6 +95,41 @@
     return recs;
   }
 
+  async function kineticaPost(fetchImpl, base, path, body, creds) {
+    var headers = { "Content-Type": "application/json" };
+    if (creds && (creds.user || creds.pass)) {
+      headers["Authorization"] = "Basic " + kbtoa((creds.user || "") + ":" + (creds.pass || ""));
+    }
+    var res = await fetchImpl(base + path, { method: "POST", headers: headers, body: JSON.stringify(body) });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    return await res.json();
+  }
+
+  // Fetch per-label counts directly from Kinetica's show/graph labeljson and return
+  // the explorer `labelData` shape. Returns null on any failure so the caller can
+  // fall back to record-derived donut counts.
+  async function kineticaLabelData(base, graph, creds, opts) {
+    opts = opts || {};
+    var fetchImpl = opts.fetch || (typeof fetch !== "undefined" ? fetch : null);
+    try {
+      var res = await kineticaPost(fetchImpl, base, "/show/graph",
+        { graph_name: graph, options: { export_graph_schema: "true" } }, creds);
+      var outer = safeParse(res.data_str) || res;
+      var info = (outer && outer.info) || {};
+      var parsed = safeParse(info.labeljson) || {};
+      return {
+        node_labels: parsed.node_labels || [],
+        edge_labels: parsed.edge_labels || [],
+        total_labeled_nodes: parsed.total_labeled_nodes || 0,
+        total_labeled_edges: parsed.total_labeled_edges || 0,
+        total_unlabeled_nodes: parsed.total_unlabeled_nodes || 0,
+        total_unlabeled_edges: parsed.total_unlabeled_edges || 0,
+      };
+    } catch (e) {
+      return null;
+    }
+  }
+
   function graphTableFromGateway(res) {
     var nodes = (res && res.nodes) || [];
     var edges = (res && res.edges) || [];
@@ -248,6 +283,8 @@
     resolveLabelStr: resolveLabelStr,
     decodeKineticaEntities: decodeKineticaEntities,
     decodeKineticaConciseEdges: decodeKineticaConciseEdges,
+    kineticaPost: kineticaPost,
+    kineticaLabelData: kineticaLabelData,
     makeClient: makeClient,
   };
 });
