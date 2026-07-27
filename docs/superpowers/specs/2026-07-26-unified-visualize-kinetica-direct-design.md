@@ -112,6 +112,16 @@ underneath branches on `engine`. Nothing else forks per engine.
   → `{node_labels:[{labels,count}], edge_labels:[{labels,count}],
   total_labeled_nodes/edges, ...}`, matching explorer. This feeds both
   `LabelChart` donuts and the CanvasGraph color map with weighted counts.
+- **Two distinct `show/graph` consumers — do not conflate them.** The ontology
+  **DOT stays gateway-sourced** for Kinetica: it comes from
+  `gwClient.getSchema()` (`loadSchema`, `:8705`), which is the gateway's own
+  `KineticaAdapter.get_schema` → `show_graph(export_graph_schema=true)` →
+  `info.dot`. The **direct browser `show/graph` call added here is only for
+  `labeljson`** (weighted donut counts), which the gateway's `get_schema`
+  discards (it collapses `labeljson` to a *total* count, not per-label). Do NOT
+  read the DOT from the direct browser call, and do NOT route the donut counts
+  through the gateway — the DOT is gateway-relayed, the donut counts are
+  browser-direct, matching explorer.
 - **Credentials:** reuse the browser-held Kinetica connection
   (`graphConn` / `olapConn`: `url`, `user`, `password`) to authenticate the
   direct POSTs. Plumb these into the `credentials` object for
