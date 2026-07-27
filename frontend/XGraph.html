@@ -47,7 +47,7 @@
 const { useState, useEffect, useRef, useCallback, useMemo } = React;
 
 /* ═══════════════════════ CONSTANTS ════════════════════════ */
-const EXPLORER_VERSION = "0.18.6";  // xGraph version — bump on frontend changes so a stale browser cache is visible
+const EXPLORER_VERSION = "0.18.7";  // xGraph version — bump on frontend changes so a stale browser cache is visible
 const SAFETY_TIMEOUT_MS = 10 * 60 * 1000;
 const PALETTE = [
     { solid: '#0984e3', light: '#e1f0fb' }, { solid: '#00cec9', light: '#e0f9f8' },
@@ -8220,6 +8220,15 @@ function App() {
             setConnected(true);
             setConnectStatus({ text: 'Connected — ' + names.length + ' graph' + (names.length === 1 ? '' : 's'), error:false, loading:false });
             setActiveAction('list');
+            // Fetch the active graph's ontology now that the gateway session
+            // exists. A loaded session pre-sets activeGraph while disconnected,
+            // so the earlier activeGraph-effect ran loadSchema() with no session
+            // (it failed, DOT stayed blank) yet still stamped _schemaGraphRef —
+            // which then blocks that effect from re-firing on connect (activeGraph
+            // is unchanged). Connect is the deterministic point the session goes
+            // live, so (re)load the schema explicitly here or the ontology stays
+            // blank after a session load.
+            if (activeGraph) { _schemaGraphRef.current = activeGraph; loadSchema(activeGraph); }
             // Per-graph node/edge counts for the List panel — best-effort, don't
             // block the connect flow on it.
             gwClient.graphSizes().then(setGraphSizes).catch(function(){ setGraphSizes({}); });
