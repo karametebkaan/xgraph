@@ -47,7 +47,7 @@
 const { useState, useEffect, useRef, useCallback, useMemo } = React;
 
 /* ═══════════════════════ CONSTANTS ════════════════════════ */
-const EXPLORER_VERSION = "0.20.0";  // xGraph version — bump on frontend changes so a stale browser cache is visible
+const EXPLORER_VERSION = "0.20.1";  // xGraph version — bump on frontend changes so a stale browser cache is visible
 const SAFETY_TIMEOUT_MS = 10 * 60 * 1000;
 const PALETTE = [
     { solid: '#0984e3', light: '#e1f0fb' }, { solid: '#00cec9', light: '#e0f9f8' },
@@ -9854,7 +9854,7 @@ function App() {
                             fills the window's vertical extent and the force-graph
                             panel is pinned to the bottom even before any pull —
                             CanvasGraph renders an empty canvas until data arrives. */}
-                        <div ref={vizSplitRef} style={{ flex:1, minHeight:0, position:'relative' }}>
+                        <div ref={vizSplitRef} style={{ flex:1, minHeight:0, position:'relative', display:'flex', flexDirection:'column' }}>
                             <SplitPane direction="horizontal" split={hSplit} onSplitChange={setHSplit} minA={300} minB={250}>
                                 {/* LEFT: Ontology (top) over force-graph (bottom) */}
                                 <SplitPane direction="vertical" split={vSplit} onSplitChange={setVSplit} minA={80} minB={150}>
