@@ -47,7 +47,7 @@
 const { useState, useEffect, useRef, useCallback, useMemo } = React;
 
 /* ═══════════════════════ CONSTANTS ════════════════════════ */
-const EXPLORER_VERSION = "0.18.8";  // xGraph version — bump on frontend changes so a stale browser cache is visible
+const EXPLORER_VERSION = "0.18.9";  // xGraph version — bump on frontend changes so a stale browser cache is visible
 const SAFETY_TIMEOUT_MS = 10 * 60 * 1000;
 const PALETTE = [
     { solid: '#0984e3', light: '#e1f0fb' }, { solid: '#00cec9', light: '#e0f9f8' },
@@ -8141,7 +8141,27 @@ function App() {
     // Ask/Explain `fast_model`.
     const [llmStatus, setLlmStatus] = useState(null);
     React.useEffect(function () {
-        gwClient.getLlmStatus().then(setLlmStatus).catch(function () { setLlmStatus(null); });
+        gwClient.getLlmStatus().then(function (st) {
+            setLlmStatus(st);
+            // Seed the Setup picker from the gateway's RESOLVED route (override >
+            // env > backend/.env default) so it shows the actual default — e.g.
+            // `sdk` from backend/.env — instead of the hardcoded cli/vertex
+            // fallback. Without this the picker always reads cli and Connect
+            // pushes cli back as an override, masking the .env default. Only
+            // fills fields the user hasn't set yet (empty on mount), so it never
+            // clobbers an in-progress edit or a session-restored config.
+            if (st && !st.error) {
+                setLlmConn(function (prev) {
+                    var next = Object.assign({}, prev);
+                    ['mechanism', 'auth', 'project', 'region', 'model'].forEach(function (k) {
+                        if (st[k] && (next[k] === undefined || next[k] === null || next[k] === '')) {
+                            next[k] = st[k];
+                        }
+                    });
+                    return next;
+                });
+            }
+        }).catch(function () { setLlmStatus(null); });
     }, [gwClient]);
     const [connectStatus, setConnectStatus] = useState({ text:'', error:false, loading:false });
     // Flips true on a successful /connect — gates the Create action-bar tab
