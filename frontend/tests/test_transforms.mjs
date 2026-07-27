@@ -52,4 +52,19 @@ const g = require("../gateway.js");
   assert.equal(r.LABEL, '["Person","Engineer"]');
   assert.equal(r.name, "Tan");
 }
+// recordFromGateway: banking node table has real id/label columns — mirror them,
+// do NOT invent duplicate NODE/LABEL (the picked-record duplication bug).
+{
+  const r = g.recordFromGateway({ id: "b1", label: "bank",
+                                  props: { id: "b1", label: "bank", bank_name: "Acme", risk: 42 } });
+  assert.deepEqual(r, { id: "b1", label: "bank", bank_name: "Acme", risk: 42 });
+  assert.ok(!("NODE" in r), "must not invent NODE when row has an id column");
+  assert.ok(!("LABEL" in r), "must not invent LABEL when row has a label column");
+}
+// recordFromGateway: no id-like/label-like column at all → synthesize NODE/LABEL
+// as the fallback so the detail view is never empty (e.g. Kinetica-direct records).
+{
+  const r = g.recordFromGateway({ id: "x1", label: "thing", props: { weight: 3 } });
+  assert.deepEqual(r, { weight: 3, NODE: "x1", LABEL: "thing" });
+}
 console.log("transforms OK");

@@ -183,14 +183,33 @@
     };
   }
 
+  // Detail record for a picked node. MIRROR the backing node-table columns —
+  // do NOT invent NODE/LABEL when the row already carries its identity/type.
+  // The gateway's get_record reads the backing node table with `SELECT *`, so
+  // `props` holds the BACKING-TABLE column names, not the graph-level NODE/LABEL
+  // alias: banking (`id as NODE`, `label as LABEL` from `expero.vertexes`) yields
+  // lowercase `id`/`label`; extract/rvv graphs (`SELECT *`, id column literally
+  // `NODE`) yield uppercase `NODE`/`LABEL`. We copy props verbatim (coercing an
+  // array `label`/`LABEL` to the JSON-array-STRING the detail view expects) and
+  // only synthesize a NODE / LABEL identity column when the row has NO id-like
+  // (`id`/`NODE`) / label-like (`label`/`LABEL`) column at all — the fallback that
+  // keeps the detail view non-empty (e.g. FalkorDB, whose props carry neither).
   function recordFromGateway(rec) {
     if (!rec || !rec.id) return null;
-    var out = { NODE: rec.id, LABEL: rec.label };
     var props = rec.props || {};
-    for (var k in props) if (Object.prototype.hasOwnProperty.call(props, k)) out[k] = props[k];
-    // props may carry an array LABEL (it overwrites the one above); coerce the
-    // final value so the detail view never sees a raw array.
-    out.LABEL = labelToString(out.LABEL);
+    var out = {};
+    var hasId = false, hasLabel = false;
+    for (var k in props) {
+      if (!Object.prototype.hasOwnProperty.call(props, k)) continue;
+      var lk = k.toLowerCase();
+      if (lk === "id" || lk === "node") hasId = true;
+      var isLabel = (lk === "label");
+      if (isLabel) hasLabel = true;
+      // Coerce an array label value so the renderer never sees a raw array.
+      out[k] = isLabel ? labelToString(props[k]) : props[k];
+    }
+    if (!hasId) out.NODE = rec.id;
+    if (!hasLabel) out.LABEL = labelToString(rec.label);
     return out;
   }
 

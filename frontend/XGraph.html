@@ -47,7 +47,7 @@
 const { useState, useEffect, useRef, useCallback, useMemo } = React;
 
 /* ═══════════════════════ CONSTANTS ════════════════════════ */
-const EXPLORER_VERSION = "0.19.1";  // xGraph version — bump on frontend changes so a stale browser cache is visible
+const EXPLORER_VERSION = "0.20.0";  // xGraph version — bump on frontend changes so a stale browser cache is visible
 const SAFETY_TIMEOUT_MS = 10 * 60 * 1000;
 const PALETTE = [
     { solid: '#0984e3', light: '#e1f0fb' }, { solid: '#00cec9', light: '#e0f9f8' },
@@ -5888,12 +5888,23 @@ function MapView(props) {
 
 /* ═══════════════════ CanvasGraph (force-graph Canvas) ═════ */
 function CanvasGraph(props) {
-    var graphTableData = props.data, graphName = props.graphName, selectedNodeLabels = props.selectedNodeLabels || [], selectedEdgeLabels = props.selectedEdgeLabels || [], labelData = props.labelData;
+    // Fallback to a well-formed EMPTY shape (proper headers, no records) when no
+    // data has been pulled yet, so the panel mounts immediately on opening
+    // Visualize — info line + Pull+Visualize button + empty canvas — instead of
+    // being gated behind a first load (explorer-parity: the ONLY load trigger is
+    // this component's own Pull+Visualize button).
+    var graphTableData = props.data || {
+        nodes: { records: [], headers: ["NODE_NAME", "NODE_LABEL"], total: 0 },
+        edges: { records: [], headers: ["NODE1_NAME", "NODE2_NAME", "EDGE_LABEL"], total: 0 },
+    };
+    var graphName = props.graphName, selectedNodeLabels = props.selectedNodeLabels || [], selectedEdgeLabels = props.selectedEdgeLabels || [], labelData = props.labelData;
     // Same per-label distributions (real counts, engine-neutral — derived from
     // the pulled records) that feed the Nodes/Edges-by-Label donuts. Used below
     // to color the canvas 1:1 with those legends.
     var nodeLabelDist = props.nodeLabelDist || [], edgeLabelDist = props.edgeLabelDist || [];
     var credentials = props.credentials, nodeSourceTable = props.nodeSourceTable, onVisualize = props.onVisualize, vizLoading = props.vizLoading;
+    var vizProgress = props.vizProgress || { loaded: 0, total: 0, loading: false };
+    var vizLoadError = props.vizLoadError;
     var bigGraphThreshold = props.bigGraphThreshold || 10000000, onChangeBigGraphThreshold = props.onChangeBigGraphThreshold;
     var maximized = props.maximized, onToggleMaximize = props.onToggleMaximize;
     var containerRef = useRef(null);
@@ -6415,6 +6426,20 @@ function CanvasGraph(props) {
                     {graphData.nodes.length.toLocaleString()}n/{graphData.links.length.toLocaleString()}e
                     {(graphData.totalAvailableEdges > graphData.links.length || graphData.totalAvailableNodes > graphData.nodes.length) && <span style={{ color:"#fd9644" }}> of {graphData.totalAvailableNodes.toLocaleString()}/{graphData.totalAvailableEdges.toLocaleString()}</span>}
                 </span>
+                {(vizProgress.loading || vizProgress.total > 0) && (
+                    <React.Fragment>
+                        <div style={{ height:4, width:70, flexShrink:0, background:"#eee", borderRadius:2, overflow:"hidden" }}>
+                            <div style={{
+                                height:"100%",
+                                width: (vizProgress.total > 0 ? Math.min(100, (vizProgress.loaded / vizProgress.total) * 100) : 0) + "%",
+                                background: vizProgress.loading ? "#00cec9" : "#00b894",
+                                transition:"width 0.2s",
+                            }} />
+                        </div>
+                        <span style={{ fontSize:10, color:"#636e72", whiteSpace:"nowrap", flexShrink:0 }}>{vizProgress.loaded.toLocaleString()} / {vizProgress.total.toLocaleString()}</span>
+                    </React.Fragment>
+                )}
+                {vizLoadError && <span style={{ fontSize:10, color:"#d63031", fontWeight:600, whiteSpace:"nowrap", flexShrink:0 }}>{vizLoadError}</span>}
                 {(selectedNodeLabels.length > 0 || selectedEdgeLabels.length > 0) && <span style={{ fontSize:10, color:"#6c5ce7", whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis', flexShrink:1, minWidth:0 }}>{selectedNodeLabels.map(function(l){ return "\u25CF " + l; }).concat(selectedEdgeLabels.map(function(l){ return "\u2194 " + l; })).join(", ")}</span>}
                 {focusNode && <span style={{ fontSize:10, whiteSpace:'nowrap', flexShrink:0 }}><strong>{focusNode}</strong> <span onClick={function(){ setFocusNode(null); if(graphRef.current) graphRef.current.zoomToFit(400, 40); }} style={{ cursor:"pointer", color:"#d63031" }}>[reset]</span></span>}
                 <label style={Object.assign({}, ctrlStyle, { display:'flex', alignItems:'center', gap:3, flex:'1 1 100px', minWidth:80 })}>N:{nodeLimit.toLocaleString()} <input type="range" min="50" max="1000000" step="50" value={nodeLimit} onChange={function(e){ setNodeLimit(parseInt(e.target.value)); }} style={sliderStyle}/></label>
@@ -9533,6 +9558,22 @@ function App() {
         }
     }, [activeGraph, gwClient, graphCounts, bigGraphThreshold, graphEngine, credentials]);
 
+    // Explorer-parity: on OPENING Visualize, the label donuts should already show
+    // WEIGHTED per-label counts — before any Pull+Visualize. Explorer gets this
+    // from a labeljson fetch on graph-select; we mirror it here, decoupled from
+    // the (heavier) entity pull. Kinetica-only (only engine with a per-label
+    // count source); best-effort — kineticaLabelData resolves null on failure,
+    // leaving the schema-derived (count-less) donuts in place.
+    useEffect(function() {
+        if (activeAction !== 'visualize' || graphEngine !== 'kinetica') return;
+        if (!activeGraph || !credentials || !credentials.url || labelData) return;
+        var cancelled = false;
+        window.xgraphGateway.kineticaLabelData(
+            credentials.url, activeGraph, { user: credentials.user, pass: credentials.pass }
+        ).then(function(kld){ if (!cancelled && kld) setLabelData(kld); }).catch(function(){});
+        return function(){ cancelled = true; };
+    }, [activeAction, graphEngine, activeGraph, credentials, labelData]);
+
     // Label-selective filtering for Visualize: clicking a LabelChart slice/row
     // toggles that label combo in/out of selectedNodeLabels or
     // selectedEdgeLabels, which CanvasGraph uses to filter what it renders.
@@ -9801,112 +9842,68 @@ function App() {
                     </div>
                 )}
                 {activeAction === 'visualize' && (
-                    <div style={{ width:'100%', height:'100%', alignSelf:'stretch', display:'flex', flexDirection:'column', gap:6, minHeight:0 }}>
-                        {/* Compact single-line control strip (small font, like the
-                            graph-info/summary line) — Max-load field, the Load/Refresh
-                            trigger, and the progress bar+counter all share one thin
-                            row so the CanvasGraph below gets the vertical space back.
-                            CanvasGraph's own built-in "↻ Pull+Visualize" button/sliders
-                            still exist for in-canvas control; this strip is what's
-                            visible before the first load too (there's nothing to mount
-                            CanvasGraph on yet).
-
-                            The big-graph warning itself is driven from HERE (panel
-                            level), not from CanvasGraph — CanvasGraph never reads
-                            `.total`/compares `bigGraphThreshold` to anything, so a
-                            banner fed by graphCounts (the REAL full-graph size from
-                            getSchema) vs bigGraphThreshold is the only thing that
-                            actually fires. It's visible both before and after Load,
-                            any time the true counts exceed the threshold. */}
-                        <div style={{ flexShrink:0, display:'flex', alignItems:'center', gap:8, fontSize:11, color:'#636e72' }}>
-                            <button onClick={function(){ handleVisualizeLoad(); }} disabled={!activeGraph || vizProgress.loading} style={{
-                                padding:'3px 10px', border:'none', borderRadius:4, cursor: (!activeGraph || vizProgress.loading) ? 'not-allowed' : 'pointer',
-                                fontWeight:700, color:'#fff', fontSize:11, fontFamily:'inherit', flexShrink:0,
-                                background: (!activeGraph || vizProgress.loading) ? '#74b9ff' : 'linear-gradient(135deg,#0984e3,#0872c4)',
-                            }}>{vizProgress.loading ? 'Loading…' : (graphTableData ? 'Refresh' : 'Load')}</button>
-                            {(vizProgress.loading || vizProgress.total > 0) && (
-                                <React.Fragment>
-                                    <div style={{ height:4, width:100, flexShrink:0, background:'#eee', borderRadius:2, overflow:'hidden' }}>
-                                        <div style={{
-                                            height:'100%',
-                                            width: (vizProgress.total > 0 ? Math.min(100, (vizProgress.loaded / vizProgress.total) * 100) : 0) + '%',
-                                            background: vizProgress.loading ? '#0984e3' : '#00b894',
-                                            transition:'width 0.2s',
-                                        }} />
-                                    </div>
-                                    <span style={{ whiteSpace:'nowrap' }}>{vizProgress.loaded.toLocaleString()} / {vizProgress.total.toLocaleString()} loaded</span>
-                                </React.Fragment>
-                            )}
-                            {vizLoadError && <span style={{ color:'#d63031', fontWeight:600 }}>{vizLoadError}</span>}
-                        </div>
-                        {(graphCounts.nodes > bigGraphThreshold || graphCounts.edges > bigGraphThreshold) && (
-                            <div style={{ flexShrink:0, padding:'4px 10px', background:'#fff3cd', color:'#856404', border:'1px solid #ffeeba', borderRadius:5, fontSize:11, fontWeight:600, display:'flex', alignItems:'center', flexWrap:'wrap', gap:6 }}>
-                                <span>
-                                    {'⚠ Large graph: ' + graphCounts.nodes.toLocaleString() + ' nodes / ' + graphCounts.edges.toLocaleString() +
-                                     ' edges exceed the ' + bigGraphThreshold.toLocaleString() + ' threshold — visualizing may be slow.'}
-                                </span>
-                                <button onClick={function(){ handleVisualizeLoad(true); }} disabled={!activeGraph || vizProgress.loading} title="Load and visualize the whole graph" style={{
-                                    padding:'2px 8px', border:'1px solid #856404', borderRadius:4, cursor: (!activeGraph || vizProgress.loading) ? 'not-allowed' : 'pointer',
-                                    fontWeight:700, color:'#856404', background:'#fff', fontSize:10, fontFamily:'inherit', opacity: (!activeGraph || vizProgress.loading) ? 0.5 : 1, flexShrink:0, whiteSpace:'nowrap',
-                                }}>Continue — visualize anyway</button>
-                            </div>
-                        )}
-                        {graphTableData ? (
-                            <div ref={vizSplitRef} style={{ flex:1, minHeight:0, position:'relative' }}>
-                                <SplitPane direction="horizontal" split={hSplit} onSplitChange={setHSplit} minA={300} minB={250}>
-                                    {/* LEFT: Ontology (top) over force-graph (bottom) */}
-                                    <SplitPane direction="vertical" split={vSplit} onSplitChange={setVSplit} minA={80} minB={150}>
-                                        <OntologyViewer
-                                            dotString={dotString} pickingEnabled={pickingEnabled}
-                                            onPickLabel={handleOntologyPick} apiRef={ontologyApiRef}
-                                            schemaFullSearch={schemaFullSearch} onToggleSchemaFullSearch={function(){setSchemaFullSearch(function(p){return !p;});}}
-                                            schemaNodeLabelkeys={schemaNodeLabelkeys} onToggleSchemaNodeLabelkeys={function(){setSchemaNodeLabelkeys(function(p){return !p;});}}
-                                            schemaEdgeLabelkeys={schemaEdgeLabelkeys} onToggleSchemaEdgeLabelkeys={function(){setSchemaEdgeLabelkeys(function(p){return !p;});}}
-                                            onToggleMaximize={function(){ setMaximizedPanel('ontology'); }}
+                    <div style={{ display:'flex', flexDirection:'column', flex:1, width:'100%', minHeight:0, alignSelf:'stretch' }}>
+                        {/* Explorer-parity Visualize: the ontology (top-left) and the
+                            two label donuts (right) mount IMMEDIATELY on opening the
+                            tab — there's no top Load/Refresh strip and no big-graph
+                            banner. The ONLY entity-load trigger is CanvasGraph's own
+                            built-in "↻ Pull+Visualize" button, whose progress renders
+                            on CanvasGraph's info line. Big-graph gating stays via the
+                            in-canvas [threshold] selector. The layout is mounted
+                            unconditionally (not gated on graphTableData) so the page
+                            fills the window's vertical extent and the force-graph
+                            panel is pinned to the bottom even before any pull —
+                            CanvasGraph renders an empty canvas until data arrives. */}
+                        <div ref={vizSplitRef} style={{ flex:1, minHeight:0, position:'relative' }}>
+                            <SplitPane direction="horizontal" split={hSplit} onSplitChange={setHSplit} minA={300} minB={250}>
+                                {/* LEFT: Ontology (top) over force-graph (bottom) */}
+                                <SplitPane direction="vertical" split={vSplit} onSplitChange={setVSplit} minA={80} minB={150}>
+                                    <OntologyViewer
+                                        dotString={dotString} pickingEnabled={pickingEnabled}
+                                        onPickLabel={handleOntologyPick} apiRef={ontologyApiRef}
+                                        schemaFullSearch={schemaFullSearch} onToggleSchemaFullSearch={function(){setSchemaFullSearch(function(p){return !p;});}}
+                                        schemaNodeLabelkeys={schemaNodeLabelkeys} onToggleSchemaNodeLabelkeys={function(){setSchemaNodeLabelkeys(function(p){return !p;});}}
+                                        schemaEdgeLabelkeys={schemaEdgeLabelkeys} onToggleSchemaEdgeLabelkeys={function(){setSchemaEdgeLabelkeys(function(p){return !p;});}}
+                                        onToggleMaximize={function(){ setMaximizedPanel('ontology'); }}
+                                    />
+                                    <div style={{ minWidth:0, minHeight:0, display:'flex', height:'100%' }}>
+                                        <CanvasGraph
+                                            data={graphTableData} graphName={activeGraph} gwClient={gwClient}
+                                            credentials={credentials} nodeSourceTable={nodeSourceTable} labelData={labelData}
+                                            nodeLabelDist={nodeDonut.items} edgeLabelDist={edgeDonut.items}
+                                            selectedNodeLabels={selectedNodeLabels} selectedEdgeLabels={selectedEdgeLabels}
+                                            nodeLimit={canvasNodeLimit} onNodeLimitChange={setCanvasNodeLimit}
+                                            edgeLimit={canvasEdgeLimit} onEdgeLimitChange={setCanvasEdgeLimit}
+                                            bigGraphThreshold={bigGraphThreshold} onChangeBigGraphThreshold={setBigGraphThreshold}
+                                            onVisualize={handleVisualizeLoad} vizLoading={vizProgress.loading}
+                                            vizProgress={vizProgress} vizLoadError={vizLoadError}
+                                            onToggleMaximize={function(){ setMaximizedPanel('canvas'); }}
                                         />
-                                        <div style={{ minWidth:0, minHeight:0, display:'flex', height:'100%' }}>
-                                            <CanvasGraph
-                                                data={graphTableData} graphName={activeGraph} gwClient={gwClient}
-                                                credentials={credentials} nodeSourceTable={nodeSourceTable} labelData={labelData}
-                                                nodeLabelDist={nodeDonut.items} edgeLabelDist={edgeDonut.items}
-                                                selectedNodeLabels={selectedNodeLabels} selectedEdgeLabels={selectedEdgeLabels}
-                                                nodeLimit={canvasNodeLimit} onNodeLimitChange={setCanvasNodeLimit}
-                                                edgeLimit={canvasEdgeLimit} onEdgeLimitChange={setCanvasEdgeLimit}
-                                                bigGraphThreshold={bigGraphThreshold} onChangeBigGraphThreshold={setBigGraphThreshold}
-                                                onVisualize={handleVisualizeLoad} vizLoading={vizProgress.loading}
-                                                onToggleMaximize={function(){ setMaximizedPanel('canvas'); }}
-                                            />
-                                        </div>
-                                    </SplitPane>
-                                    {/* RIGHT: label donuts */}
-                                    <div style={{ display:'flex', flexDirection:'column', gap:16, height:'100%', overflow:'auto', paddingLeft:4 }}>
-                                        <SplitPane direction="vertical" split={rightVSplit} onSplitChange={setRightVSplit} minA={150} minB={150}>
-                                            <LabelChart
-                                                title="Nodes by Label" items={nodeDonut.items} total={nodeDonut.total}
-                                                pickingEnabled={true} selectedLabels={selectedNodeLabels} onToggleLabel={toggleSelectedNodeLabel}
-                                            />
-                                            <LabelChart
-                                                title="Edges by Label" items={edgeDonut.items} total={edgeDonut.total}
-                                                pickingEnabled={true} selectedLabels={selectedEdgeLabels} onToggleLabel={toggleSelectedEdgeLabel}
-                                            />
-                                        </SplitPane>
                                     </div>
                                 </SplitPane>
-                                <CornerHandle hSplit={hSplit} vSplit={vSplit}
-                                    onDrag={function(dx, dy){
-                                        var el = vizSplitRef.current;
-                                        var w = el ? el.clientWidth : 800;
-                                        var h = el ? el.clientHeight : 600;
-                                        setHSplit(function(p){ return Math.max(0.15, Math.min(0.85, p + dx / w)); });
-                                        setVSplit(function(p){ return Math.max(0.15, Math.min(0.85, p + dy / h)); });
-                                    }} />
-                            </div>
-                        ) : (
-                            <div style={{ textAlign:'center', color:'#636e72', margin:'auto' }}>
-                                <h2 style={{ fontWeight:700, fontSize:20, margin:'0 0 8px' }}>Visualize</h2>
-                                <p style={{ fontSize:14, color:'#b2bec3' }}>Use the Load button above to fetch this graph's nodes/edges and render it.</p>
-                            </div>
-                        )}
+                                {/* RIGHT: label donuts */}
+                                <div style={{ display:'flex', flexDirection:'column', gap:16, height:'100%', overflow:'auto', paddingLeft:4 }}>
+                                    <SplitPane direction="vertical" split={rightVSplit} onSplitChange={setRightVSplit} minA={150} minB={150}>
+                                        <LabelChart
+                                            title="Nodes by Label" items={nodeDonut.items} total={nodeDonut.total}
+                                            pickingEnabled={true} selectedLabels={selectedNodeLabels} onToggleLabel={toggleSelectedNodeLabel}
+                                        />
+                                        <LabelChart
+                                            title="Edges by Label" items={edgeDonut.items} total={edgeDonut.total}
+                                            pickingEnabled={true} selectedLabels={selectedEdgeLabels} onToggleLabel={toggleSelectedEdgeLabel}
+                                        />
+                                    </SplitPane>
+                                </div>
+                            </SplitPane>
+                            <CornerHandle hSplit={hSplit} vSplit={vSplit}
+                                onDrag={function(dx, dy){
+                                    var el = vizSplitRef.current;
+                                    var w = el ? el.clientWidth : 800;
+                                    var h = el ? el.clientHeight : 600;
+                                    setHSplit(function(p){ return Math.max(0.15, Math.min(0.85, p + dx / w)); });
+                                    setVSplit(function(p){ return Math.max(0.15, Math.min(0.85, p + dy / h)); });
+                                }} />
+                        </div>
                     </div>
                 )}
             </div>
