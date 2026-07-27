@@ -5,6 +5,7 @@ from xgraph_gateway.adapters.kinetica_adapter import (
     KineticaAdapter,
     _escape_sql_literal,
     _row_to_record,
+    _node_id_column_from_ddl,
 )
 
 # ---------------------------------------------------------------------------
@@ -36,6 +37,23 @@ _DDL_RESP = {
     "original_request": [json.dumps({"statement": _ORIGINAL_REQUEST_STATEMENT})],
 }
 
+# A graph built with `SELECT * FROM <table>` (no `AS NODE` alias) -- xgraph's own
+# extract graphs and the user's `rvv_new` are shaped like this. The node id column
+# is the literal `NODE` column, discoverable only by probing the backing table.
+_SELECT_STAR_STATEMENT = (
+    "create or replace directed graph ki_home.rvv_new (\n"
+    "    nodes => INPUT_TABLES((SELECT * FROM rvv_new_nodes)),\n"
+    "    EDGES => INPUT_TABLES((\n"
+    "        SELECT entity_a_uuid as NODE1, entity_b_uuid as NODE2, relationship_a_b as LABEL\n"
+    "        FROM rvv_new\n"
+    "    )),\n"
+    "    OPTIONS => KV_PAIRS(save_persist = 'true')\n"
+    ");"
+)
+_SELECT_STAR_RESP = {
+    "original_request": [json.dumps({"statement": _SELECT_STAR_STATEMENT})],
+}
+
 
 # ---------------------------------------------------------------------------
 # Unit tests -- pure helpers.
@@ -56,6 +74,30 @@ def test_row_to_record_shapes_full_row_as_props():
     assert rec == {"id": "b1", "label": "bank", "props": row}
     # props must be the full record, not a subset
     assert "bank:name" in rec["props"] and "bank:risk" in rec["props"]
+
+def test_row_to_record_resolves_uppercase_node_and_label_columns():
+    # Extract/rvv graphs store the identity in NODE and the type in LABEL (uppercase).
+    row = {"NODE": "u1", "LABEL": "organization", "entity_a_name": "BARLOWS"}
+    rec = _row_to_record(row, "u1")
+    assert rec["id"] == "u1"
+    assert rec["label"] == "organization"
+    assert rec["props"] == row
+
+
+def test_node_id_column_from_ddl_finds_explicit_alias():
+    # banking: `id as NODE` in the NODES sub-select -> the source id column is `id`.
+    assert _node_id_column_from_ddl(_ORIGINAL_REQUEST_STATEMENT) == "id"
+
+def test_node_id_column_from_ddl_none_for_select_star():
+    # `SELECT * FROM rvv_new_nodes` has no `AS NODE` alias -> None (caller probes).
+    assert _node_id_column_from_ddl(_SELECT_STAR_STATEMENT) is None
+
+def test_node_id_column_from_ddl_ignores_edge_node1_node2_aliases():
+    # `as NODE1`/`as NODE2` in the EDGES section must not be mistaken for the id alias.
+    assert _node_id_column_from_ddl(_SELECT_STAR_STATEMENT) is None
+
+def test_node_id_column_from_ddl_empty_statement():
+    assert _node_id_column_from_ddl("") is None
 
 
 # ---------------------------------------------------------------------------
@@ -119,6 +161,76 @@ def test_get_record_never_raises_when_query_blows_up():
 def test_get_record_never_raises_when_show_graph_blows_up():
     adapter = _bare_adapter(raise_on_show_graph=True)
     assert adapter.get_record("expero.banking_graph", "b1") == {}
+
+def test_get_record_resolves_NODE_column_via_probe_when_no_alias():
+    # rvv_new: NODES is `SELECT *` (no alias) and the id column is `NODE`. The
+    # adapter must probe the backing table's columns and query `WHERE NODE = ...`,
+    # NOT the hardcoded `id` (which doesn't exist on rvv_new_nodes).
+    row = {"NODE": "c2a9d904-a1d8-488f-a71d-8746841ab901", "LABEL": "organization",
+           "entity_a_name": "BARLOWS", "source_table_id": 7}
+    adapter = _bare_adapter(_SELECT_STAR_RESP, rows=[row])
+    rec = adapter.get_record("ki_home.rvv_new", "c2a9d904-a1d8-488f-a71d-8746841ab901")
+    sql = adapter._src.last_sql
+    assert "WHERE NODE = 'c2a9d904-a1d8-488f-a71d-8746841ab901'" in sql
+    assert "FROM rvv_new_nodes" in sql
+    assert rec["id"] == "c2a9d904-a1d8-488f-a71d-8746841ab901"
+    assert rec["label"] == "organization"
+    assert rec["props"] == row
+
+def test_get_record_escapes_quote_in_probed_node_column():
+    # Escaping must still apply when the id column comes from a probe.
+    row = {"NODE": "x", "LABEL": "t"}
+    adapter = _bare_adapter(_SELECT_STAR_RESP, rows=[row])
+    adapter.get_record("ki_home.rvv_new", "a' OR '1'='1")
+    sql = adapter._src.last_sql
+    assert "NODE = 'a'' OR ''1''=''1'" in sql
+
+
+# ---------------------------------------------------------------------------
+# fetch_node_attrs -- Explain's "hydrate from the graph's own nodes" path.
+# Kinetica extract graphs store attributes ON the backing node table, so this
+# must return them (keyed by NODE) instead of Explain falling through to an
+# unrelated external Parquet.
+# ---------------------------------------------------------------------------
+
+def test_fetch_node_attrs_keys_by_node_and_drops_label():
+    row = {"NODE": "u1", "LABEL": "organization",
+           "entity_a_name": "BARLOWS", "source_field_a": "supplier_name"}
+    adapter = _bare_adapter(_SELECT_STAR_RESP, rows=[row])
+    out = adapter.fetch_node_attrs("ki_home.rvv_new", ["u1"])
+    assert len(out) == 1
+    assert out[0]["NODE"] == "u1"
+    assert out[0]["entity_a_name"] == "BARLOWS"
+    assert out[0]["source_field_a"] == "supplier_name"
+    assert "LABEL" not in out[0]           # metadata dropped
+    sql = adapter._src.last_sql
+    assert "FROM rvv_new_nodes" in sql
+    assert "WHERE NODE IN (" in sql        # resolved id column, not hardcoded id
+
+def test_fetch_node_attrs_empty_ids_returns_empty():
+    adapter = _bare_adapter(_SELECT_STAR_RESP, rows=[{"NODE": "u1", "LABEL": "t"}])
+    assert adapter.fetch_node_attrs("ki_home.rvv_new", []) == []
+
+def test_fetch_node_attrs_filters_non_string_ids():
+    adapter = _bare_adapter(_SELECT_STAR_RESP, rows=[{"NODE": "u1", "LABEL": "t"}])
+    # None/ints (e.g. an aggregate/count value in a result row) are ignored.
+    out = adapter.fetch_node_attrs("ki_home.rvv_new", [None, 7, "u1"])
+    assert out and out[0]["NODE"] == "u1"
+    assert "'u1'" in adapter._src.last_sql
+    assert "7" not in adapter._src.last_sql.split("IN (")[1]
+
+def test_fetch_node_attrs_escapes_quotes_in_ids():
+    adapter = _bare_adapter(_SELECT_STAR_RESP, rows=[{"NODE": "x", "LABEL": "t"}])
+    adapter.fetch_node_attrs("ki_home.rvv_new", ["a'b"])
+    assert "'a''b'" in adapter._src.last_sql
+
+def test_fetch_node_attrs_never_raises_returns_empty():
+    adapter = _bare_adapter(_SELECT_STAR_RESP, rows=[{"NODE": "x"}], raise_on_query=True)
+    assert adapter.fetch_node_attrs("ki_home.rvv_new", ["x"]) == []
+
+def test_fetch_node_attrs_no_backing_table_returns_empty():
+    adapter = _bare_adapter({"original_request": []}, rows=[{"NODE": "x"}])
+    assert adapter.fetch_node_attrs("ki_home.rvv_new", ["x"]) == []
 
 
 # ---------------------------------------------------------------------------

@@ -151,6 +151,13 @@ Target dialect: Kinetica GQL, wrapped as a SQL SELECT over graph_table(). Rules 
   relationship, use an UNTYPED relationship `(a)-[r]-(b)` (both directions) so ALL relationship types
   are captured — do not pick a single named type.
 - Reversed edges are kept verbatim: (e)<-[:manages]-(g) stays exactly like that.
+- DOUBLE-QUOTE any relationship type or node label that is not a plain identifier
+  (contains '/', '-', '.', spaces, or other non `A-Za-z0-9_` characters). Kinetica GQL
+  reads a bare '/' as a regex/path operator, so an unquoted type silently matches 0 rows.
+  Example — the type `employs/is_employed_by` MUST be written quoted:
+    MATCH (a:organization)-[ab:"employs/is_employed_by"]->(b:person)
+  A plain type like `:performed` needs no quotes. The SAME rule applies to a label with
+  special characters, e.g. (n:"wire-message").
 - In the OUTER SELECT, ORDER BY a column ALIAS (ORDER BY total_transaction DESC), never a bare column
   number (not `ORDER BY 3`).
 - Kinetica GQL does NOT support `EXISTS {{ ... }}` subquery blocks or negated path patterns

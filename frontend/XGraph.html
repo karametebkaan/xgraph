@@ -47,7 +47,7 @@
 const { useState, useEffect, useRef, useCallback, useMemo } = React;
 
 /* ═══════════════════════ CONSTANTS ════════════════════════ */
-const EXPLORER_VERSION = "0.18.2";  // xGraph version — bump on frontend changes so a stale browser cache is visible
+const EXPLORER_VERSION = "0.18.5";  // xGraph version — bump on frontend changes so a stale browser cache is visible
 const SAFETY_TIMEOUT_MS = 10 * 60 * 1000;
 const PALETTE = [
     { solid: '#0984e3', light: '#e1f0fb' }, { solid: '#00cec9', light: '#e0f9f8' },
@@ -1652,10 +1652,15 @@ function QueryPanel(props) {
         var cols = (result && result.columns) || [];
         var rws = (result && result.rows) || [];
         setExplainBusy(true); setExplainError(null); setExplainResp(null);
+        // HYDRATE_SOURCE is the banking-demo Parquet — a FalkorDB skinny-graph
+        // fallback. Only pass it for FalkorDB; Kinetica extract graphs carry
+        // their attributes on the backing node table (backend fetch_node_attrs
+        // step 1), so passing banking Parquet there post-joins unrelated data.
+        var hydrateSource = (props.engine === 'falkordb') ? HYDRATE_SOURCE : '';
         try {
             var r = await props.gwClient.explain(
                 explainFocus.trim() || 'Explain these results',
-                cols, rws, sql, HYDRATE_SOURCE, props.graphName);
+                cols, rws, sql, hydrateSource, props.graphName);
             setExplainResp(r);
         } catch (err) { setExplainError(err.message); }
         finally { setExplainBusy(false); }
@@ -2410,7 +2415,11 @@ function QueryPanel(props) {
     };
 
     // Quote a label if it contains spaces
-    var quoteLabel = function(l) { return l.indexOf(' ') !== -1 ? '"' + l + '"' : l; };
+    // Kinetica GQL / openCypher treat a bare label as an identifier; anything
+    // that isn't a plain word ([A-Za-z0-9_]) — a space, and crucially a '/' as in
+    // "employs/is_employed_by" (GQL reads '/' as a regex/path operator, silently
+    // matching zero rows) — must be double-quoted: -[ab:"employs/is_employed_by"]->.
+    var quoteLabel = function(l) { return /^[A-Za-z0-9_]+$/.test(String(l)) ? l : '"' + l + '"'; };
 
     // Convert nodeKey "FEMALE|dance" to GQL label syntax ":FEMALE|dance" (with quoting)
     var keyToGql = function(key) {
@@ -6537,6 +6546,15 @@ function SetupPanel(props) {
     var colTitle = { fontWeight:800, fontSize:12, letterSpacing:'0.4px', textTransform:'uppercase', color:'#0984e3', margin:'0 0 12px', paddingBottom:8, borderBottom:'2px solid #eaeef1' };
 
     var setGraphField = function(k, v) { setGraphConn(function(prev){ var n = Object.assign({}, prev); n[k] = v; return n; }); };
+    // Per-engine dev passwords: the single graphConn.password field is shared
+    // across both engines, so switching the engine auto-fills the matching
+    // password (FalkorDB's --requirepass vs the Kinetica admin pass) — the user
+    // never re-types it on an engine change. Local-dev convenience only.
+    var ENGINE_DEFAULT_PW = { falkordb: 'IL3@rnF@lcorDB', kinetica: 'Kinetica1!' };
+    var selectGraphEngine = function(eng) {
+        setGraphEngine(eng);
+        setGraphField('password', ENGINE_DEFAULT_PW[eng] || '');
+    };
     var setOlapField = function(k, v) { setOlapConn(function(prev){ var n = Object.assign({}, prev); n[k] = v; return n; }); };
     var setLlmField = function(k, v) { setLlmConn(function(prev){ var n = Object.assign({}, prev); n[k] = v; return n; }); };
     var showPwState = React.useState(false); var showPw = showPwState[0], setShowPw = showPwState[1];
@@ -6567,8 +6585,8 @@ function SetupPanel(props) {
             <div style={col}>
                 <div style={colTitle}>Graph</div>
                 <div style={{ marginBottom:10 }}>
-                    <label style={radioLbl}><input type="radio" checked={graphEngine === 'falkordb'} onChange={function(){ setGraphEngine('falkordb'); }}/> FalkorDB</label>
-                    <label style={radioLbl}><input type="radio" checked={graphEngine === 'kinetica'} onChange={function(){ setGraphEngine('kinetica'); }}/> Kinetica</label>
+                    <label style={radioLbl}><input type="radio" checked={graphEngine === 'falkordb'} onChange={function(){ selectGraphEngine('falkordb'); }}/> FalkorDB</label>
+                    <label style={radioLbl}><input type="radio" checked={graphEngine === 'kinetica'} onChange={function(){ selectGraphEngine('kinetica'); }}/> Kinetica</label>
                 </div>
                 {graphEngine === 'falkordb' ? (
                     <div>

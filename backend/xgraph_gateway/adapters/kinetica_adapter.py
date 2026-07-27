@@ -122,6 +122,28 @@ def _backing_tables(resp) -> tuple[str | None, str | None]:
 
     return (_first_from("nodes"), _first_from("edges"))
 
+def _node_id_column_from_ddl(statement: str) -> str | None:
+    """Find the SOURCE column that feeds a graph's NODE identity by parsing the
+    NODES sub-select for a `<col> as NODE` / `<col> as NODE_ID` alias
+    (case-insensitive) -- e.g. banking's `id as NODE` -> `id`. Returns None when
+    there is no explicit alias (a `SELECT *`, or `NODE` selected verbatim like
+    xgraph's own extract graphs and the user's rvv_new); the caller then probes
+    the backing table's columns. Mirrors explorer's `extractNodeSourceTable`
+    (`(\\w+)\\s+as\\s+NODE_ID|NODE`) + probe-fallback pair.
+
+    The search is scoped to the `nodes => ...` section (up to `edges =>`), so an
+    edge projection's `... as NODE1`/`as NODE2` can never be mistaken for the
+    node id alias (and `\\bNODE\\b` would reject NODE1/NODE2 anyway).
+    """
+    if not statement:
+        return None
+    nm = re.search(r"nodes\s*=>(.*?)(?:\bedges\s*=>|$)",
+                   statement, re.IGNORECASE | re.DOTALL)
+    section = nm.group(1) if nm else statement
+    m = (re.search(r"([A-Za-z0-9_.]+)\s+as\s+NODE_ID\b", section, re.IGNORECASE)
+         or re.search(r"([A-Za-z0-9_.]+)\s+as\s+NODE\b", section, re.IGNORECASE))
+    return m.group(1) if m else None
+
 def _as_labels(v) -> list[str]:
     """Normalize a Kinetica LABEL/label-array value to a flat list of label
     strings. An extract graph's `VARCHAR[]` LABEL column (Task 7+, multi-
@@ -268,13 +290,17 @@ def graph_from_gql_result(gql_result: dict) -> dict:
 def _row_to_record(row: dict, node_id) -> dict:
     """Shape one backing-table row into the {"id","label","props"} contract
     shared with FalkorDBAdapter.get_record. `props` is the *entire* row --
-    picking a node needs every attribute column, not just id/label. Falls
-    back to the caller's `node_id` for "id" and None for "label" if either
-    column is absent from the row (schema drift), never raises.
+    picking a node needs every attribute column, not just id/label. The id and
+    label columns are resolved case-insensitively across the two shapes that
+    occur in practice: banking (`id`/`label`) and extract/rvv (`NODE`/`LABEL`).
+    Falls back to the caller's `node_id` for "id" and None for "label" if
+    neither column is present (schema drift), never raises.
     """
+    low = {k.lower(): v for k, v in row.items()}
+    ident = low.get("id", low.get("node"))
     return {
-        "id": row.get("id", node_id),
-        "label": row.get("label"),
+        "id": ident if ident is not None else node_id,
+        "label": low.get("label"),
         "props": dict(row),
     }
 
@@ -857,25 +883,96 @@ class KineticaAdapter(GraphEngineAdapter):
                               "target": r.get(e_tgt), "type": r.get(e_lbl) if e_lbl else None})
         return {"nodes": nodes, "edges": edges}
 
+    def _probe_node_id_column(self, vtable) -> str | None:
+        """Read one row of `vtable` and pick the node-identity column, mirroring
+        explorer's `resolveCol(['node','id','NODE','NODE_NAME','NODE_ID','name'])`
+        probe for graphs whose NODES sub-select carries no explicit `AS NODE`
+        alias (a `SELECT *`, or `NODE` selected verbatim). `NODE` wins over `id`
+        so an extract/rvv table -- whose identity IS the `NODE` column -- resolves
+        correctly even when it also happens to carry an unrelated `id` column.
+        Returns None (caller returns {}) if the table is empty or unreadable."""
+        try:
+            probe = list(self._src.rows(f"SELECT * FROM {vtable} LIMIT 1"))
+        except Exception:
+            return None
+        if not probe:
+            return None
+        cols = {c.lower(): c for c in probe[0].keys()}
+        for cand in ("node", "id", "node_id", "node_name", "name"):
+            if cand in cols:
+                return cols[cand]
+        return None
+
     def get_record(self, graph, node_id):
         # The "post-join": picking a node pulls its full record from the
         # backing vertex table (explorer's `/get/records`). Never raises --
         # a bad id / unreachable Kinetica should not crash picking, it should
         # just show nothing.
+        #
+        # The node-id column is NOT always `id`: banking aliases `id as NODE`
+        # (source column `id`), but xgraph's own extract graphs and the user's
+        # rvv_new select the literal `NODE` column (`SELECT *` / `SELECT NODE`).
+        # Resolve it the way explorer does -- parse the DDL for a `<col> as NODE`
+        # alias, else probe the backing table's columns -- instead of hardcoding
+        # `id` (which errors on rvv_new_nodes: "Column 'id' not found").
         try:
             resp = self._db.show_graph(graph_name=graph)
             vtable, _etable = _backing_tables(resp)
             if not vtable:
                 return {}
             _validate_table_ident(vtable)
+            id_col = (_node_id_column_from_ddl(_creation_statement_text(resp))
+                      or self._probe_node_id_column(vtable))
+            if not id_col:
+                return {}
             escaped_id = _escape_sql_literal(node_id)
             rows = list(self._src.rows(
-                f"SELECT * FROM {vtable} WHERE id = '{escaped_id}' LIMIT 1"))
+                f"SELECT * FROM {vtable} WHERE {id_col} = '{escaped_id}' LIMIT 1"))
             if not rows:
                 return {}
             return _row_to_record(rows[0], node_id)
         except Exception:
             return {}
+
+    def fetch_node_attrs(self, graph, ids):
+        """Wide attribute rows `{NODE, <attrs>}` for the given NODE ids, read
+        from the graph's backing node table -- Explain's post-join source when
+        attributes live ON the nodes. Kinetica extract graphs (rvv_new) and
+        banking-on-Kinetica (whose expero.vertexes carries the party:* columns)
+        both store attrs on the node table, so returning them here keeps Explain
+        from falling through to an unrelated external Parquet. The node-id
+        column is resolved exactly as get_record does (DDL `as NODE` alias, else
+        a column probe); rows are keyed by `NODE` = that column's value so the
+        post-join joins on it, with LABEL/id/provenance metadata dropped.
+        Never raises (Explain treats [] as "no graph-native attrs")."""
+        ids = [i for i in dict.fromkeys(ids) if isinstance(i, str)]
+        if not ids:
+            return []
+        try:
+            resp = self._db.show_graph(graph_name=graph)
+            vtable, _etable = _backing_tables(resp)
+            if not vtable:
+                return []
+            _validate_table_ident(vtable)
+            id_col = (_node_id_column_from_ddl(_creation_statement_text(resp))
+                      or self._probe_node_id_column(vtable))
+            if not id_col:
+                return []
+            in_list = ", ".join("'" + _escape_sql_literal(i) + "'" for i in ids)
+            rows = list(self._src.rows(
+                f"SELECT * FROM {vtable} WHERE {id_col} IN ({in_list})"))
+        except Exception:
+            return []
+        skip = {id_col.lower(), "label", "label_raw", "first_seen_ts", "last_seen_ts"}
+        out = []
+        for r in rows:
+            row = {"NODE": r.get(id_col)}
+            for k, v in r.items():
+                if k.lower() in skip or k.upper() == "NODE":
+                    continue
+                row[k] = v
+            out.append(row)
+        return out
 
     def load_graph(self, spec):
         ddl = spec.get("ddl")

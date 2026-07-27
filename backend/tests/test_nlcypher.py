@@ -260,6 +260,16 @@ def test_kinetica_prompt_requires_graph_table_wrapper_form():
     assert "graph_table" not in fp
 
 
+def test_kinetica_prompt_quotes_special_char_rel_types():
+    # Kinetica GQL reads '/' (and other non-identifier chars) in a bare rel type
+    # as a regex/path operator, so `employs/is_employed_by` silently matches 0
+    # rows unless double-quoted: -[ab:"employs/is_employed_by"]->. The dialect
+    # must steer the LLM to quote such rel types/labels.
+    kp = _capture_prompt("kinetica")
+    assert 'employs/is_employed_by' in kp             # the worked example
+    assert '[ab:"employs/is_employed_by"]' in kp      # shown double-quoted
+
+
 def test_kinetica_graph_table_query_passes_readonly_validation():
     # A realistic wrapped Kinetica query (aggregation in the outer SELECT) must
     # survive the read-only guard — SELECT/graph_table is not a write.
