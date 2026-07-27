@@ -29,6 +29,16 @@ def test_fast_model_is_haiku_and_status_exposes_both():
     assert st["fast_model"] == "claude-haiku-4-5-20251001"  # ask/explain tier
 
 
+def test_vertex_model_id_maps_dated_haiku_to_at_form():
+    # Vertex publisher model IDs use an @-version suffix for DATED models; the
+    # `claude` CLI maps this internally but the SDK passes the string verbatim,
+    # so the SDK-on-Vertex route must translate: haiku's dated id needs @, the
+    # undated opus alias is used as-is.
+    assert llm._vertex_model_id("claude-haiku-4-5-20251001") == "claude-haiku-4-5@20251001"
+    assert llm._vertex_model_id("claude-opus-4-8") == "claude-opus-4-8"
+    assert llm._vertex_model_id("") == ""
+
+
 def test_warmup_warms_the_fast_tier(monkeypatch):
     # Ask/Explain run on the fast (Haiku) tier, so warmup MUST fire a call on
     # fast_model() — otherwise the first Explain pays a cold Vertex start on a

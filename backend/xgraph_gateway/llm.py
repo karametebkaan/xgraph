@@ -200,13 +200,25 @@ def _llm_claude_cli(prompt: str, schema: Optional[dict], model: Optional[str], c
     return wrapper.get("result", "")
 
 
+def _vertex_model_id(model: str) -> str:
+    """Translate an Anthropic-native model id to its Vertex publisher form.
+
+    Vertex expects a DATED model as `<name>@<YYYYMMDD>` (claude-haiku-4-5-20251001
+    -> claude-haiku-4-5@20251001); undated aliases (claude-opus-4-8) are used
+    verbatim. The `claude` CLI does this mapping internally; the SDK passes the
+    string straight through, so the SDK-on-Vertex route must translate here or
+    Vertex 404s the model."""
+    return re.sub(r"-(\d{8})$", r"@\1", model or "")
+
+
 def _llm_claude_sdk(prompt: str, schema: Optional[dict], model: Optional[str], cfg: dict) -> Any:
     import anthropic
+    m = model or cfg.get("model") or _DEFAULT_MODEL
     if cfg["auth"] == "vertex":
         client = anthropic.AnthropicVertex(project_id=cfg["project"], region=cfg["region"])
+        m = _vertex_model_id(m)
     else:
         client = anthropic.Anthropic(api_key=cfg.get("api_key") or None)
-    m = model or cfg.get("model") or _DEFAULT_MODEL
     resp = client.messages.create(model=m, max_tokens=2048,
                                   messages=[{"role": "user", "content": prompt}])
     text = "".join(b.text for b in resp.content if b.type == "text")

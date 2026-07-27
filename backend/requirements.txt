@@ -14,6 +14,8 @@ python-dotenv        # .env loading
 pypdf                # Extract: PDF text extraction (xgraph_gateway/extract.py)
 python-multipart     # FastAPI multipart/form parsing (POST /extract UploadFile+Form)
 pytest
-# Optional: only needed for the Anthropic SDK LLM fallback (the `claude` CLI is
-# the default backend and needs nothing here).
-# anthropic
+# Only needed for the SDK LLM mechanism (the `claude` CLI is the default backend
+# and needs nothing here). The [vertex] extra pulls google-auth so the SDK route
+# can authenticate to Vertex via ADC. The route is user-selectable at runtime, so
+# this is safe to have installed even when running on the default CLI route.
+anthropic[vertex]
