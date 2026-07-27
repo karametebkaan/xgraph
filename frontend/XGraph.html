@@ -47,7 +47,7 @@
 const { useState, useEffect, useRef, useCallback, useMemo } = React;
 
 /* ═══════════════════════ CONSTANTS ════════════════════════ */
-const EXPLORER_VERSION = "0.20.1";  // xGraph version — bump on frontend changes so a stale browser cache is visible
+const EXPLORER_VERSION = "0.21.3";  // xGraph version — bump on frontend changes so a stale browser cache is visible
 const SAFETY_TIMEOUT_MS = 10 * 60 * 1000;
 const PALETTE = [
     { solid: '#0984e3', light: '#e1f0fb' }, { solid: '#00cec9', light: '#e0f9f8' },
@@ -420,6 +420,46 @@ function resolveCol(headers, candidates) {
         }
     }
     return null;
+}
+
+// Canonical combo-key for a label value, used EVERYWHERE a label must be keyed:
+// the donut chart (emit selection + mark SELECTED), the canvas color map (build
+// keys), the canvas color lookups, and the canvas selection filter. A label can
+// arrive as a JSON-array-STRING ('["organization"]', how extract/RVV Kinetica
+// graphs store it), a comma-joined string ('Person, Engineer'), a plain scalar,
+// or an array of any of those. Flatten every form to the same sorted pipe-joined
+// key so all four sites agree — otherwise the donut/labelData side keys
+// '["organization"]' while the canvas keys 'organization', and colors fall back
+// to gray + donut selection matches nothing (the reported bugs).
+function labelComboKey(val) {
+    var out = [];
+    var push = function(s) {
+        if (s == null) return;
+        s = String(s);
+        if (s === '' || s === 'None' || s === '(none)') return;
+        if (s.charAt(0) === '[') {
+            try {
+                var arr = JSON.parse(s);
+                if (Array.isArray(arr)) { arr.forEach(function(x){ if (x != null && x !== '') out.push(String(x)); }); return; }
+            } catch (e) { /* not JSON — fall through */ }
+            out.push(s);
+        } else if (s.indexOf(', ') !== -1) {
+            s.split(', ').forEach(function(x){ if (x) out.push(x); });
+        } else {
+            out.push(s);
+        }
+    };
+    if (Array.isArray(val)) val.forEach(push); else push(val);
+    return out.slice().sort().join('|');
+}
+
+// Human-readable label text for the donut chart/table — the same normalization
+// as labelComboKey but comma-joined, so '["organization"]' renders as
+// `organization` (not the raw bracketed JSON string) and a multi-label combo as
+// `Engineer, Person`.
+function labelDisplay(labels) {
+    var key = labelComboKey(labels);
+    return key ? key.split('|').join(', ') : 'None';
 }
 
 /* ═══════════════════ HOOK: useKineticaApi ═════════════════ */
@@ -895,7 +935,7 @@ function LabelChart(props) {
     var colorIdxMap = useMemo(function() {
         var map = {};
         sorted.forEach(function(item, idx) {
-            var labelStr = item.labels && item.labels.length ? item.labels.join(', ') : 'None';
+            var labelStr = item.labels && item.labels.length ? labelDisplay(item.labels) : 'None';
             map[labelStr] = idx;
         });
         return map;
@@ -903,8 +943,8 @@ function LabelChart(props) {
     var tableSorted = useMemo(function() {
         if (sortMode === 'alpha') {
             return [].concat(sorted).sort(function(a, b) {
-                var la = a.labels && a.labels.length ? a.labels.join(', ') : 'None';
-                var lb = b.labels && b.labels.length ? b.labels.join(', ') : 'None';
+                var la = a.labels && a.labels.length ? labelDisplay(a.labels) : 'None';
+                var lb = b.labels && b.labels.length ? labelDisplay(b.labels) : 'None';
                 return la.localeCompare(lb);
             });
         }
@@ -915,7 +955,7 @@ function LabelChart(props) {
         if (!canvasRef.current) return;
         if (chartRef.current) chartRef.current.destroy();
 
-        var labels = sorted.map(function(i){ return i.labels && i.labels.length ? i.labels.join(', ') : 'None'; });
+        var labels = sorted.map(function(i){ return i.labels && i.labels.length ? labelDisplay(i.labels) : 'None'; });
         var counts = sorted.map(function(i){ return i.count||0; });
         var colors = sorted.map(function(_,idx){ return PALETTE[idx % PALETTE.length].solid; });
 
@@ -940,7 +980,7 @@ function LabelChart(props) {
                     if (elements.length > 0) {
                         var idx = elements[0].index;
                         if (onToggleLabel && sorted[idx].labels && sorted[idx].labels.length) {
-                            onToggleLabel(sorted[idx].labels.slice().sort().join('|'));
+                            onToggleLabel(labelComboKey(sorted[idx].labels));
                         }
                     }
                 },
@@ -977,16 +1017,16 @@ function LabelChart(props) {
                     </tr></thead>
                     <tbody>
                         {tableSorted.map(function(item, rowIdx) {
-                            var labelStr = item.labels && item.labels.length ? item.labels.join(', ') : 'None';
+                            var labelStr = item.labels && item.labels.length ? labelDisplay(item.labels) : 'None';
                             var cidx = colorIdxMap[labelStr] !== undefined ? colorIdxMap[labelStr] : rowIdx;
                             var pct = total > 0 ? (((item.count||0)/total)*100).toFixed(1) : '0.0';
-                            var comboKey = item.labels ? item.labels.slice().sort().join('|') : '';
+                            var comboKey = item.labels ? labelComboKey(item.labels) : '';
                             var isSelected = selectedLabels.length > 0 && selectedLabels.indexOf(comboKey) !== -1;
                             var hl = highlightIdx === cidx;
                             return (
                                 <tr key={labelStr} data-label={labelStr}
                                     onMouseEnter={function(){ handleRowEnter(cidx); }}
-                                    onClick={function(){ if (onToggleLabel && item.labels && item.labels.length) { onToggleLabel(item.labels.slice().sort().join('|')); } }}
+                                    onClick={function(){ if (onToggleLabel && item.labels && item.labels.length) { onToggleLabel(labelComboKey(item.labels)); } }}
                                     onMouseLeave={handleRowLeave}
                                     style={{
                                         background: isSelected ? PALETTE[cidx % PALETTE.length].solid + '22' : PALETTE[cidx % PALETTE.length].light,
@@ -5982,7 +6022,7 @@ function CanvasGraph(props) {
         var assign = function(items, prefix) {
             [].concat(items || []).sort(function(a, b) { return (b.count || 0) - (a.count || 0); })
                 .forEach(function(item, idx) {
-                    var comboKey = (item.labels || []).slice().sort().join('|');
+                    var comboKey = labelComboKey(item.labels);
                     map[prefix + comboKey] = PALETTE[idx % PALETTE.length].solid;
                 });
         };
@@ -5997,15 +6037,11 @@ function CanvasGraph(props) {
     }, [nodeLabelDist, edgeLabelDist, labelData]);
     var getNodeLabelColor = function(rawLabel) {
         if (!rawLabel) return "#b2bec3";
-        var labels = typeof rawLabel === 'string' && rawLabel.charAt(0) === '[' ? (function(){ try { return JSON.parse(rawLabel); } catch(e) { return [rawLabel]; } })() : rawLabel.split(', ');
-        var comboKey = labels.slice().sort().join('|');
-        return labelColorMap['n:' + comboKey] || "#b2bec3";
+        return labelColorMap['n:' + labelComboKey(rawLabel)] || "#b2bec3";
     };
     var getEdgeLabelColor = function(rawLabel) {
         if (!rawLabel) return "#b2bec3";
-        var labels = typeof rawLabel === 'string' && rawLabel.charAt(0) === '[' ? (function(){ try { return JSON.parse(rawLabel); } catch(e) { return [rawLabel]; } })() : rawLabel.split(', ');
-        var comboKey = labels.slice().sort().join('|');
-        return labelColorMap['e:' + comboKey] || "#b2bec3";
+        return labelColorMap['e:' + labelComboKey(rawLabel)] || "#b2bec3";
     };
 
     // Build graph data from records, filtered by selected labels
@@ -6046,18 +6082,12 @@ function CanvasGraph(props) {
             filteredEdges = filteredEdges.filter(function(rec) {
                 // Check edge label match: node's full sorted label combo must match a selected combo key
                 if (hasEdgeFilter && colEdgeLabel) {
-                    var edgeLabels = parseLabels(rec[colEdgeLabel]);
-                    var edgeComboKey = edgeLabels.slice().sort().join('|');
-                    if (edgeFilterSet[edgeComboKey]) return true;
+                    if (edgeFilterSet[labelComboKey(rec[colEdgeLabel])]) return true;
                 }
                 // Check node label match: node's full sorted label combo must match a selected combo key
                 if (hasNodeFilter) {
-                    var srcLabels = parseLabels(nodeLabelMap[rec[colN1]]);
-                    var srcComboKey = srcLabels.slice().sort().join('|');
-                    if (nodeFilterSet[srcComboKey]) return true;
-                    var tgtLabels = parseLabels(nodeLabelMap[rec[colN2]]);
-                    var tgtComboKey = tgtLabels.slice().sort().join('|');
-                    if (nodeFilterSet[tgtComboKey]) return true;
+                    if (nodeFilterSet[labelComboKey(nodeLabelMap[rec[colN1]])]) return true;
+                    if (nodeFilterSet[labelComboKey(nodeLabelMap[rec[colN2]])]) return true;
                 }
                 return false;
             });
@@ -6137,13 +6167,6 @@ function CanvasGraph(props) {
                 if (rec[_colNodeName]) _nodeLabelMap[rec[_colNodeName]] = rec[_colNodeLabel] || "";
             });
         }
-        var _parseLabels = function(val) {
-            if (!val) return [];
-            if (typeof val === "string" && val.charAt(0) === "[") {
-                try { var arr = JSON.parse(val); return Array.isArray(arr) ? arr : [val]; } catch(e) { return [val]; }
-            }
-            return [val];
-        };
         var nodeFilterSet = {};
         selectedNodeLabels.forEach(function(l) { nodeFilterSet[l] = true; });
         var edgeFilterSet = {};
@@ -6155,19 +6178,11 @@ function CanvasGraph(props) {
         graphTableData.edges.records.forEach(function(rec) {
             var match = false;
             if (hasEF && _colEdgeLabel) {
-                var els = _parseLabels(rec[_colEdgeLabel]);
-                var elCombo = els.slice().sort().join('|');
-                if (edgeFilterSet[elCombo]) match = true;
+                if (edgeFilterSet[labelComboKey(rec[_colEdgeLabel])]) match = true;
             }
             if (!match && hasNF) {
-                var sl = _parseLabels(_nodeLabelMap[rec[_colN1]]);
-                var slCombo = sl.slice().sort().join('|');
-                if (nodeFilterSet[slCombo]) match = true;
-                if (!match) {
-                    var tl = _parseLabels(_nodeLabelMap[rec[_colN2]]);
-                    var tlCombo = tl.slice().sort().join('|');
-                    if (nodeFilterSet[tlCombo]) match = true;
-                }
+                if (nodeFilterSet[labelComboKey(_nodeLabelMap[rec[_colN1]])]) match = true;
+                if (!match && nodeFilterSet[labelComboKey(_nodeLabelMap[rec[_colN2]])]) match = true;
             }
             if (match) {
                 filteredCount++;
@@ -6254,9 +6269,12 @@ function CanvasGraph(props) {
             return base + Math.sqrt(d.degree / maxDeg) * scale;
         };
 
-        // Performance thresholds
+        // Performance thresholds. isHuge skips the force simulation entirely
+        // (fixed phyllotaxis spiral + zoomToFit) — reserve it for genuinely
+        // enormous graphs so mid-size graphs (~14k/10k) still get a real, if
+        // minimal, force layout and read consistently across split/maximized.
         var isLarge = numNodes > 500 || numEdges > 2000;
-        var isHuge = numNodes > 2000 || numEdges > 8000;
+        var isHuge = numNodes > 20000 || numEdges > 40000;
 
         // On a progressive Visualize load, graphData changes every batch — if
         // an instance already exists, feed it the grown dataset in place
@@ -8137,6 +8155,22 @@ function App() {
             return next;
         });
     };
+    // Wipe ALL query tabs back to a single empty q1 — used when switching to a
+    // DIFFERENT graph (the prior graph's queries don't apply, and the
+    // unsaved-graph warning already told the user they'd be lost). Mirrors the
+    // session-load clear-then-reseed-next-tick trick so each keyed QueryPanel
+    // actually remounts and drops its own internal state (result/helper refs).
+    var resetQueryTabs = function() {
+        queryTabStateRefs.current = {};
+        setQueryTabs([]);
+        setQueryTabSql({});
+        setQueryTabHelper({});
+        setQueryTabResult({});
+        setTimeout(function() {
+            setQueryTabs(['q1']);
+            setActiveQueryTab('q1');
+        }, 0);
+    };
     const [gatewayBase, setGatewayBase] = useState(GATEWAY_BASE);
     // Session-aware client: makeClient(base) alone (no `engine` arg), so the
     // /connect session it stores internally survives later `engine` state
@@ -9138,20 +9172,9 @@ function App() {
 
     // No auto-fetch on mode change — user clicks Pull+Visualize
 
-    /* Bidirectional picking: ontology SVG click → highlight table rows */
-    var handleOntologyPick = useCallback(function(text) {
-        if (!pickingEnabled || !text) return;
-        var target = text.toLowerCase().replace(/\s+/g, '');
-        document.querySelectorAll('tr[data-label]').forEach(function(row) {
-            row.style.outline = ''; row.style.fontWeight = '';
-            var rl = row.getAttribute('data-label').toLowerCase().replace(/\s+/g, '');
-            if (target.includes(rl) || rl.includes(target)) {
-                row.style.outline = '3px solid #0984e3';
-                row.style.fontWeight = '700';
-                row.scrollIntoView({ behavior:'smooth', block:'center' });
-            }
-        });
-    }, [pickingEnabled]);
+    // handleOntologyPick (ontology SVG click → toggle label selection) is defined
+    // below, AFTER nodeDonut/edgeDonut and the toggle handlers it closes over, so
+    // it never captures their hoisted-undefined values on the render pass.
 
     /* Bidirectional picking: chart/table hover → highlight ontology SVG nodes/edges */
     var handleChartHoverLabels = useCallback(function(labels) {
@@ -9564,13 +9587,29 @@ function App() {
     // the (heavier) entity pull. Kinetica-only (only engine with a per-label
     // count source); best-effort — kineticaLabelData resolves null on failure,
     // leaving the schema-derived (count-less) donuts in place.
+    // Records which graph we've already fetched weighted labeljson for, so the
+    // Viz-open effect fires exactly once per graph. A ref (not labelData) is the
+    // guard because labelData is overwritten by loadSchema's all-zero
+    // placeholder and by Pull, and a graph with no labels yields all-zero
+    // counts — keying the guard off labelData would refetch on every render
+    // (each setLabelData is a fresh object reference), an infinite loop.
+    const _labelJsonGraphRef = useRef(null);
     useEffect(function() {
         if (activeAction !== 'visualize' || graphEngine !== 'kinetica') return;
-        if (!activeGraph || !credentials || !credentials.url || labelData) return;
+        if (!activeGraph || !credentials || !credentials.url) return;
+        if (_labelJsonGraphRef.current === activeGraph) return;   // already fetched for this graph
+        // If real weighted counts are already present (e.g. from a prior Pull),
+        // mark this graph done and skip the redundant fetch.
+        var hasWeighted = labelData && (
+            (labelData.node_labels || []).some(function(i){ return (i.count || 0) > 0; }) ||
+            (labelData.edge_labels || []).some(function(i){ return (i.count || 0) > 0; }));
+        if (hasWeighted) { _labelJsonGraphRef.current = activeGraph; return; }
+        _labelJsonGraphRef.current = activeGraph;   // set before await so re-renders don't refire
         var cancelled = false;
         window.xgraphGateway.kineticaLabelData(
             credentials.url, activeGraph, { user: credentials.user, pass: credentials.pass }
-        ).then(function(kld){ if (!cancelled && kld) setLabelData(kld); }).catch(function(){});
+        ).then(function(kld){ if (!cancelled && kld) setLabelData(kld); })
+         .catch(function(){ if (!cancelled) _labelJsonGraphRef.current = null; });  // allow retry on failure
         return function(){ cancelled = true; };
     }, [activeAction, graphEngine, activeGraph, credentials, labelData]);
 
@@ -9587,6 +9626,38 @@ function App() {
             return prev.indexOf(comboKey) !== -1 ? prev.filter(function(l){ return l !== comboKey; }) : prev.concat([comboKey]);
         });
     };
+
+    // Ontology DOT click → toggle the matching node/edge label selection, so
+    // clicking a node or edge in the ontology cross-filters the CanvasGraph
+    // exactly like clicking its donut segment (one shared selection state). The
+    // clicked SVG text carries a trailing "(xx.x%)" — strip it, then resolve the
+    // token against the donut items by their normalized display, preferring an
+    // exact match over a substring one and node labels over edge labels.
+    var handleOntologyPick = useCallback(function(text) {
+        if (!pickingEnabled || !text) return;
+        var target = text.replace(/\([^)]*\)/g, ' ').toLowerCase().replace(/\s+/g, '');
+        if (!target) return;
+        var norm = function(labels) { return labelDisplay(labels).toLowerCase().replace(/\s+/g, ''); };
+        var findExact = function(items) {
+            for (var i = 0; i < (items || []).length; i++) {
+                var d = norm(items[i].labels);
+                if (d && d === target) return labelComboKey(items[i].labels);
+            }
+            return null;
+        };
+        var findIncl = function(items) {
+            for (var i = 0; i < (items || []).length; i++) {
+                var d = norm(items[i].labels);
+                if (d && (target.indexOf(d) !== -1 || d.indexOf(target) !== -1)) return labelComboKey(items[i].labels);
+            }
+            return null;
+        };
+        var c;
+        if ((c = findExact(nodeDonut.items)) != null) { toggleSelectedNodeLabel(c); return; }
+        if ((c = findExact(edgeDonut.items)) != null) { toggleSelectedEdgeLabel(c); return; }
+        if ((c = findIncl(nodeDonut.items)) != null) { toggleSelectedNodeLabel(c); return; }
+        if ((c = findIncl(edgeDonut.items)) != null) { toggleSelectedEdgeLabel(c); return; }
+    }, [pickingEnabled, nodeDonut, edgeDonut, toggleSelectedNodeLabel, toggleSelectedEdgeLabel]);
 
     return (
         <div style={{ display:'flex', flexDirection:'column', height:'100vh', overflow:'hidden' }}>
@@ -9729,7 +9800,7 @@ function App() {
                             extractSources: extractSources, setExtractSources: setExtractSources,
                             extractGraph: extractGraph, setExtractGraph: setExtractGraph,
                             graphEngine: graphEngine,
-                            onGraphUpdated: function(g){ confirmSessionChange(function(){ refreshGraph(g); }, g); },
+                            onGraphUpdated: function(g){ confirmSessionChange(function(){ if (g !== activeGraph) resetQueryTabs(); refreshGraph(g); }, g); },
                         }}
                         createProps={{
                             graphEngine: graphEngine, gwClient: gwClient,
@@ -9761,7 +9832,7 @@ function App() {
                     <ListPanel
                         graphs={graphs} activeGraph={activeGraph} graphSizes={graphSizes}
                         gwClient={gwClient}
-                        onSelectGraph={function(name){ confirmSessionChange(function(){ setActiveGraph(name); setActiveAction('ontology'); }, name); }}
+                        onSelectGraph={function(name){ confirmSessionChange(function(){ if (name !== activeGraph) resetQueryTabs(); setActiveGraph(name); setActiveAction('ontology'); }, name); }}
                         onDeleteGraph={handleDeleteGraph}
                     />
                 )}
@@ -9887,10 +9958,12 @@ function App() {
                                         <LabelChart
                                             title="Nodes by Label" items={nodeDonut.items} total={nodeDonut.total}
                                             pickingEnabled={true} selectedLabels={selectedNodeLabels} onToggleLabel={toggleSelectedNodeLabel}
+                                            onHoverLabels={handleChartHoverLabels}
                                         />
                                         <LabelChart
                                             title="Edges by Label" items={edgeDonut.items} total={edgeDonut.total}
                                             pickingEnabled={true} selectedLabels={selectedEdgeLabels} onToggleLabel={toggleSelectedEdgeLabel}
+                                            onHoverLabels={handleChartHoverLabels}
                                         />
                                     </SplitPane>
                                 </div>
