@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from decimal import Decimal
 from typing import List
 
 import duckdb
@@ -77,23 +78,57 @@ def _cypher_rows(qr) -> List[dict]:
     return [dict(zip(names, row)) for row in qr.result_set]
 
 
+def _duck_col_type(rows: List[dict], col: str) -> str:
+    """Infer a DuckDB column type from the first NON-NULL value across ALL rows.
+
+    Typing from row 0 alone is unsafe: a bare NULL literal makes DuckDB type
+    the column INTEGER (INT32), so a later non-null string in that column fails
+    with "Could not convert string '...' to INT32". Sparse "union" wide tables
+    (one row per vertex, per-node-type namespaced columns left NULL for other
+    types -- e.g. Kinetica banking's `expero.vertexes`) hit this constantly:
+    almost every attribute column is NULL for any given vertex. All-NULL and
+    mixed-type columns fall back to VARCHAR (into which DuckDB implicitly casts
+    ints on INSERT), so the join/aggregation still works.
+    """
+    seen = set()
+    for r in rows:
+        v = r.get(col)
+        if v is None:
+            continue
+        if isinstance(v, bool):
+            seen.add("bool")
+        elif isinstance(v, int):
+            seen.add("int")
+        elif isinstance(v, (float, Decimal)):
+            seen.add("float")
+        else:
+            seen.add("other")  # str, datetime, bytes, ...
+    if not seen:
+        return "VARCHAR"                 # all-NULL column
+    if seen == {"bool"}:
+        return "BOOLEAN"
+    if seen <= {"int"}:
+        return "BIGINT"
+    if seen <= {"int", "float"}:
+        return "DOUBLE"
+    return "VARCHAR"                     # any string, or numeric+string mix
+
+
 def _register_rows(con, rel: str, rows: List[dict]) -> None:
-    # Load a small result set into a DuckDB temp table. Types are inferred from
-    # the first row (VALUES), then the remaining rows are inserted.
+    # Load a small result set into a DuckDB temp table. Each column is declared
+    # explicitly with a type inferred from the first non-null value across ALL
+    # rows (see `_duck_col_type`) -- NOT from row 0, whose NULLs would mistype
+    # the column as INTEGER. `cols` come from row 0's key order; `r.get(c)`
+    # tolerates rows missing a key (rendered NULL).
     cols = list(rows[0].keys())
+    coldefs = ", ".join(f'"{c}" {_duck_col_type(rows, c)}' for c in cols)
     placeholders = ", ".join(["?"] * len(cols))
-    coldefs = ", ".join(f'"{c}"' for c in cols)
     con.execute(f"DROP TABLE IF EXISTS {rel}")
-    con.execute(
-        f"CREATE TEMP TABLE {rel} AS "
-        f"SELECT * FROM (VALUES ({placeholders})) AS t({coldefs})",
-        list(rows[0].values()),
+    con.execute(f"CREATE TEMP TABLE {rel} ({coldefs})")
+    con.executemany(
+        f"INSERT INTO {rel} VALUES ({placeholders})",
+        [[r.get(c) for c in cols] for r in rows],
     )
-    if len(rows) > 1:
-        con.executemany(
-            f"INSERT INTO {rel} VALUES ({placeholders})",
-            [list(r.values()) for r in rows[1:]],
-        )
 
 
 def run_hydrated(cypher: str, join_sql: str, *, falkordb, source: str,
