@@ -47,7 +47,7 @@
 const { useState, useEffect, useRef, useCallback, useMemo } = React;
 
 /* ═══════════════════════ CONSTANTS ════════════════════════ */
-const EXPLORER_VERSION = "0.21.3";  // xGraph version — bump on frontend changes so a stale browser cache is visible
+const EXPLORER_VERSION = "0.22.0";  // xGraph version — bump on frontend changes so a stale browser cache is visible
 const SAFETY_TIMEOUT_MS = 10 * 60 * 1000;
 const PALETTE = [
     { solid: '#0984e3', light: '#e1f0fb' }, { solid: '#00cec9', light: '#e0f9f8' },
@@ -62,6 +62,10 @@ const GATEWAY_BASE = "http://localhost:8090";   // xgraph FastAPI gateway (8088 
 // handleVisualizeLoad) — no separate "Sample size" field; CanvasGraph's
 // node/edge sliders further govern what actually gets rendered.
 const VISUALIZE_PAGE_SIZE = 10000;
+// Graphs whose edge count is below this auto-pull on select (background, no tab
+// switch) so Visualize is instant. Editable at runtime via App's autoVizThreshold
+// state + the CanvasGraph "Auto-viz" toolbar control; see App's auto-viz effect.
+const AUTO_VIZ_EDGE_THRESHOLD = 10000;
 // Bare name — the gateway resolves it against its data dir (repo data/, or
 // XGRAPH_DATA_DIR). Run ./scripts/unzip-data.sh once to produce data/*.parquet.
 const HYDRATE_SOURCE = "vertexes.parquet";
@@ -5946,6 +5950,8 @@ function CanvasGraph(props) {
     var vizProgress = props.vizProgress || { loaded: 0, total: 0, loading: false };
     var vizLoadError = props.vizLoadError;
     var bigGraphThreshold = props.bigGraphThreshold || 10000000, onChangeBigGraphThreshold = props.onChangeBigGraphThreshold;
+    var autoVizEnabled = props.autoVizEnabled !== false, onToggleAutoViz = props.onToggleAutoViz;
+    var autoVizThreshold = (props.autoVizThreshold != null ? props.autoVizThreshold : AUTO_VIZ_EDGE_THRESHOLD), onChangeAutoVizThreshold = props.onChangeAutoVizThreshold;
     var maximized = props.maximized, onToggleMaximize = props.onToggleMaximize;
     var containerRef = useRef(null);
     var graphRef = useRef(null);
@@ -6466,6 +6472,12 @@ function CanvasGraph(props) {
                     <option value={10000}>10K</option><option value={100000}>100K</option><option value={1000000}>1M</option>
                     <option value={10000000}>10M</option><option value={100000000}>100M</option><option value={0}>{'\u221E'}</option>
                 </select>}
+                {onToggleAutoViz && <label title="Automatically pull small graphs the moment they're selected" style={Object.assign({}, ctrlStyle, { display:'flex', alignItems:'center', gap:3, flexShrink:0 })}>
+                    <input type="checkbox" checked={autoVizEnabled} onChange={function(e){ onToggleAutoViz(e.target.checked); }} style={{ margin:0 }}/>
+                    {'Auto-viz <'}
+                    <input type="number" min="0" step="1000" value={autoVizThreshold} onChange={function(e){ onChangeAutoVizThreshold(parseInt(e.target.value) || 0); }} title="Edge count below which a graph auto-visualizes on select" style={{ width:56, fontSize:9, border:'1px solid #ddd', borderRadius:4, padding:'2px 3px', fontFamily:'inherit', color:'#636e72' }}/>
+                    {' edges'}
+                </label>}
                 {onVisualize && <button onClick={onVisualize} disabled={vizLoading} title="Re-fetch graph data and refresh visualization" style={{
                     padding:'4px 10px', border:'none', borderRadius:4, cursor: vizLoading ? 'not-allowed':'pointer',
                     fontWeight:700, color:'#fff', background: vizLoading ? '#b2bec3':'#00cec9', fontSize:10, fontFamily:'inherit', opacity: vizLoading ? 0.5:1, flexShrink:0, whiteSpace:'nowrap',
@@ -8474,6 +8486,10 @@ function App() {
     const [autoRefresh, setAutoRefresh]   = useState(false);
     const [autoInterval, setAutoInterval] = useState(15);
     const [bigGraphThreshold, setBigGraphThreshold] = useState(100000);
+    // Auto pull+visualize small graphs on select (default on; threshold editable).
+    const [autoVizEnabled, setAutoVizEnabled] = useState(true);
+    const [autoVizThreshold, setAutoVizThreshold] = useState(AUTO_VIZ_EDGE_THRESHOLD);
+    const _autoVizGraphRef = useRef('');   // graph most recently auto-pulled (once-per-graph guard)
     // Edge-pick lookup mode for Canvas/Deck.gl renderers:
     //   'graph' (default) → id-based lookup against the edge source table using
     //                       the EDGE_ID we already have client-side from the graph.
@@ -8771,6 +8787,7 @@ function App() {
     /* Load schema (labels, rel types, DOT) from the gateway for the active graph. */
     var loadSchema = useCallback(async function(graphName) {
         if (!graphName || !gwClient) return;
+        setGraphCounts({ nodes:0, edges:0 });   // clear stale counts on switch so auto-viz decides on THIS graph, not the last one
         try {
             var sch = await gwClient.getSchema(graphName, { full: schemaFullSearch, nkey: schemaNodeLabelkeys, ekey: schemaEdgeLabelkeys });       // {labels, rel_types, dot, counts}
             setDotString(sch.dot || null);
@@ -9581,6 +9598,22 @@ function App() {
         }
     }, [activeGraph, gwClient, graphCounts, bigGraphThreshold, graphEngine, credentials]);
 
+    // Auto pull+visualize small graphs: once a selected graph's counts load and
+    // show it's under the (editable) edge threshold, pull its entities in the
+    // background so Visualize is instant — no manual Pull+Visualize click, and NO
+    // tab switch. Guarded once-per-graph via _autoVizGraphRef (mirrors the
+    // _labelJsonGraphRef one-shot pattern below). The edges>0 test skips both the
+    // transient {0,0} that loadSchema sets on every graph switch and genuinely
+    // empty graphs.
+    useEffect(function() {
+        if (!autoVizEnabled || !activeGraph) return;
+        var edges = graphCounts.edges || 0;
+        if (edges <= 0 || edges >= autoVizThreshold) return;
+        if (_autoVizGraphRef.current === activeGraph) return;   // already auto-pulled this graph
+        _autoVizGraphRef.current = activeGraph;
+        handleVisualizeLoad();   // no arg -> normal capped pull; loads the whole (small) graph
+    }, [activeGraph, graphCounts, autoVizEnabled, autoVizThreshold, handleVisualizeLoad]);
+
     // Explorer-parity: on OPENING Visualize, the label donuts should already show
     // WEIGHTED per-label counts — before any Pull+Visualize. Explorer gets this
     // from a labeljson fetch on graph-select; we mirror it here, decoupled from
@@ -9946,6 +9979,8 @@ function App() {
                                             nodeLimit={canvasNodeLimit} onNodeLimitChange={setCanvasNodeLimit}
                                             edgeLimit={canvasEdgeLimit} onEdgeLimitChange={setCanvasEdgeLimit}
                                             bigGraphThreshold={bigGraphThreshold} onChangeBigGraphThreshold={setBigGraphThreshold}
+                                            autoVizEnabled={autoVizEnabled} onToggleAutoViz={setAutoVizEnabled}
+                                            autoVizThreshold={autoVizThreshold} onChangeAutoVizThreshold={setAutoVizThreshold}
                                             onVisualize={handleVisualizeLoad} vizLoading={vizProgress.loading}
                                             vizProgress={vizProgress} vizLoadError={vizLoadError}
                                             onToggleMaximize={function(){ setMaximizedPanel('canvas'); }}
@@ -10002,6 +10037,8 @@ function App() {
                         nodeLimit={canvasNodeLimit} onNodeLimitChange={setCanvasNodeLimit}
                         edgeLimit={canvasEdgeLimit} onEdgeLimitChange={setCanvasEdgeLimit}
                         bigGraphThreshold={bigGraphThreshold} onChangeBigGraphThreshold={setBigGraphThreshold}
+                        autoVizEnabled={autoVizEnabled} onToggleAutoViz={setAutoVizEnabled}
+                        autoVizThreshold={autoVizThreshold} onChangeAutoVizThreshold={setAutoVizThreshold}
                         onVisualize={handleVisualizeLoad} vizLoading={vizProgress.loading}
                         maximized={true} onToggleMaximize={function(){ setMaximizedPanel(null); }}
                     />
