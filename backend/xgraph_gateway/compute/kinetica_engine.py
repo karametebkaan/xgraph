@@ -58,6 +58,7 @@ def _validate_source(source: str) -> str:
 _META_SCHEMA = "xgraph_meta"
 _DOCUMENTS_TABLE = f"{_META_SCHEMA}.documents"
 _ONTOLOGY_TABLE = f"{_META_SCHEMA}.ontology"
+_DOCUMENT_TEXTS_TABLE = f"{_META_SCHEMA}.document_texts"
 
 
 def _now_ms() -> datetime:
@@ -180,6 +181,14 @@ class KineticaComputeEngine:
             " axis VARCHAR(64),"
             " first_seen_uri VARCHAR(512),"
             " first_seen_ts TIMESTAMP NOT NULL)",
+            # Full source text per document -- mirrors DuckDB's
+            # xgraph_document_texts. `text` is an unbounded VARCHAR (Kinetica's
+            # unrestricted string type) so arbitrarily long source docs fit.
+            f"CREATE TABLE IF NOT EXISTS {_DOCUMENT_TEXTS_TABLE} ("
+            " graph VARCHAR(256, PRIMARY_KEY, SHARD_KEY) NOT NULL,"
+            " doc_uri VARCHAR(512, PRIMARY_KEY) NOT NULL,"
+            " text VARCHAR NOT NULL,"
+            " char_len INTEGER NOT NULL)",
         ):
             list(self._src.rows(stmt))
         self._meta_ready = True
@@ -247,14 +256,53 @@ class KineticaComputeEngine:
         d["last_ingested_ts"] = _ts_from_kinetica(d["last_ingested_ts"])
         return d
 
+    def record_document_text(self, graph, doc_uri, text):
+        """Upsert the FULL source text for a document, keyed on
+        (graph, doc_uri). Idempotent (DELETE then INSERT), mirroring
+        DuckDBComputeEngine. Best-effort provenance -- callers wrap this so a
+        failure never breaks /extract."""
+        self._ensure_meta_schema()
+        text = text or ""
+        g, u = _escape_sql_literal(graph), _escape_sql_literal(doc_uri)
+        list(self._src.rows(
+            f"DELETE FROM {_DOCUMENT_TEXTS_TABLE} WHERE graph = {g} AND doc_uri = {u}"))
+        list(self._src.rows(
+            f"INSERT INTO {_DOCUMENT_TEXTS_TABLE} (graph, doc_uri, text, char_len)"
+            f" VALUES ({g}, {u}, {_escape_sql_literal(text)}, {len(text)})"))
+
+    def has_document_text(self, graph, doc_uri):
+        """Cheap existence check for the /extract reuse-path backfill."""
+        self._ensure_meta_schema()
+        g, u = _escape_sql_literal(graph), _escape_sql_literal(doc_uri)
+        rows = list(self._src.rows(
+            f"SELECT 1 FROM {_DOCUMENT_TEXTS_TABLE}"
+            f" WHERE graph = {g} AND doc_uri = {u} LIMIT 1"))
+        return len(rows) > 0
+
+    def get_document_text(self, graph, doc_uri, limit=None):
+        """Return {doc_uri, text, char_len, truncated} with text sliced to
+        `limit` (full text when limit is None or >= length); None if no row."""
+        self._ensure_meta_schema()
+        g, u = _escape_sql_literal(graph), _escape_sql_literal(doc_uri)
+        rows = list(self._src.rows(
+            f"SELECT text, char_len FROM {_DOCUMENT_TEXTS_TABLE}"
+            f" WHERE graph = {g} AND doc_uri = {u}"))
+        if not rows:
+            return None
+        text = rows[0].get("text") or ""
+        char_len = rows[0].get("char_len") or 0
+        sliced = text if limit is None else text[:limit]
+        return {"doc_uri": doc_uri, "text": sliced, "char_len": char_len,
+                "truncated": char_len > len(sliced)}
+
     def clear_graph_metadata(self, graph):
-        """Delete all ledger + ontology rows for `graph` (idempotent -- a
-        no-op, not an error, if the graph has no rows). Called from
-        /delete_graph so a deleted-then-re-extracted document isn't silently
-        short-circuited as "unchanged"."""
+        """Delete all ledger + ontology + document-text rows for `graph`
+        (idempotent -- a no-op, not an error, if the graph has no rows). Called
+        from /delete_graph so a deleted-then-re-extracted document isn't
+        silently short-circuited as "unchanged"."""
         self._ensure_meta_schema()
         g = _escape_sql_literal(graph)
-        for table in (_DOCUMENTS_TABLE, _ONTOLOGY_TABLE):
+        for table in (_DOCUMENTS_TABLE, _ONTOLOGY_TABLE, _DOCUMENT_TEXTS_TABLE):
             list(self._src.rows(f"DELETE FROM {table} WHERE graph = {g}"))
 
     def record_type(self, graph, kind, type_name, canonical_name, axis, source_uri):

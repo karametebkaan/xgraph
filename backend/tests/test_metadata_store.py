@@ -157,7 +157,8 @@ def test_record_type_first_seen_ts_is_naive_utc(tmp_path):
 import pytest
 from xgraph_gateway import config
 from xgraph_gateway.compute.kinetica_engine import (
-    KineticaComputeEngine, _DOCUMENTS_TABLE, _ONTOLOGY_TABLE, _lit,
+    KineticaComputeEngine, _DOCUMENTS_TABLE, _ONTOLOGY_TABLE,
+    _DOCUMENT_TEXTS_TABLE, _lit,
 )
 
 _KINETICA_TEST_GRAPH = "xgraph_meta_test"
@@ -192,7 +193,7 @@ def _kinetica_engine_or_skip():
 
 def _cleanup_kinetica_meta_rows(eng):
     g = f"'{_KINETICA_TEST_GRAPH}'"
-    for table in (_DOCUMENTS_TABLE, _ONTOLOGY_TABLE):
+    for table in (_DOCUMENTS_TABLE, _ONTOLOGY_TABLE, _DOCUMENT_TEXTS_TABLE):
         try:
             list(eng._src.rows(f"DELETE FROM {table} WHERE graph = {g}"))
         except Exception:
@@ -263,6 +264,39 @@ def test_kinetica_get_document(kinetica_engine):
     assert doc is not None
     assert doc["sha256"] == "sha-1"
     assert doc["graph"] == _KINETICA_TEST_GRAPH
+
+
+def test_kinetica_document_text_round_trip(kinetica_engine):
+    # Mirrors the DuckDB document-text tests: record -> has -> get (full +
+    # sliced) -> upsert -> clear. This is the fix for the live-reported
+    # "'KineticaComputeEngine' object has no attribute 'get_document_text'"
+    # Storage error when the compute engine is Kinetica.
+    eng = kinetica_engine
+    g = _KINETICA_TEST_GRAPH
+
+    assert eng.has_document_text(g, "doc:a") is False
+    assert eng.get_document_text(g, "doc:a") is None
+
+    eng.record_document_text(g, "doc:a", "hello world")
+    assert eng.has_document_text(g, "doc:a") is True
+    got = eng.get_document_text(g, "doc:a")
+    assert got == {"doc_uri": "doc:a", "text": "hello world",
+                   "char_len": 11, "truncated": False}
+
+    # limit slices and flags truncated; limit >= length is full text.
+    sliced = eng.get_document_text(g, "doc:a", limit=5)
+    assert sliced["text"] == "hello"
+    assert sliced["char_len"] == 11
+    assert sliced["truncated"] is True
+
+    # Upsert replaces (idempotent DELETE+INSERT), and single quotes survive.
+    eng.record_document_text(g, "doc:a", "second's version")
+    got2 = eng.get_document_text(g, "doc:a")
+    assert got2["text"] == "second's version"
+    assert got2["char_len"] == 16
+
+    eng.clear_graph_metadata(g)
+    assert eng.get_document_text(g, "doc:a") is None
 
 
 def test_kinetica_record_type_null_axis_and_canonical_roundtrip(kinetica_engine):
