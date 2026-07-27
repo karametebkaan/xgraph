@@ -41,6 +41,20 @@ const run = async () => {
   // kbtoa round-trips through Node Buffer
   assert.equal(g.kbtoa("admin:pw"), Buffer.from("admin:pw", "utf-8").toString("base64"));
 
+  // decodeKineticaConciseEdges: v0/v1 are indices into the node-id array
+  const nodeIds = ["alice", "acme", "bob"];
+  const conciseEdges = { labels: ["WORKS_AT", "KNOWS"], info: { payload_type: "int" },
+                         entities_int: [0, 0, 1, 1, 1, 0, 2, 2] };
+  assert.deepEqual(g.decodeKineticaConciseEdges(conciseEdges, nodeIds), [
+    { NODE1_NAME: "alice", NODE2_NAME: "acme", EDGE_LABEL: '["WORKS_AT"]' },
+    { NODE1_NAME: "alice", NODE2_NAME: "bob", EDGE_LABEL: '["KNOWS"]' },
+  ]);
+  // out-of-range index → ''
+  assert.deepEqual(
+    g.decodeKineticaConciseEdges({ labels: ["R"], info: { payload_type: "int" }, entities_int: [0, 9, 0, 1] }, nodeIds),
+    [{ NODE1_NAME: "", NODE2_NAME: "alice", EDGE_LABEL: '["R"]' }]
+  );
+
   console.log("test_kinetica_direct: OK");
 };
 run();

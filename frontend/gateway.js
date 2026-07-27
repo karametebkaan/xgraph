@@ -77,6 +77,24 @@
     return recs;
   }
 
+  // Decode concise edges — entities_int stride 4 [edgeId, v0, v1, labelIdx] where
+  // v0/v1 are integer indices into `nodeIds` (the node array in fetch order).
+  function decodeKineticaConciseEdges(outer, nodeIds) {
+    var labels = (outer && outer.labels) || [];
+    var arr = (outer && outer.entities_int) || [];
+    nodeIds = nodeIds || [];
+    var recs = [];
+    for (var j = 0; j + 3 < arr.length; j += 4) {
+      var v0 = arr[j + 1], v1 = arr[j + 2];
+      recs.push({
+        NODE1_NAME: nodeIds[v0] != null ? nodeIds[v0] : "",
+        NODE2_NAME: nodeIds[v1] != null ? nodeIds[v1] : "",
+        EDGE_LABEL: resolveLabelStr(arr[j + 3], labels),
+      });
+    }
+    return recs;
+  }
+
   function graphTableFromGateway(res) {
     var nodes = (res && res.nodes) || [];
     var edges = (res && res.edges) || [];
@@ -229,6 +247,7 @@
     safeParse: safeParse,
     resolveLabelStr: resolveLabelStr,
     decodeKineticaEntities: decodeKineticaEntities,
+    decodeKineticaConciseEdges: decodeKineticaConciseEdges,
     makeClient: makeClient,
   };
 });
