@@ -96,6 +96,32 @@ def _creation_statement_text(resp) -> str | None:
     except (TypeError, ValueError, KeyError, IndexError):
         return None
 
+def _node_backing_table(nodes_section: str) -> str | None:
+    """Given the `NODES => ...` slice of a CREATE GRAPH statement, return the
+    FROM table of the actual node backing table -- the sub-select carrying the
+    node identity, NOT the kgr-style LABEL_KEY grouping sub-select that
+    `create_graph_sql` now emits as the FIRST sibling inside
+    `NODES => INPUT_TABLES(...)`:
+
+        NODES => INPUT_TABLES(
+            (SELECT label_key AS LABEL_KEY, label AS LABEL FROM <graph>_label_keys),
+            (SELECT NODE, LABEL, ... FROM <graph>_nodes)
+        )
+
+    Naively taking the first `FROM` here returns `<graph>_label_keys` (which has
+    no node-id column), so picking a node found nothing. We scan every
+    `(SELECT ... FROM <table>)` sub-select and return the FROM of the first one
+    whose projection is NOT the LABEL_KEY grouping (identified by a bare
+    `LABEL_KEY` token). Falls back to None if no sub-select qualifies.
+    """
+    for sel, table in re.findall(r"\(\s*SELECT\s+(.*?)\s+FROM\s+([A-Za-z0-9_.]+)",
+                                 nodes_section, re.IGNORECASE | re.DOTALL):
+        if re.search(r"\bLABEL_KEY\b", sel, re.IGNORECASE):
+            continue  # the kgr-style axis grouping select, not the node table
+        return table
+    return None
+
+
 def _backing_tables(resp) -> tuple[str | None, str | None]:
     """Discover the vertex/edge backing table names for a graph from the
     `create ... graph ...` DDL text (`_creation_statement_text`). The
@@ -107,6 +133,12 @@ def _backing_tables(resp) -> tuple[str | None, str | None]:
             ...
         );
 
+    An extract graph with a materialized label_keys table adds a SECOND NODES
+    sub-select (the LABEL_KEY grouping) BEFORE the node table's select, so the
+    node table is resolved via `_node_backing_table` (which skips that grouping)
+    rather than a plain first-`FROM`. The edges section never has that sibling,
+    so its first `FROM` is the edge table.
+
     Returns `(vtable, etable)`, either/both `None` if not found -- callers
     must treat that as "backing tables unknown" and return empty results,
     never raise.
@@ -115,12 +147,15 @@ def _backing_tables(resp) -> tuple[str | None, str | None]:
     if not statement:
         return (None, None)
 
-    def _first_from(section_keyword: str) -> str | None:
-        m = re.search(rf"{section_keyword}\s*=>.*?\bFROM\b\s+([A-Za-z0-9_.]+)",
-                      statement, re.IGNORECASE | re.DOTALL)
-        return m.group(1) if m else None
+    nm = re.search(r"nodes\s*=>(.*?)(?:\bedges\s*=>|$)",
+                   statement, re.IGNORECASE | re.DOTALL)
+    vtable = _node_backing_table(nm.group(1)) if nm else None
 
-    return (_first_from("nodes"), _first_from("edges"))
+    em = re.search(r"\bedges\s*=>.*?\bFROM\b\s+([A-Za-z0-9_.]+)",
+                   statement, re.IGNORECASE | re.DOTALL)
+    etable = em.group(1) if em else None
+
+    return (vtable, etable)
 
 def _node_id_column_from_ddl(statement: str) -> str | None:
     """Find the SOURCE column that feeds a graph's NODE identity by parsing the

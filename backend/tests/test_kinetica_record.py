@@ -6,6 +6,7 @@ from xgraph_gateway.adapters.kinetica_adapter import (
     _escape_sql_literal,
     _row_to_record,
     _node_id_column_from_ddl,
+    _backing_tables,
 )
 
 # ---------------------------------------------------------------------------
@@ -54,6 +55,30 @@ _SELECT_STAR_RESP = {
     "original_request": [json.dumps({"statement": _SELECT_STAR_STATEMENT})],
 }
 
+# A graph whose CREATE GRAPH DDL emits the kgr-style LABEL_KEY grouping select
+# as the FIRST sibling inside `NODES => INPUT_TABLES(...)` -- exactly what
+# create_graph_sql now produces for an extract graph with a materialized
+# label_keys table (the user's `extracted_graph_kinetica1`). The real node
+# backing table is the SECOND select; the FIRST `FROM` in the NODES section is
+# the `_label_keys` grouping table, which must NOT be mistaken for the node
+# table (else picking a node reads the wrong table and finds no id column).
+_LABEL_KEYS_FIRST_STATEMENT = (
+    "CREATE OR REPLACE DIRECTED GRAPH extracted_graph_kinetica1 (\n"
+    "    NODES => INPUT_TABLES(\n"
+    "        (SELECT label_key AS LABEL_KEY, label AS LABEL "
+    "FROM extracted_graph_kinetica1_label_keys),\n"
+    "        (SELECT NODE, LABEL, name AS entity_name, role, title "
+    "FROM extracted_graph_kinetica1_nodes)\n"
+    "    ),\n"
+    "    EDGES => INPUT_TABLES((SELECT NODE1, NODE2, LABEL "
+    "FROM extracted_graph_kinetica1_edges)),\n"
+    "    OPTIONS => KV_PAIRS(save_persist = 'true')\n"
+    ")"
+)
+_LABEL_KEYS_FIRST_RESP = {
+    "original_request": [json.dumps({"statement": _LABEL_KEYS_FIRST_STATEMENT})],
+}
+
 
 # ---------------------------------------------------------------------------
 # Unit tests -- pure helpers.
@@ -98,6 +123,44 @@ def test_node_id_column_from_ddl_ignores_edge_node1_node2_aliases():
 
 def test_node_id_column_from_ddl_empty_statement():
     assert _node_id_column_from_ddl("") is None
+
+
+def test_backing_tables_banking_single_node_select():
+    # No label_keys sibling: the sole NODES sub-select IS the node table.
+    vtable, etable = _backing_tables(_DDL_RESP)
+    assert vtable == "expero.vertexes"
+    assert etable == "expero.edges"
+
+
+def test_backing_tables_select_star_node_table():
+    vtable, etable = _backing_tables(_SELECT_STAR_RESP)
+    assert vtable == "rvv_new_nodes"
+    assert etable == "rvv_new"
+
+
+def test_backing_tables_skips_label_keys_grouping_select():
+    # Regression (Issue A): with the kgr-style LABEL_KEY grouping as the FIRST
+    # NODES sub-select, the node backing table is the SECOND select. The first
+    # `FROM` in the NODES section (the `_label_keys` table) must NOT be returned
+    # as the vertex table.
+    vtable, etable = _backing_tables(_LABEL_KEYS_FIRST_RESP)
+    assert vtable == "extracted_graph_kinetica1_nodes"
+    assert etable == "extracted_graph_kinetica1_edges"
+
+
+def test_get_record_resolves_node_table_when_label_keys_select_is_first():
+    # End-to-end regression for the "No record found" pick bug: with the
+    # LABEL_KEY grouping select first, get_record must still read the real node
+    # table (probe finds NODE) rather than the `_label_keys` table.
+    row = {"NODE": "Iran", "LABEL": '["Country"]', "entity_name": "Iran",
+           "role": None, "title": None}
+    adapter = _bare_adapter(_LABEL_KEYS_FIRST_RESP, rows=[row])
+    rec = adapter.get_record("ki_home.extracted_graph_kinetica1", "Iran")
+    sql = adapter._src.last_sql
+    assert "FROM extracted_graph_kinetica1_nodes" in sql
+    assert "WHERE NODE = 'Iran'" in sql
+    assert rec["id"] == "Iran"
+    assert rec["label"] == '["Country"]'
 
 
 # ---------------------------------------------------------------------------
