@@ -47,7 +47,7 @@
 const { useState, useEffect, useRef, useCallback, useMemo } = React;
 
 /* ═══════════════════════ CONSTANTS ════════════════════════ */
-const EXPLORER_VERSION = "0.18.7";  // xGraph version — bump on frontend changes so a stale browser cache is visible
+const EXPLORER_VERSION = "0.18.8";  // xGraph version — bump on frontend changes so a stale browser cache is visible
 const SAFETY_TIMEOUT_MS = 10 * 60 * 1000;
 const PALETTE = [
     { solid: '#0984e3', light: '#e1f0fb' }, { solid: '#00cec9', light: '#e0f9f8' },
@@ -5889,6 +5889,10 @@ function MapView(props) {
 /* ═══════════════════ CanvasGraph (force-graph Canvas) ═════ */
 function CanvasGraph(props) {
     var graphTableData = props.data, graphName = props.graphName, selectedNodeLabels = props.selectedNodeLabels || [], selectedEdgeLabels = props.selectedEdgeLabels || [], labelData = props.labelData;
+    // Same per-label distributions (real counts, engine-neutral — derived from
+    // the pulled records) that feed the Nodes/Edges-by-Label donuts. Used below
+    // to color the canvas 1:1 with those legends.
+    var nodeLabelDist = props.nodeLabelDist || [], edgeLabelDist = props.edgeLabelDist || [];
     var credentials = props.credentials, nodeSourceTable = props.nodeSourceTable, onVisualize = props.onVisualize, vizLoading = props.vizLoading;
     var bigGraphThreshold = props.bigGraphThreshold || 10000000, onChangeBigGraphThreshold = props.onChangeBigGraphThreshold;
     var maximized = props.maximized, onToggleMaximize = props.onToggleMaximize;
@@ -5953,22 +5957,33 @@ function CanvasGraph(props) {
     // Build color map matching LabelChart's PALETTE assignment (sorted by count desc)
     // Build color maps matching each LabelChart's own PALETTE assignment (sorted by count desc, index 0-based per chart)
     // Uses combo keys (sorted pipe-joined) to match exact label combinations
+    // Color map keyed + ranked IDENTICALLY to the Nodes/Edges-by-Label donuts
+    // (LabelChart): the same distribution items, sorted by count desc, PALETTE
+    // by index. That shared ranking is what makes the canvas node & edge colors
+    // match the legend 1:1 for EVERY engine. Explorer gets both the donut and
+    // the canvas from one counted `labelData` (Kinetica /show/graph labeljson),
+    // but xgraph's gateway /schema carries no per-label counts — so the donut
+    // derives real counts from the pulled records, and the canvas now shares
+    // that exact ranked list. Falls back to the count-less schema labelData
+    // only before any records are pulled (e.g. ontology-only view).
     var labelColorMap = useMemo(function() {
         var map = {};
-        if (labelData) {
-            var nl = [].concat(labelData.node_labels || []).sort(function(a, b) { return b.count - a.count; });
-            nl.forEach(function(item, idx) {
-                var comboKey = (item.labels || []).slice().sort().join('|');
-                map['n:' + comboKey] = PALETTE[idx % PALETTE.length].solid;
-            });
-            var el = [].concat(labelData.edge_labels || []).sort(function(a, b) { return b.count - a.count; });
-            el.forEach(function(item, idx) {
-                var comboKey = (item.labels || []).slice().sort().join('|');
-                map['e:' + comboKey] = PALETTE[idx % PALETTE.length].solid;
-            });
+        var assign = function(items, prefix) {
+            [].concat(items || []).sort(function(a, b) { return (b.count || 0) - (a.count || 0); })
+                .forEach(function(item, idx) {
+                    var comboKey = (item.labels || []).slice().sort().join('|');
+                    map[prefix + comboKey] = PALETTE[idx % PALETTE.length].solid;
+                });
+        };
+        if ((nodeLabelDist && nodeLabelDist.length) || (edgeLabelDist && edgeLabelDist.length)) {
+            assign(nodeLabelDist, 'n:');
+            assign(edgeLabelDist, 'e:');
+        } else if (labelData) {
+            assign(labelData.node_labels, 'n:');
+            assign(labelData.edge_labels, 'e:');
         }
         return map;
-    }, [labelData]);
+    }, [nodeLabelDist, edgeLabelDist, labelData]);
     var getNodeLabelColor = function(rawLabel) {
         if (!rawLabel) return "#b2bec3";
         var labels = typeof rawLabel === 'string' && rawLabel.charAt(0) === '[' ? (function(){ try { return JSON.parse(rawLabel); } catch(e) { return [rawLabel]; } })() : rawLabel.split(', ');
@@ -9778,6 +9793,7 @@ function App() {
                                     <CanvasGraph
                                         data={graphTableData} graphName={activeGraph} gwClient={gwClient}
                                         credentials={credentials} nodeSourceTable={nodeSourceTable} labelData={labelData}
+                                        nodeLabelDist={nodeLabelDistribution.items} edgeLabelDist={edgeLabelDistribution.items}
                                         selectedNodeLabels={selectedNodeLabels} selectedEdgeLabels={selectedEdgeLabels}
                                         nodeLimit={canvasNodeLimit} onNodeLimitChange={setCanvasNodeLimit}
                                         edgeLimit={canvasEdgeLimit} onEdgeLimitChange={setCanvasEdgeLimit}
