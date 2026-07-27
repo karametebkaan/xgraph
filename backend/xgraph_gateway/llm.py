@@ -133,18 +133,29 @@ def _llm(prompt: str, *, schema: Optional[dict] = None, model: Optional[str] = N
 
 
 def warmup() -> None:
-    """Best-effort: fire one tiny LLM call so the CLI spin-up + GCP ADC token
-    exchange + Vertex cold start happen BEFORE the user's first Ask/Explain
-    (otherwise that first call pays ~a minute of cold start). No-ops on any
+    """Best-effort: fire one tiny LLM call PER model tier so the CLI spin-up +
+    GCP ADC token exchange + Vertex cold start happen BEFORE the user's first
+    call (otherwise that first call pays ~a minute of cold start).
+
+    Warms the FAST (Haiku) tier FIRST because Ask/Explain — the latency-sensitive
+    interactive path — runs there; a warmup on the Build/Opus model alone leaves
+    the fast tier cold on a DIFFERENT Vertex model, so the first Explain still
+    paid full cold start. Then warms the Build tier (extract/fold). No-ops on any
     failure, when the LLM is stubbed, or when XGRAPH_LLM_WARMUP is falsy."""
     if os.environ.get("XGRAPH_LLM") == "stub":
         return
     if os.environ.get("XGRAPH_LLM_WARMUP", "1").lower() in ("0", "false", "no"):
         return
-    try:
-        _llm("ok")
-    except Exception:
-        pass
+    build_model = resolve_llm_config().get("model")
+    seen: set = set()
+    for m in (fast_model(), build_model):   # fast first: interactive priority
+        if not m or m in seen:
+            continue
+        seen.add(m)
+        try:
+            _llm("ok", model=m)
+        except Exception:
+            pass
 
 
 def _cli_env(cfg: dict) -> dict:

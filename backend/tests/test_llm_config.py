@@ -29,6 +29,26 @@ def test_fast_model_is_haiku_and_status_exposes_both():
     assert st["fast_model"] == "claude-haiku-4-5-20251001"  # ask/explain tier
 
 
+def test_warmup_warms_the_fast_tier(monkeypatch):
+    # Ask/Explain run on the fast (Haiku) tier, so warmup MUST fire a call on
+    # fast_model() — otherwise the first Explain pays a cold Vertex start on a
+    # model the warmup never touched.
+    calls = []
+    monkeypatch.setattr(llm, "_llm", lambda prompt, model=None, **kw: calls.append(model))
+    monkeypatch.setenv("XGRAPH_LLM_WARMUP", "1")
+    llm.warmup()
+    assert llm.fast_model() in calls          # the interactive tier is warmed
+    assert calls[0] == llm.fast_model()       # and warmed FIRST (latency-sensitive)
+
+
+def test_warmup_noop_when_disabled(monkeypatch):
+    calls = []
+    monkeypatch.setattr(llm, "_llm", lambda *a, **kw: calls.append(a))
+    monkeypatch.setenv("XGRAPH_LLM_WARMUP", "0")
+    llm.warmup()
+    assert calls == []
+
+
 def test_env_vertex_becomes_default_auth(monkeypatch):
     monkeypatch.setenv("CLAUDE_CODE_USE_VERTEX", "1")
     monkeypatch.setenv("ANTHROPIC_VERTEX_PROJECT_ID", "proj-x")

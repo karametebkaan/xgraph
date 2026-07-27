@@ -47,7 +47,7 @@
 const { useState, useEffect, useRef, useCallback, useMemo } = React;
 
 /* ═══════════════════════ CONSTANTS ════════════════════════ */
-const EXPLORER_VERSION = "0.18.5";  // xGraph version — bump on frontend changes so a stale browser cache is visible
+const EXPLORER_VERSION = "0.18.6";  // xGraph version — bump on frontend changes so a stale browser cache is visible
 const SAFETY_TIMEOUT_MS = 10 * 60 * 1000;
 const PALETTE = [
     { solid: '#0984e3', light: '#e1f0fb' }, { solid: '#00cec9', light: '#e0f9f8' },
@@ -1657,9 +1657,15 @@ function QueryPanel(props) {
         // their attributes on the backing node table (backend fetch_node_attrs
         // step 1), so passing banking Parquet there post-joins unrelated data.
         var hydrateSource = (props.engine === 'falkordb') ? HYDRATE_SOURCE : '';
+        // Send the focus VERBATIM (empty when the box is blank). The post-join
+        // (generate_join_sql) is an LLM round-trip that only pays off when the
+        // focus names a wide attribute; the backend gates it on a non-empty
+        // focus. Passing a sentinel like 'Explain these results' made the
+        // backend attempt — and waste ~14s on — a join that always returns
+        // nothing. The backend still defaults the synthesized answer's question.
         try {
             var r = await props.gwClient.explain(
-                explainFocus.trim() || 'Explain these results',
+                explainFocus.trim(),
                 cols, rws, sql, hydrateSource, props.graphName);
             setExplainResp(r);
         } catch (err) { setExplainError(err.message); }
