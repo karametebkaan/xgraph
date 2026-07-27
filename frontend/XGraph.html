@@ -8694,7 +8694,15 @@ function App() {
         var names = await client.listGraphs();
         setGraphs(names);
         setGraphSizes({});
-        setCredentials({ url: sel.base, user: '', pass: '', engine: sel.engine });  // kept for prop compatibility
+        // For Kinetica, the Visualize page fetches graph entities directly from
+        // the engine's REST endpoint (see handleVisualizeLoad's kinetica branch),
+        // so credentials must carry the real Kinetica base + basic-auth creds.
+        // Every other engine keeps the gateway-base stub (prop compatibility only).
+        if (sel.engine === 'kinetica') {
+            setCredentials({ url: graphConn.url || '', user: graphConn.user || '', pass: graphConn.password || '', engine: 'kinetica' });
+        } else {
+            setCredentials({ url: sel.base, user: '', pass: '', engine: sel.engine });  // kept for prop compatibility
+        }
     };
 
     /* Load schema (labels, rel types, DOT) from the gateway for the active graph. */
@@ -9418,6 +9426,27 @@ function App() {
         return { items: items, total: total };
     }, [graphTableData]);
 
+    // Donut source, unified across engines (same render path for all): when
+    // labelData carries real per-label counts (Kinetica's show/graph labeljson,
+    // fetched in handleVisualizeLoad), use it so the donuts reflect the whole
+    // graph; otherwise fall back to the record-derived distribution (FalkorDB,
+    // whose gateway schema gives label names with count 0). Explorer's LabelChart
+    // reads {labels, count} items, which both sources already emit.
+    var nodeDonut = useMemo(function() {
+        if (labelData && labelData.node_labels && labelData.node_labels.some(function(i){ return (i.count || 0) > 0; })) {
+            var total = labelData.node_labels.reduce(function(s, i){ return s + (i.count || 0); }, 0);
+            return { items: labelData.node_labels, total: total };
+        }
+        return nodeLabelDistribution;
+    }, [labelData, nodeLabelDistribution]);
+    var edgeDonut = useMemo(function() {
+        if (labelData && labelData.edge_labels && labelData.edge_labels.some(function(i){ return (i.count || 0) > 0; })) {
+            var total = labelData.edge_labels.reduce(function(s, i){ return s + (i.count || 0); }, 0);
+            return { items: labelData.edge_labels, total: total };
+        }
+        return edgeLabelDistribution;
+    }, [labelData, edgeLabelDistribution]);
+
     // Visualize owns entity loading: progressively pages nodes/edges in from
     // the gateway (VISUALIZE_PAGE_SIZE per request, up to the bigGraphThreshold
     // "Max load" cap) so the canvas starts rendering after the first page
@@ -9823,11 +9852,11 @@ function App() {
                                 </div>
                                 <div style={{ flex:1, minWidth:0, minHeight:0, display:'flex', flexDirection:'column', gap:16 }}>
                                     <LabelChart
-                                        title="Nodes by Label" items={nodeLabelDistribution.items} total={nodeLabelDistribution.total}
+                                        title="Nodes by Label" items={nodeDonut.items} total={nodeDonut.total}
                                         pickingEnabled={true} selectedLabels={selectedNodeLabels} onToggleLabel={toggleSelectedNodeLabel}
                                     />
                                     <LabelChart
-                                        title="Edges by Label" items={edgeLabelDistribution.items} total={edgeLabelDistribution.total}
+                                        title="Edges by Label" items={edgeDonut.items} total={edgeDonut.total}
                                         pickingEnabled={true} selectedLabels={selectedEdgeLabels} onToggleLabel={toggleSelectedEdgeLabel}
                                     />
                                 </div>
