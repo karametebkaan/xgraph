@@ -31,6 +31,52 @@
     return Array.isArray(v) ? JSON.stringify(v) : v;
   }
 
+  function kbtoa(s) {
+    if (typeof btoa === "function") return btoa(s);
+    return Buffer.from(s, "utf-8").toString("base64");
+  }
+
+  function safeParse(s) {
+    try { return typeof s === "string" ? JSON.parse(s) : null; } catch (e) { return null; }
+  }
+
+  // Resolve a 1-based label index against the response's `labels` array, emitting
+  // the JSON-array-string form the carried-over renderers parse ('["Person"]').
+  function resolveLabelStr(labelIdx, labels) {
+    labels = labels || [];
+    var idx = typeof labelIdx === "string" ? parseInt(labelIdx, 10) : labelIdx;
+    if (idx > 0 && idx <= labels.length) {
+      var lbl = labels[idx - 1];
+      if (lbl && lbl.charAt(0) === "[") return lbl;
+      return lbl ? '["' + lbl + '"]' : "";
+    }
+    return "";
+  }
+
+  // Decode one /get/graph/entities response body into flat records (non-geo).
+  //   entityType 'node' → [{NODE_NAME, NODE_LABEL}]            (stride 2: [id, labelIdx])
+  //   entityType 'edge' → [{NODE1_NAME, NODE2_NAME, EDGE_LABEL}] (stride 4: [eid, n1, n2, labelIdx])
+  // Reads entities_int for payload_type 'int', else entities_string. entities_double
+  // (WKT/geo) is intentionally NOT handled — geo is deferred.
+  function decodeKineticaEntities(outer, entityType) {
+    var labels = (outer && outer.labels) || [];
+    var payloadType = (outer && outer.info && outer.info.payload_type) ||
+                      (outer && outer.info && outer.info.identifier_type) || "string";
+    var arr = payloadType === "int" ? ((outer && outer.entities_int) || [])
+                                    : ((outer && outer.entities_string) || []);
+    var recs = [];
+    if (entityType === "node") {
+      for (var i = 0; i + 1 < arr.length; i += 2) {
+        recs.push({ NODE_NAME: arr[i], NODE_LABEL: resolveLabelStr(arr[i + 1], labels) });
+      }
+    } else {
+      for (var j = 0; j + 3 < arr.length; j += 4) {
+        recs.push({ NODE1_NAME: arr[j + 1], NODE2_NAME: arr[j + 2], EDGE_LABEL: resolveLabelStr(arr[j + 3], labels) });
+      }
+    }
+    return recs;
+  }
+
   function graphTableFromGateway(res) {
     var nodes = (res && res.nodes) || [];
     var edges = (res && res.edges) || [];
@@ -179,6 +225,10 @@
     tableFromGateway: tableFromGateway,
     graphTableFromGateway: graphTableFromGateway,
     recordFromGateway: recordFromGateway,
+    kbtoa: kbtoa,
+    safeParse: safeParse,
+    resolveLabelStr: resolveLabelStr,
+    decodeKineticaEntities: decodeKineticaEntities,
     makeClient: makeClient,
   };
 });
