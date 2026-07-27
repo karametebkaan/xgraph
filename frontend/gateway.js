@@ -130,6 +130,43 @@
     }
   }
 
+  // Fetch a graph's nodes+edges directly from Kinetica REST and return the
+  // graphTableData shape CanvasGraph consumes. Single-request (limit:-1) per
+  // entity type — the fast path explorer uses for non-huge graphs. Edges request
+  // concise connectivity; when the server answers concise, v0/v1 indices are
+  // resolved against the node-id array. Non-geo only.
+  async function kineticaFetchGraph(base, graph, creds, opts) {
+    opts = opts || {};
+    var fetchImpl = opts.fetch || (typeof fetch !== "undefined" ? fetch : null);
+
+    async function getRaw(entityType, extraOpts) {
+      var options = { entity_type: entityType };
+      if (extraOpts) for (var k in extraOpts) options[k] = extraOpts[k];
+      var res = await kineticaPost(fetchImpl, base, "/get/graph/entities",
+        { graph_name: graph, offset: 0, limit: -1, options: options }, creds);
+      if (res && res.status === "ERROR") throw new Error(res.message || "get/graph/entities failed");
+      return safeParse(res.data_str) || res;
+    }
+
+    var nodeOuter = await getRaw("node");
+    var nodeRecs = decodeKineticaEntities(nodeOuter, "node");
+    if (opts.onProgress) opts.onProgress("node", nodeRecs.length);
+
+    var edgeOuter = await getRaw("edge", { concise_edge_connectivity: "true" });
+    var isConcise = edgeOuter && edgeOuter.info && edgeOuter.info.concise_edge_connectivity === "true";
+    var edgeRecs = isConcise
+      ? decodeKineticaConciseEdges(edgeOuter, nodeRecs.map(function (n) { return n.NODE_NAME; }))
+      : decodeKineticaEntities(edgeOuter, "edge");
+    if (opts.onProgress) opts.onProgress("edge", edgeRecs.length);
+
+    return {
+      nodes: { records: nodeRecs, headers: ["NODE_NAME", "NODE_LABEL"], total: nodeRecs.length },
+      edges: { records: edgeRecs, headers: ["NODE1_NAME", "NODE2_NAME", "EDGE_LABEL"], total: edgeRecs.length },
+      nodeTable: graph + " (entities/nodes)", edgeTable: graph + " (entities)",
+      identifierType: "string",
+    };
+  }
+
   function graphTableFromGateway(res) {
     var nodes = (res && res.nodes) || [];
     var edges = (res && res.edges) || [];
@@ -285,6 +322,7 @@
     decodeKineticaConciseEdges: decodeKineticaConciseEdges,
     kineticaPost: kineticaPost,
     kineticaLabelData: kineticaLabelData,
+    kineticaFetchGraph: kineticaFetchGraph,
     makeClient: makeClient,
   };
 });

@@ -81,6 +81,43 @@ const run = async () => {
     { fetch: async () => ({ ok: false, status: 500, json: async () => ({}) }) });
   assert.equal(ldNull, null);
 
+  // kineticaFetchGraph: plain (non-concise) edges
+  const routesPlain = (url, body) => {
+    if (url === "http://ki/get/graph/entities") {
+      if (body.options.entity_type === "node")
+        return { labels: ["Person", "Org"], info: { payload_type: "string" }, entities_string: ["alice", 1, "acme", 2] };
+      // edges: plain stride 4, not concise
+      return { labels: ["WORKS_AT"], info: { payload_type: "string" }, entities_string: [0, "alice", "acme", 1] };
+    }
+    return {};
+  };
+  const fetchPlain = async (url, opts) => ({ ok: true, json: async () => routesPlain(url, JSON.parse(opts.body)) });
+  const gt = await g.kineticaFetchGraph("http://ki", "expero.banking_graph", { user: "admin", pass: "pw" }, { fetch: fetchPlain });
+  assert.deepEqual(gt.nodes.records, [
+    { NODE_NAME: "alice", NODE_LABEL: '["Person"]' },
+    { NODE_NAME: "acme", NODE_LABEL: '["Org"]' },
+  ]);
+  assert.deepEqual(gt.edges.records, [
+    { NODE1_NAME: "alice", NODE2_NAME: "acme", EDGE_LABEL: '["WORKS_AT"]' },
+  ]);
+  assert.equal(gt.nodes.total, 2);
+  assert.equal(gt.edges.total, 1);
+
+  // kineticaFetchGraph: concise edges (v0/v1 indices) resolve via node order
+  const routesConcise = (url, body) => {
+    if (url === "http://ki/get/graph/entities") {
+      if (body.options.entity_type === "node")
+        return { labels: ["Person", "Org"], info: { payload_type: "string" }, entities_string: ["alice", 1, "acme", 2] };
+      return { labels: ["WORKS_AT"], info: { payload_type: "int", concise_edge_connectivity: "true" }, entities_int: [0, 0, 1, 1] };
+    }
+    return {};
+  };
+  const fetchConcise = async (url, opts) => ({ ok: true, json: async () => routesConcise(url, JSON.parse(opts.body)) });
+  const gt2 = await g.kineticaFetchGraph("http://ki", "g", {}, { fetch: fetchConcise });
+  assert.deepEqual(gt2.edges.records, [
+    { NODE1_NAME: "alice", NODE2_NAME: "acme", EDGE_LABEL: '["WORKS_AT"]' },
+  ]);
+
   console.log("test_kinetica_direct: OK");
 };
 run();
