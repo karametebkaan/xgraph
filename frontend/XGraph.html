@@ -9468,6 +9468,30 @@ function App() {
     var handleVisualizeLoad = useCallback(async function(loadAll) {
         if (!activeGraph || !gwClient) return;
         setVizLoadError(null);
+        // Kinetica: fetch entities directly from the engine's REST endpoint
+        // (fast typed-array path) instead of the gateway's fat-JSON paging. The
+        // ontology DOT still comes from the gateway (loadSchema); only the graph
+        // data + donut counts (labeljson) are browser-direct here.
+        if (graphEngine === 'kinetica') {
+            setVizProgress({ loaded: 0, total: (graphCounts.nodes || 0), loading: true });
+            try {
+                var kdata = await window.xgraphGateway.kineticaFetchGraph(
+                    credentials.url, activeGraph, { user: credentials.user, pass: credentials.pass },
+                    { onProgress: function(kind, done) {
+                        if (kind === 'node') setVizProgress(function(p){ return Object.assign({}, p, { loaded: done }); });
+                    } }
+                );
+                setGraphTableData(kdata);
+                var kld = await window.xgraphGateway.kineticaLabelData(
+                    credentials.url, activeGraph, { user: credentials.user, pass: credentials.pass });
+                if (kld) setLabelData(kld);
+            } catch (err) {
+                setVizLoadError(err.message);
+            } finally {
+                setVizProgress(function(p) { return Object.assign({}, p, { loading: false }); });
+            }
+            return;
+        }
         var allNodes = [];
         var allEdges = [];
         var target = loadAll === true ? (graphCounts.nodes || bigGraphThreshold) : Math.min(graphCounts.nodes || bigGraphThreshold, bigGraphThreshold);
@@ -9503,7 +9527,7 @@ function App() {
         } finally {
             setVizProgress(function(p) { return Object.assign({}, p, { loading: false }); });
         }
-    }, [activeGraph, gwClient, graphCounts, bigGraphThreshold]);
+    }, [activeGraph, gwClient, graphCounts, bigGraphThreshold, graphEngine, credentials]);
 
     // Label-selective filtering for Visualize: clicking a LabelChart slice/row
     // toggles that label combo in/out of selectedNodeLabels or
@@ -9791,13 +9815,6 @@ function App() {
                             actually fires. It's visible both before and after Load,
                             any time the true counts exceed the threshold. */}
                         <div style={{ flexShrink:0, display:'flex', alignItems:'center', gap:8, fontSize:11, color:'#636e72' }}>
-                            <label style={{ fontWeight:600, display:'flex', alignItems:'center', gap:5, flexShrink:0 }}>
-                                Max load
-                                <input type="number" min="1" value={bigGraphThreshold} onChange={function(e){
-                                    var v = parseInt(e.target.value, 10);
-                                    setBigGraphThreshold(isNaN(v) ? 0 : v);
-                                }} style={{ width:80, fontSize:11, padding:'2px 5px', border:'1px solid #dfe6e9', borderRadius:4, fontFamily:'inherit' }} />
-                            </label>
                             <button onClick={function(){ handleVisualizeLoad(); }} disabled={!activeGraph || vizProgress.loading} style={{
                                 padding:'3px 10px', border:'none', borderRadius:4, cursor: (!activeGraph || vizProgress.loading) ? 'not-allowed' : 'pointer',
                                 fontWeight:700, color:'#fff', fontSize:11, fontFamily:'inherit', flexShrink:0,
@@ -9822,12 +9839,12 @@ function App() {
                             <div style={{ flexShrink:0, padding:'4px 10px', background:'#fff3cd', color:'#856404', border:'1px solid #ffeeba', borderRadius:5, fontSize:11, fontWeight:600, display:'flex', alignItems:'center', flexWrap:'wrap', gap:6 }}>
                                 <span>
                                     {'⚠ Large graph: ' + graphCounts.nodes.toLocaleString() + ' nodes / ' + graphCounts.edges.toLocaleString() +
-                                     ' edges exceed the ' + bigGraphThreshold.toLocaleString() + ' max-load cap — loading progressively.'}
+                                     ' edges exceed the ' + bigGraphThreshold.toLocaleString() + ' threshold — visualizing may be slow.'}
                                 </span>
-                                <button onClick={function(){ handleVisualizeLoad(true); }} disabled={!activeGraph || vizProgress.loading} title="Load every node/edge, ignoring the max-load cap" style={{
+                                <button onClick={function(){ handleVisualizeLoad(true); }} disabled={!activeGraph || vizProgress.loading} title="Load and visualize the whole graph" style={{
                                     padding:'2px 8px', border:'1px solid #856404', borderRadius:4, cursor: (!activeGraph || vizProgress.loading) ? 'not-allowed' : 'pointer',
                                     fontWeight:700, color:'#856404', background:'#fff', fontSize:10, fontFamily:'inherit', opacity: (!activeGraph || vizProgress.loading) ? 0.5 : 1, flexShrink:0, whiteSpace:'nowrap',
-                                }}>Continue — load all</button>
+                                }}>Continue — visualize anyway</button>
                             </div>
                         )}
                         {graphTableData ? (
