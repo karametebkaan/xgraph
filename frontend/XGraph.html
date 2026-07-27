@@ -47,7 +47,7 @@
 const { useState, useEffect, useRef, useCallback, useMemo } = React;
 
 /* ═══════════════════════ CONSTANTS ════════════════════════ */
-const EXPLORER_VERSION = "0.22.0";  // xGraph version — bump on frontend changes so a stale browser cache is visible
+const EXPLORER_VERSION = "0.22.1";  // xGraph version — bump on frontend changes so a stale browser cache is visible
 const SAFETY_TIMEOUT_MS = 10 * 60 * 1000;
 const PALETTE = [
     { solid: '#0984e3', light: '#e1f0fb' }, { solid: '#00cec9', light: '#e0f9f8' },
@@ -1087,7 +1087,14 @@ function OntologyViewer(props) {
         // Clear all highlights first
         innerGRef.current.selectAll('.node, .edge').classed('node-highlight', false).classed('edge-highlight', false).classed('dimmed', false);
         if (!labelSet || labelSet.length === 0) return;
-        var cleanLabels = labelSet.map(function(l){ return l.trim().toLowerCase().replace(/\s+/g, ''); });
+        // Normalize incoming label(s) through labelComboKey — the same unwrap the
+        // donut/canvas use — so an extracted graph's JSON-array-string label
+        // '["organization"]' (or a 'A, B' combo) becomes the bare token(s)
+        // 'organization' that the DOT/SVG node text actually contains. Without
+        // this, chart->ontology highlight never matched for array/multi-label
+        // (extracted) graphs: text.includes('["organization"]') is always false.
+        var cleanLabels = labelComboKey(labelSet).split('|').filter(Boolean).map(function(l){ return l.toLowerCase().replace(/\s+/g, ''); });
+        if (cleanLabels.length === 0) return;
         innerGRef.current.selectAll('.node, .edge').each(function() {
             var el = d3.select(this);
             var text = el.text().toLowerCase().replace(/\s+/g, '');
