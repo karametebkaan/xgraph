@@ -47,7 +47,7 @@
 const { useState, useEffect, useRef, useCallback, useMemo } = React;
 
 /* ═══════════════════════ CONSTANTS ════════════════════════ */
-const EXPLORER_VERSION = "0.19.0";  // xGraph version — bump on frontend changes so a stale browser cache is visible
+const EXPLORER_VERSION = "0.19.1";  // xGraph version — bump on frontend changes so a stale browser cache is visible
 const SAFETY_TIMEOUT_MS = 10 * 60 * 1000;
 const PALETTE = [
     { solid: '#0984e3', light: '#e1f0fb' }, { solid: '#00cec9', light: '#e0f9f8' },
@@ -7538,10 +7538,6 @@ function ExtractPanel(props) {
                             padding:'8px 16px', border:'none', borderRadius:6, cursor:'pointer',
                             fontWeight:700, color:'#fff', fontSize:12, fontFamily:'inherit', background:'#0984e3',
                         }}>Visualize</button>
-                        <button onClick={function(){ jumpTo('ontology'); }} style={{
-                            padding:'8px 16px', border:'none', borderRadius:6, cursor:'pointer',
-                            fontWeight:700, color:'#fff', fontSize:12, fontFamily:'inherit', background:'#6c5ce7',
-                        }}>Ontology</button>
                     </div>
                 </div>
             )}
@@ -8252,6 +8248,15 @@ function App() {
             setGraphs(names);
             setEngine(graphEngine); // key Kinetica-only gating off the graph engine, not OLAP
             setConnected(true);
+            // Kinetica's Visualize page fetches graph entities directly from the
+            // engine's REST endpoint (see handleVisualizeLoad's kinetica branch),
+            // so credentials must carry the real Kinetica base + basic-auth creds.
+            // Every other engine keeps the gateway-base stub (prop compatibility).
+            if (graphEngine === 'kinetica') {
+                setCredentials({ url: graphConn.url || '', user: graphConn.user || '', pass: graphConn.password || '', engine: 'kinetica' });
+            } else {
+                setCredentials({ url: gatewayBase, user: '', pass: '', engine: graphEngine });
+            }
             setConnectStatus({ text: 'Connected — ' + names.length + ' graph' + (names.length === 1 ? '' : 's'), error:false, loading:false });
             setActiveAction('list');
             // Fetch the active graph's ontology now that the gateway session
@@ -8277,7 +8282,6 @@ function App() {
     const [schemaNodeLabelkeys, setSchemaNodeLabelkeys] = useState(false);
     const [schemaEdgeLabelkeys, setSchemaEdgeLabelkeys] = useState(false);
     const [schemaFullSearch, setSchemaFullSearch] = useState(false);
-    const [vizConfirm, setVizConfirm] = useState(null); // null or {nodes, edges, threshold}
     const [toast, setToast] = useState(null); // null or {message, type}
     var showToast = function(msg, type) { setToast({message:msg, type:type||'info'}); setTimeout(function(){ setToast(null); }, 4000); };
 
