@@ -20,7 +20,8 @@ _RELATION_AXIS = "RelationType"
 # Fold-checks decide whether two names are the same entity — a graph-quality
 # decision, part of building — so keep them on the heavier model like extraction.
 # Shares the XGRAPH_EXTRACT_MODEL knob so one setting tunes all of building.
-_FOLD_MODEL = os.environ.get("XGRAPH_EXTRACT_MODEL", "claude-opus-4-8")
+# Unset ⇒ None ⇒ _llm uses the resolved provider Build model (see extract.py).
+_FOLD_MODEL = os.environ.get("XGRAPH_EXTRACT_MODEL")
 
 _llm_fn: Optional[LLMFunc] = None
 

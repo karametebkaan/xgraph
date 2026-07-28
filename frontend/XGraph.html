@@ -62,6 +62,26 @@ const GATEWAY_BASE = "http://localhost:8090";   // xgraph FastAPI gateway (8088 
 // handleVisualizeLoad) — no separate "Sample size" field; CanvasGraph's
 // node/edge sliders further govern what actually gets rendered.
 const VISUALIZE_PAGE_SIZE = 10000;
+// Per-provider default LLM route + model tiers for the Setup picker. A single
+// GLOBAL provider applies to both tiers (no mixing). Switching provider auto-loads
+// that provider's defaults (see selectLlmProvider in SetupPanel). Mirrors the
+// backend _PROVIDER_DEFAULTS.
+const LLM_PROVIDER_DEFAULTS = {
+    anthropic: { mechanism:'cli', auth:'vertex', model:'claude-opus-4-8', fastModel:'claude-haiku-4-5-20251001' },
+    gemini:    { mechanism:'sdk', auth:'apikey', model:'gemini-2.5-pro',  fastModel:'gemini-2.5-flash' },
+};
+// Cached picker selection (survives reload + gateway restart). Stored in the
+// llmConn shape (camelCase apiKey/fastModel). The api_key is cached too — an
+// accepted dev-only tradeoff (never persisted server-side; /llm_status never
+// returns it).
+const LLM_ROUTE_STORAGE_KEY = 'xgraph.llmRoute';
+function loadLlmRoute() {
+    try {
+        var raw = (typeof window !== 'undefined' && window.localStorage)
+            ? window.localStorage.getItem(LLM_ROUTE_STORAGE_KEY) : null;
+        return raw ? (JSON.parse(raw) || {}) : {};
+    } catch (e) { return {}; }
+}
 // Graphs whose edge count is below this auto-pull on select (background, no tab
 // switch) so Visualize is instant. Editable at runtime via App's autoVizThreshold
 // state + the CanvasGraph "Auto-viz" toolbar control; see App's auto-viz effect.
@@ -6639,6 +6659,15 @@ function SetupPanel(props) {
     };
     var setOlapField = function(k, v) { setOlapConn(function(prev){ var n = Object.assign({}, prev); n[k] = v; return n; }); };
     var setLlmField = function(k, v) { setLlmConn(function(prev){ var n = Object.assign({}, prev); n[k] = v; return n; }); };
+    // Switching provider auto-loads that provider's default route + model tiers
+    // (single global provider — no per-tier mixing), so the user never starts from
+    // an empty state. Preserves any api-key/project the user already typed.
+    var selectLlmProvider = function(p) {
+        var d = LLM_PROVIDER_DEFAULTS[p] || LLM_PROVIDER_DEFAULTS.anthropic;
+        setLlmConn(function(prev){
+            return Object.assign({}, prev, { provider:p, mechanism:d.mechanism, auth:d.auth, model:d.model, fastModel:d.fastModel });
+        });
+    };
     var showPwState = React.useState(false); var showPw = showPwState[0], setShowPw = showPwState[1];
     var pwType = showPw ? 'text' : 'password';
 
@@ -6720,24 +6749,34 @@ function SetupPanel(props) {
                 Opus); Ask/Explain use the fast tier (Haiku), shown below. */}
             <div style={col}>
                 <div style={colTitle}>LLM</div>
+                <Label>Provider</Label>
+                <select style={inp} value={llmConn.provider || 'anthropic'} onChange={function(e){ selectLlmProvider(e.target.value); }}>
+                    <option value="anthropic">Claude (Anthropic)</option>
+                    <option value="gemini">Gemini (Google)</option>
+                </select>
                 <div style={{ display:'flex', gap:12, marginBottom:10 }}>
-                    <div style={{ flex:1 }}>
+                    {(llmConn.provider || 'anthropic') === 'anthropic' ? <div style={{ flex:1 }}>
                         <Label>Mechanism</Label>
                         <select style={inp} value={llmConn.mechanism || 'cli'} onChange={function(e){ setLlmField('mechanism', e.target.value); }}>
                             <option value="cli">claude CLI</option>
                             <option value="sdk">Anthropic SDK</option>
                         </select>
-                    </div>
+                    </div> : null}
                     <div style={{ flex:1 }}>
                         <Label>Auth</Label>
-                        <select style={inp} value={llmConn.auth || 'vertex'} onChange={function(e){ setLlmField('auth', e.target.value); }}>
-                            <option value="vertex">GCP Vertex</option>
-                            <option value="apikey">API key</option>
-                            {(llmConn.mechanism || 'cli') === 'cli' ? <option value="cli-login">CLI login</option> : null}
+                        <select style={inp} value={llmConn.auth || ((llmConn.provider || 'anthropic') === 'gemini' ? 'apikey' : 'vertex')} onChange={function(e){ setLlmField('auth', e.target.value); }}>
+                            {(llmConn.provider || 'anthropic') === 'gemini' ? [
+                                <option key="apikey" value="apikey">Google API key</option>,
+                                <option key="vertex" value="vertex">Vertex AI</option>
+                            ] : [
+                                <option key="vertex" value="vertex">GCP Vertex</option>,
+                                <option key="apikey" value="apikey">API key</option>,
+                                ((llmConn.mechanism || 'cli') === 'cli' ? <option key="cli-login" value="cli-login">CLI login</option> : null)
+                            ]}
                         </select>
                     </div>
                 </div>
-                {(llmConn.auth || 'vertex') === 'vertex' ? (
+                {(llmConn.auth || ((llmConn.provider || 'anthropic') === 'gemini' ? 'apikey' : 'vertex')) === 'vertex' ? (
                     <div>
                         <Label>Vertex project</Label>
                         <input style={inp} value={llmConn.project || ''} onChange={function(e){ setLlmField('project', e.target.value); }} placeholder="team-warehouse-workhorses-dev" />
@@ -6745,23 +6784,25 @@ function SetupPanel(props) {
                         <input style={inp} value={llmConn.region || ''} onChange={function(e){ setLlmField('region', e.target.value); }} placeholder="global" />
                         <p style={{ fontSize:11, color:'#b2bec3', margin:'0 0 8px' }}>Auth uses server-side GCP ADC (gcloud application-default). The browser sends only project/region.</p>
                     </div>
-                ) : (llmConn.auth || 'vertex') === 'apikey' ? (
+                ) : (llmConn.auth || ((llmConn.provider || 'anthropic') === 'gemini' ? 'apikey' : 'vertex')) === 'apikey' ? (
                     <div>
-                        <Label>API key</Label>
-                        <input type={pwType} autoComplete="new-password" style={inp} value={llmConn.apiKey || ''} onChange={function(e){ setLlmField('apiKey', e.target.value); }} placeholder="sk-ant-…" />
-                        <p style={{ fontSize:11, color:'#b2bec3', margin:'0 0 8px' }}>Sent to the gateway over localhost. Not stored in /llm_status.</p>
+                        <Label>{(llmConn.provider || 'anthropic') === 'gemini' ? 'Google AI Studio API key' : 'API key'}</Label>
+                        <input type={pwType} autoComplete="new-password" style={inp} value={llmConn.apiKey || ''} onChange={function(e){ setLlmField('apiKey', e.target.value); }} placeholder={(llmConn.provider || 'anthropic') === 'gemini' ? 'AIza… (aistudio.google.com/apikey)' : 'sk-ant-…'} />
+                        <p style={{ fontSize:11, color:'#b2bec3', margin:'0 0 8px' }}>Sent to the gateway over localhost. Cached in your browser; not stored in /llm_status.</p>
                     </div>
                 ) : (
                     <p style={{ fontSize:12, color:'#b2bec3', margin:'0 0 8px' }}>Uses the claude CLI's own stored login.</p>
                 )}
                 <Label>Build model (optional)</Label>
-                <input style={inp} value={llmConn.model || ''} onChange={function(e){ setLlmField('model', e.target.value); }} placeholder="claude-opus-4-8" />
+                <input style={inp} value={llmConn.model || ''} onChange={function(e){ setLlmField('model', e.target.value); }} placeholder={(llmConn.provider || 'anthropic') === 'gemini' ? 'gemini-2.5-pro' : 'claude-opus-4-8'} />
+                <Label>Ask/Explain model (optional)</Label>
+                <input style={inp} value={llmConn.fastModel || ''} onChange={function(e){ setLlmField('fastModel', e.target.value); }} placeholder={(llmConn.provider || 'anthropic') === 'gemini' ? 'gemini-2.5-flash' : 'claude-haiku-4-5-20251001'} />
                 <p style={{ fontSize:11, color:'#b2bec3', margin:'2px 0 0' }}>Applied when you click <strong>Connect</strong> below.</p>
                 {llmStatus && (llmStatus.error ? (
                     <p style={{ fontSize:11, color:'#d63031', margin:'8px 0 0', fontWeight:600 }}>LLM: {llmStatus.error}</p>
                 ) : (
                     <p style={{ fontSize:11, color:'#00b894', margin:'8px 0 0', fontWeight:600 }}>
-                        LLM: {llmStatus.mechanism} · {llmStatus.auth}
+                        LLM: {llmStatus.provider ? llmStatus.provider + ' · ' : ''}{llmStatus.mechanism} · {llmStatus.auth}
                         {llmStatus.project ? ' · ' + llmStatus.project : ''}
                         {llmStatus.auth === 'apikey' ? (llmStatus.has_api_key ? ' · key set' : ' · NO key') : ''}
                         <br />
@@ -8207,7 +8248,7 @@ function App() {
     const [olapEngine, setOlapEngine]   = useState('duckdb');
     const [olapConn, setOlapConn]       = useState({ url:'http://127.0.0.1:9191', user:'admin', password:'' });
     const [llmEngine, setLlmEngine]     = useState('claude'); // single option today; kept for the later LLM slice
-    const [llmConn, setLlmConn]         = useState({ apiKey:'', extractMode:'sequential' });
+    const [llmConn, setLlmConn]         = useState(Object.assign({ provider:'anthropic', apiKey:'', fastModel:'', extractMode:'sequential' }, loadLlmRoute()));
     // LLM route (gateway-global, in-memory — not per-session): applied as part
     // of Connect (see handleConnectAxes), so Setup has one commit button.
     // llmStatus mirrors /llm_status — both the Build tier `model` and the
@@ -8226,11 +8267,15 @@ function App() {
             if (st && !st.error) {
                 setLlmConn(function (prev) {
                     var next = Object.assign({}, prev);
-                    ['mechanism', 'auth', 'project', 'region', 'model'].forEach(function (k) {
+                    ['provider', 'mechanism', 'auth', 'project', 'region', 'model'].forEach(function (k) {
                         if (st[k] && (next[k] === undefined || next[k] === null || next[k] === '')) {
                             next[k] = st[k];
                         }
                     });
+                    // status uses snake_case fast_model; llmConn uses camelCase fastModel
+                    if (st.fast_model && (next.fastModel === undefined || next.fastModel === null || next.fastModel === '')) {
+                        next.fastModel = st.fast_model;
+                    }
                     return next;
                 });
             }
@@ -8304,15 +8349,28 @@ function App() {
             // into Connect so Setup has one commit button, not two. A bad route
             // surfaces in the LLM status line but does NOT block the graph connect.
             try {
+                var _prov = llmConn.provider || 'anthropic';
+                var _provDefaults = LLM_PROVIDER_DEFAULTS[_prov] || LLM_PROVIDER_DEFAULTS.anthropic;
                 await gwClient.setLlmConfig({
-                    mechanism: llmConn.mechanism || 'cli',
-                    auth: llmConn.auth || 'vertex',
+                    provider: _prov,
+                    mechanism: llmConn.mechanism || _provDefaults.mechanism,
+                    auth: llmConn.auth || _provDefaults.auth,
                     project: llmConn.project || '',
                     region: llmConn.region || '',
                     model: llmConn.model || '',
+                    fast_model: llmConn.fastModel || '',
                     api_key: llmConn.apiKey || '',
                 });
                 setLlmStatus(await gwClient.getLlmStatus());
+                // Cache the picker selection so subsequent runs skip reconfiguring.
+                try {
+                    window.localStorage.setItem(LLM_ROUTE_STORAGE_KEY, JSON.stringify({
+                        provider: _prov, mechanism: llmConn.mechanism || '', auth: llmConn.auth || '',
+                        project: llmConn.project || '', region: llmConn.region || '',
+                        model: llmConn.model || '', fastModel: llmConn.fastModel || '',
+                        apiKey: llmConn.apiKey || '', extractMode: llmConn.extractMode || 'sequential',
+                    }));
+                } catch (e) { /* localStorage unavailable — non-fatal */ }
             } catch (e) {
                 setLlmStatus({ error: String(e && e.message || e) });
             }
@@ -9789,8 +9847,8 @@ function App() {
                     <span title="Gateway URL">{gatewayBase}</span>
                     {llmStatus && !llmStatus.error && <>
                         <span style={{ margin:'0 6px', color:'#dfe6e9' }}>{'·'}</span>
-                        <span title={'LLM: ' + llmStatus.mechanism + ' · ' + llmStatus.auth + ' · Ask/Explain=' + (llmStatus.fast_model || '?') + ' · Build=' + (llmStatus.model || '?') + ' — edit backend/.env to change'}>
-                            {'LLM: ' + llmStatus.mechanism + '·' + llmStatus.auth + ((llmStatus.fast_model || llmStatus.model) ? '·' + (llmStatus.fast_model || llmStatus.model).replace('claude-','').split('-')[0] : '')}
+                        <span title={'LLM: ' + (llmStatus.provider ? llmStatus.provider + ' · ' : '') + llmStatus.mechanism + ' · ' + llmStatus.auth + ' · Ask/Explain=' + (llmStatus.fast_model || '?') + ' · Build=' + (llmStatus.model || '?') + ' — set in Setup'}>
+                            {'LLM: ' + (llmStatus.provider ? llmStatus.provider + '·' : '') + llmStatus.mechanism + '·' + llmStatus.auth + ((llmStatus.fast_model || llmStatus.model) ? '·' + (llmStatus.fast_model || llmStatus.model).replace('claude-','').replace('gemini-','').split('-')[0] : '')}
                         </span>
                     </>}
                     {activeGraph && (

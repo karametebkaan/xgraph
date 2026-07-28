@@ -259,7 +259,13 @@ def test_read_document_pdf():
 
 def test_extract_get_llm_binds_build_model(monkeypatch):
     # Build (extraction) is quality-critical → runs on the heavier Opus tier.
+    # EXTRACT_MODEL unset (default) means None, so _llm falls through to the
+    # resolved provider Build model (e.g., claude-opus-4-8 for anthropic).
     from xgraph_gateway import extract, llm as llmmod
+    monkeypatch.delenv("XGRAPH_EXTRACT_MODEL", raising=False)
+    llmmod._OVERRIDE = {}
+    import importlib
+    importlib.reload(extract)
     captured = {}
     def fake_llm(prompt, *, schema=None, model=None):
         captured["model"] = model
@@ -268,12 +274,21 @@ def test_extract_get_llm_binds_build_model(monkeypatch):
     monkeypatch.setattr(extract, "_llm_fn", None)
     extract._get_llm()("hi", schema={})
     assert captured["model"] == extract.EXTRACT_MODEL
-    assert "opus" in extract.EXTRACT_MODEL
+    assert captured["model"] is None, "unset EXTRACT_MODEL should pass None to _llm"
+    # Verify that the resolved config (what _llm will use) has opus
+    cfg = llmmod.resolve_llm_config()
+    assert "opus" in cfg["model"], "default anthropic Build model should be opus"
 
 
 def test_fold_get_llm_binds_build_model(monkeypatch):
     # Fold-checks are a graph-quality decision (part of building) → Opus too.
+    # _FOLD_MODEL unset (default) means None, so _llm falls through to the
+    # resolved provider Build model (e.g., claude-opus-4-8 for anthropic).
     from xgraph_gateway import extract_fold, llm as llmmod
+    monkeypatch.delenv("XGRAPH_EXTRACT_MODEL", raising=False)
+    llmmod._OVERRIDE = {}
+    import importlib
+    importlib.reload(extract_fold)
     captured = {}
     def fake_llm(prompt, *, schema=None, model=None):
         captured["model"] = model
@@ -282,7 +297,10 @@ def test_fold_get_llm_binds_build_model(monkeypatch):
     monkeypatch.setattr(extract_fold, "_llm_fn", None)
     extract_fold._get_llm()("hi", schema={})
     assert captured["model"] == extract_fold._FOLD_MODEL
-    assert "opus" in captured["model"]
+    assert captured["model"] is None, "unset _FOLD_MODEL should pass None to _llm"
+    # Verify that the resolved config (what _llm will use) has opus
+    cfg = llmmod.resolve_llm_config()
+    assert "opus" in cfg["model"], "default anthropic Build model should be opus"
 
 
 def test_nlcypher_get_llm_binds_fast_model(monkeypatch):
@@ -413,3 +431,75 @@ def test_extract_document_merges_surname_across_chunks():
     names = {e["name"] for e in out["entities"]}
     assert "Markwayne Mullin" in names and "Mullin" not in names
     assert any(r["src"] == "Markwayne Mullin" for r in out["relations"])
+
+
+def test_extract_model_unset_passes_none_so_provider_default_is_used(monkeypatch):
+    """Regression test for Gemini Build tier fix: XGRAPH_EXTRACT_MODEL unset should
+    NOT hardcode a Claude model id. Instead, pass model=None so _llm falls through to
+    the resolved provider's Build model (cfg["model"]: override > XGRAPH_LLM_MODEL >
+    provider default). This fixes the bug where Gemini provider still sent
+    'claude-opus-4-8' to the Google SDK."""
+    import importlib
+    from xgraph_gateway import extract, extract_fold, llm as llmmod
+
+    # Test 1: With default provider (anthropic), unset knob should still resolve to
+    # claude-opus-4-8 (backward compat: no change for existing Anthropic users).
+    monkeypatch.delenv("XGRAPH_EXTRACT_MODEL", raising=False)
+    monkeypatch.delenv("XGRAPH_LLM", raising=False)
+    monkeypatch.delenv("XGRAPH_LLM_PROVIDER", raising=False)
+    monkeypatch.delenv("XGRAPH_LLM_MODEL", raising=False)
+    llmmod._OVERRIDE = {}
+    importlib.reload(extract)
+    importlib.reload(extract_fold)
+    # Check that the module-level constants are now None (unset env)
+    assert extract.EXTRACT_MODEL is None, "EXTRACT_MODEL should be None when env unset"
+    assert extract_fold._FOLD_MODEL is None, "_FOLD_MODEL should be None when env unset"
+    # With provider=anthropic (default), resolve_llm_config()["model"] should be opus
+    cfg = llmmod.resolve_llm_config()
+    assert cfg["provider"] == "anthropic"
+    assert cfg["model"] == "claude-opus-4-8", \
+        "Anthropic default Build model should still be opus for backward compat"
+
+    # Test 2: With gemini provider, unset knob means extract passes model=None,
+    # so gemini's Build model is used (not a hardcoded Claude id).
+    llmmod.set_llm_config({"provider": "gemini", "auth": "apikey", "api_key": "test-key"})
+    cfg = llmmod.resolve_llm_config()
+    assert cfg["provider"] == "gemini"
+    assert cfg["model"] == "gemini-2.5-pro", \
+        "Gemini default Build model should be gemini-2.5-pro"
+    # Extract/fold pass model=None, so _llm uses cfg["model"] not a Claude id.
+    # Monkeypatch _llm to capture what model is passed.
+    captured = {}
+    def capture_llm(prompt, *, schema=None, model=None):
+        captured["model"] = model
+        return {"entities": [], "relations": []}
+    monkeypatch.setattr(llmmod, "_llm", capture_llm)
+    extract._llm_fn = None  # Reset cache so _get_llm re-binds
+    extract.extract_document("test")  # No injected llm, use _get_llm
+    assert captured["model"] is None, \
+        "extract should pass model=None when XGRAPH_EXTRACT_MODEL is unset, " \
+        "so _llm falls through to the provider's resolved Build model"
+
+    # Test 3: Explicit XGRAPH_EXTRACT_MODEL still wins as a cross-provider override.
+    monkeypatch.setenv("XGRAPH_EXTRACT_MODEL", "custom-model-123")
+    importlib.reload(extract)
+    importlib.reload(extract_fold)
+    assert extract.EXTRACT_MODEL == "custom-model-123"
+    assert extract_fold._FOLD_MODEL == "custom-model-123"
+    captured2 = {}
+    def capture_llm2(prompt, *, schema=None, model=None):
+        captured2["model"] = model
+        return {"entities": [], "relations": []}
+    monkeypatch.setattr(llmmod, "_llm", capture_llm2)
+    extract._llm_fn = None  # Reset cache so _get_llm re-binds with new EXTRACT_MODEL
+    extract.extract_document("test")  # No injected llm, use _get_llm
+    assert captured2["model"] == "custom-model-123", \
+        "explicit XGRAPH_EXTRACT_MODEL should override and be passed to _llm"
+
+    # Cleanup: restore defaults for other tests
+    llmmod._OVERRIDE = {}
+    monkeypatch.delenv("XGRAPH_EXTRACT_MODEL", raising=False)
+    extract._llm_fn = None
+    extract_fold._llm_fn = None
+    importlib.reload(extract)
+    importlib.reload(extract_fold)

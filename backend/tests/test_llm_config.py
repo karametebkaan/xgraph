@@ -9,7 +9,9 @@ def _reset(monkeypatch):
     llm._OVERRIDE = {}
     for k in ("CLAUDE_CODE_USE_VERTEX", "ANTHROPIC_API_KEY", "ANTHROPIC_VERTEX_PROJECT_ID",
               "CLOUD_ML_REGION", "XGRAPH_LLM_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL",
-              "XGRAPH_LLM_MECHANISM"):
+              "XGRAPH_LLM_MECHANISM", "XGRAPH_LLM_PROVIDER", "XGRAPH_LLM_FAST_MODEL",
+              "GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_GENAI_USE_VERTEXAI",
+              "GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_LOCATION"):
         monkeypatch.delenv(k, raising=False)
     yield
     llm._OVERRIDE = {}
@@ -125,3 +127,71 @@ def test_failed_set_restores_previous_override():
     with pytest.raises(ValueError):
         llm.set_llm_config({"mechanism": "sdk", "auth": "cli-login"})
     assert llm.resolve_llm_config()["auth"] == "cli-login"  # unchanged
+
+
+def test_default_provider_is_anthropic():
+    cfg = llm.resolve_llm_config()
+    assert cfg["provider"] == "anthropic"
+    assert cfg["sources"]["provider"] == "default"
+    # backward-compat: anthropic tiers unchanged
+    assert cfg["model"] == "claude-opus-4-8"
+    assert cfg["fast_model"] == "claude-haiku-4-5-20251001"
+
+
+def test_gemini_provider_defaults_and_forces_sdk():
+    eff = llm.set_llm_config({"provider": "gemini", "auth": "apikey", "api_key": "AIza-x"})
+    assert eff["provider"] == "gemini"
+    assert eff["mechanism"] == "sdk"                  # gemini is SDK-only by default
+    assert eff["model"] == "gemini-2.5-pro"
+    assert eff["fast_model"] == "gemini-2.5-flash"
+    assert llm.fast_model() == "gemini-2.5-flash"     # fast tier is provider-aware
+
+
+def test_gemini_cli_route_rejected():
+    with pytest.raises(ValueError):
+        llm.set_llm_config({"provider": "gemini", "mechanism": "cli", "auth": "apikey", "api_key": "k"})
+
+
+def test_unknown_provider_rejected():
+    with pytest.raises(ValueError):
+        llm.set_llm_config({"provider": "bogus", "auth": "apikey", "api_key": "k"})
+
+
+def test_provider_env_and_override_precedence(monkeypatch):
+    monkeypatch.setenv("XGRAPH_LLM_PROVIDER", "gemini")
+    cfg = llm.resolve_llm_config()
+    assert cfg["provider"] == "gemini"
+    assert cfg["sources"]["provider"] == "env"
+    # override beats env
+    eff = llm.set_llm_config({"provider": "anthropic"})
+    assert eff["provider"] == "anthropic"
+    assert llm.resolve_llm_config()["sources"]["provider"] == "override"
+
+
+def test_gemini_env_auth_inference(monkeypatch):
+    monkeypatch.setenv("XGRAPH_LLM_PROVIDER", "gemini")
+    monkeypatch.setenv("GEMINI_API_KEY", "AIza-env")
+    cfg = llm.resolve_llm_config()
+    assert cfg["auth"] == "apikey"
+    assert cfg["api_key"] == "AIza-env"
+    assert cfg["sources"]["auth"] == "env"
+
+
+def test_gemini_vertex_requires_project():
+    with pytest.raises(ValueError):
+        llm.set_llm_config({"provider": "gemini", "auth": "vertex"})  # no project
+    eff = llm.set_llm_config({"provider": "gemini", "auth": "vertex", "project": "proj-g", "region": "us-central1"})
+    assert eff["auth"] == "vertex" and eff["project"] == "proj-g"
+
+
+def test_fast_model_override_beats_provider_default():
+    llm.set_llm_config({"provider": "gemini", "auth": "apikey", "api_key": "k", "fast_model": "gemini-2.5-flash-lite"})
+    assert llm.fast_model() == "gemini-2.5-flash-lite"
+
+
+def test_status_includes_provider_and_hides_key():
+    llm.set_llm_config({"provider": "gemini", "auth": "apikey", "api_key": "AIza-secret"})
+    st = llm.llm_status()
+    assert st["provider"] == "gemini"
+    assert st["has_api_key"] is True
+    assert "api_key" not in st

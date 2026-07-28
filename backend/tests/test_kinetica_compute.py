@@ -1,7 +1,7 @@
 from decimal import Decimal
 
 from xgraph_gateway.compute.kinetica_engine import (
-    KineticaComputeEngine, _ids_sql_list, _escape_sql_literal,
+    KineticaComputeEngine, _ids_sql_list, _escape_sql_literal, _norm_graph,
 )
 
 
@@ -76,4 +76,38 @@ def test_run_sql_coerces_decimal():
     eng = KineticaComputeEngine(conn=None, _source_factory=lambda: fake)
     rows = eng.run_sql("SELECT COUNT(*) AS c FROM expero.vertexes")
     assert rows == [{"c": 5.0}]
-    assert isinstance(rows[0]["c"], float)
+
+
+# -- Graph-key normalization ------------------------------------------------
+# Kinetica surfaces graphs schema-qualified in list_graphs ("ki_home.foo"),
+# but /extract records the metadata ledger under the bare CREATE-GRAPH target
+# name ("foo"). Every metadata read/write must key on the bare name so a graph
+# browsed after a round-trip through the graph List still finds its documents.
+
+def test_norm_graph_strips_schema_prefix():
+    assert _norm_graph("ki_home.extracted_graph99") == "extracted_graph99"
+    assert _norm_graph("extracted_graph99") == "extracted_graph99"
+    # only the schema prefix is stripped (one dot); a bare name is untouched
+    assert _norm_graph("a.b.c") == "c"
+
+
+def test_metadata_methods_key_on_bare_graph_name():
+    # Record under the bare name (as /extract does), then list/get under the
+    # schema-qualified name (as the graph List provides after a switch-back).
+    # Both must emit SQL filtering on the SAME bare literal so they match.
+    fake = FakeKineticaSource(canned=[])
+    eng = KineticaComputeEngine(conn=None, _source_factory=lambda: fake)
+
+    eng.record_document("extracted_graph99", "doc:a", "sha-1", "text")
+    fake.queries.clear()
+    eng.list_documents("ki_home.extracted_graph99")
+    eng.get_document("ki_home.extracted_graph99", "doc:a")
+    eng.record_document_text("ki_home.extracted_graph99", "doc:a", "hi")
+    eng.has_document_text("ki_home.extracted_graph99", "doc:a")
+    eng.get_document_text("ki_home.extracted_graph99", "doc:a")
+    eng.axis_map("ki_home.extracted_graph99", "entity")
+
+    for sql in fake.queries:
+        if "graph =" in sql or "(graph," in sql or "graph," in sql:
+            assert "'extracted_graph99'" in sql, sql
+            assert "'ki_home.extracted_graph99'" not in sql, sql

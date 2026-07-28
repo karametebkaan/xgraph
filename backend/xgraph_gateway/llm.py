@@ -20,22 +20,52 @@ from typing import Any, Optional
 # ── Gateway-global LLM route config (override > env > default) ────────────────
 # In-memory only: a gateway restart falls back to env/.env defaults.
 _OVERRIDE: dict = {}
-_ALLOWED_KEYS = ("mechanism", "auth", "project", "region", "model", "api_key")
-VALID_COMBOS = {
-    ("cli", "vertex"), ("cli", "apikey"), ("cli", "cli-login"),
-    ("sdk", "apikey"), ("sdk", "vertex"),
+_ALLOWED_KEYS = ("provider", "mechanism", "auth", "project", "region", "model", "fast_model", "api_key")
+# Per-provider valid (mechanism, auth) routes. Anthropic keeps all five combos;
+# Gemini is SDK-only (no CLI equivalent), so only sdk×{apikey,vertex}.
+_VALID_COMBOS = {
+    "anthropic": {
+        ("cli", "vertex"), ("cli", "apikey"), ("cli", "cli-login"),
+        ("sdk", "apikey"), ("sdk", "vertex"),
+    },
+    "gemini": {
+        ("sdk", "apikey"), ("sdk", "vertex"),
+    },
 }
-# The general/default model — used for the heavier work (extraction/building,
-# and any call that doesn't ask for the fast tier). Override with XGRAPH_LLM_MODEL.
-_DEFAULT_MODEL = "claude-opus-4-8"
-# The fast tier — for the light interactive Query/Explain calls (nl2cypher,
-# synthesize, join-SQL). Override with XGRAPH_LLM_FAST_MODEL.
-_FAST_MODEL = "claude-haiku-4-5-20251001"
+# A single GLOBAL provider applies to BOTH model tiers (no per-tier mixing).
+_DEFAULT_PROVIDER = "anthropic"
+# Per-provider default models: "model" = Build tier (extract/fold, quality),
+# "fast" = Ask/Explain tier (nl2cypher/synthesize/join-SQL, latency-sensitive).
+# Both are editable/overridable (override > env > this default).
+_PROVIDER_DEFAULTS = {
+    "anthropic": {"model": "claude-opus-4-8", "fast": "claude-haiku-4-5-20251001"},
+    "gemini":    {"model": "gemini-2.5-pro",  "fast": "gemini-2.5-flash"},
+}
+# Kept for the SDK fallback in _llm_claude_sdk (anthropic Build-tier default).
+_DEFAULT_MODEL = _PROVIDER_DEFAULTS["anthropic"]["model"]
+
+
+def _resolve_provider() -> str:
+    """Effective provider: override > XGRAPH_LLM_PROVIDER env > default (anthropic)."""
+    if _OVERRIDE.get("provider"):
+        return _OVERRIDE["provider"]
+    if os.environ.get("XGRAPH_LLM_PROVIDER"):
+        return os.environ["XGRAPH_LLM_PROVIDER"]
+    return _DEFAULT_PROVIDER
 
 
 def fast_model() -> str:
-    """Model for light, latency-sensitive interactive calls (ask/explain)."""
-    return os.environ.get("XGRAPH_LLM_FAST_MODEL") or _FAST_MODEL
+    """Model for light, latency-sensitive interactive calls (ask/explain).
+
+    Provider-aware and overridable: override > XGRAPH_LLM_FAST_MODEL env >
+    the resolved provider's fast-tier default."""
+    if _OVERRIDE.get("fast_model"):
+        return _OVERRIDE["fast_model"]
+    if os.environ.get("XGRAPH_LLM_FAST_MODEL"):
+        return os.environ["XGRAPH_LLM_FAST_MODEL"]
+    provider = _resolve_provider()
+    defaults = _PROVIDER_DEFAULTS.get(provider, _PROVIDER_DEFAULTS[_DEFAULT_PROVIDER])
+    return defaults["fast"]
 
 
 def _env_truthy(name: str) -> bool:
@@ -43,7 +73,10 @@ def _env_truthy(name: str) -> bool:
 
 
 def resolve_llm_config() -> dict:
-    """Effective config = override > env > default, with a per-field `sources` map."""
+    """Effective config = override > env > default, with a per-field `sources` map.
+
+    Resolves `provider` first, then derives per-provider defaults and does
+    provider-aware auth/api-key inference."""
     o = _OVERRIDE
     src: dict = {}
 
@@ -54,35 +87,79 @@ def resolve_llm_config() -> dict:
             src[field] = "env"; return os.environ[env_key]
         src[field] = "default"; return default
 
-    mechanism = pick("mechanism", "XGRAPH_LLM_MECHANISM", default="cli")
+    # provider first — everything below keys off it
+    if o.get("provider"):
+        provider, src["provider"] = o["provider"], "override"
+    elif os.environ.get("XGRAPH_LLM_PROVIDER"):
+        provider, src["provider"] = os.environ["XGRAPH_LLM_PROVIDER"], "env"
+    else:
+        provider, src["provider"] = _DEFAULT_PROVIDER, "default"
+    defaults = _PROVIDER_DEFAULTS.get(provider, _PROVIDER_DEFAULTS[_DEFAULT_PROVIDER])
+    is_gemini = provider == "gemini"
 
+    # mechanism: gemini is SDK-only, so its default is sdk (anthropic stays cli)
+    mechanism = pick("mechanism", "XGRAPH_LLM_MECHANISM",
+                     default=("sdk" if is_gemini else "cli"))
+
+    # auth: provider-aware env inference + default
     if o.get("auth"):
         auth, src["auth"] = o["auth"], "override"
-    elif _env_truthy("CLAUDE_CODE_USE_VERTEX"):
-        auth, src["auth"] = "vertex", "env"
-    elif os.environ.get("ANTHROPIC_API_KEY"):
-        auth, src["auth"] = "apikey", "env"
+    elif is_gemini:
+        if _env_truthy("GOOGLE_GENAI_USE_VERTEXAI"):
+            auth, src["auth"] = "vertex", "env"
+        elif os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"):
+            auth, src["auth"] = "apikey", "env"
+        else:
+            auth, src["auth"] = "apikey", "default"
     else:
-        auth, src["auth"] = "cli-login", "default"
+        if _env_truthy("CLAUDE_CODE_USE_VERTEX"):
+            auth, src["auth"] = "vertex", "env"
+        elif os.environ.get("ANTHROPIC_API_KEY"):
+            auth, src["auth"] = "apikey", "env"
+        else:
+            auth, src["auth"] = "cli-login", "default"
 
-    project = pick("project", "ANTHROPIC_VERTEX_PROJECT_ID")
-    region = pick("region", "CLOUD_ML_REGION")
-    api_key = pick("api_key", "ANTHROPIC_API_KEY")
+    # vertex project/region env names differ by provider
+    project = pick("project", "GOOGLE_CLOUD_PROJECT" if is_gemini else "ANTHROPIC_VERTEX_PROJECT_ID")
+    region = pick("region", "GOOGLE_CLOUD_LOCATION" if is_gemini else "CLOUD_ML_REGION")
 
+    # api_key: provider-aware env source
+    if o.get("api_key"):
+        api_key, src["api_key"] = o["api_key"], "override"
+    elif is_gemini and (os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")):
+        api_key, src["api_key"] = (os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")), "env"
+    elif not is_gemini and os.environ.get("ANTHROPIC_API_KEY"):
+        api_key, src["api_key"] = os.environ["ANTHROPIC_API_KEY"], "env"
+    else:
+        api_key, src["api_key"] = None, "default"
+
+    # model tiers: override > env > provider default
     if o.get("model"):
         model, src["model"] = o["model"], "override"
     elif os.environ.get("XGRAPH_LLM_MODEL"):
         model, src["model"] = os.environ["XGRAPH_LLM_MODEL"], "env"
     else:
-        model, src["model"] = _DEFAULT_MODEL, "default"
+        model, src["model"] = defaults["model"], "default"
 
-    return {"mechanism": mechanism, "auth": auth, "project": project,
-            "region": region, "model": model, "api_key": api_key, "sources": src}
+    if o.get("fast_model"):
+        fast, src["fast_model"] = o["fast_model"], "override"
+    elif os.environ.get("XGRAPH_LLM_FAST_MODEL"):
+        fast, src["fast_model"] = os.environ["XGRAPH_LLM_FAST_MODEL"], "env"
+    else:
+        fast, src["fast_model"] = defaults["fast"], "default"
+
+    return {"provider": provider, "mechanism": mechanism, "auth": auth, "project": project,
+            "region": region, "model": model, "fast_model": fast, "api_key": api_key, "sources": src}
 
 
 def validate_llm_config(cfg: dict) -> dict:
-    if (cfg["mechanism"], cfg["auth"]) not in VALID_COMBOS:
-        raise ValueError(f"invalid LLM route: mechanism={cfg['mechanism']} auth={cfg['auth']}")
+    provider = cfg.get("provider", _DEFAULT_PROVIDER)
+    combos = _VALID_COMBOS.get(provider)
+    if combos is None:
+        raise ValueError(f"unknown LLM provider: {provider}")
+    if (cfg["mechanism"], cfg["auth"]) not in combos:
+        raise ValueError(
+            f"invalid LLM route: provider={provider} mechanism={cfg['mechanism']} auth={cfg['auth']}")
     if cfg["auth"] == "apikey" and not cfg.get("api_key"):
         raise ValueError("API key required for auth=apikey")
     if cfg["auth"] == "vertex" and not cfg.get("project"):
@@ -110,9 +187,10 @@ def set_llm_config(cfg: dict) -> dict:
 def llm_status() -> dict:
     """Safe projection for the UI — never includes the raw api_key."""
     eff = resolve_llm_config()
-    return {"mechanism": eff["mechanism"], "auth": eff["auth"], "project": eff["project"],
-            "region": eff["region"], "model": eff["model"], "fast_model": fast_model(),
-            "sources": eff["sources"], "has_api_key": bool(eff.get("api_key"))}
+    return {"provider": eff["provider"], "mechanism": eff["mechanism"], "auth": eff["auth"],
+            "project": eff["project"], "region": eff["region"], "model": eff["model"],
+            "fast_model": fast_model(), "sources": eff["sources"],
+            "has_api_key": bool(eff.get("api_key"))}
 
 
 def _llm(prompt: str, *, schema: Optional[dict] = None, model: Optional[str] = None) -> Any:
@@ -125,6 +203,8 @@ def _llm(prompt: str, *, schema: Optional[dict] = None, model: Optional[str] = N
             "XGRAPH_LLM=stub: ask/explain need a real LLM backend "
             "(claude CLI or ANTHROPIC_API_KEY)")
     cfg = validate_llm_config(resolve_llm_config())
+    if cfg["provider"] == "gemini":
+        return _llm_gemini(prompt, schema, model, cfg)
     if cfg["mechanism"] == "sdk":
         return _llm_claude_sdk(prompt, schema, model, cfg)
     if not shutil.which("claude"):
@@ -222,6 +302,31 @@ def _llm_claude_sdk(prompt: str, schema: Optional[dict], model: Optional[str], c
     resp = client.messages.create(model=m, max_tokens=2048,
                                   messages=[{"role": "user", "content": prompt}])
     text = "".join(b.text for b in resp.content if b.type == "text")
+    if schema is None:
+        return text
+    mobj = re.search(r"\{.*\}", text, re.DOTALL)
+    return json.loads(mobj.group(0)) if mobj else {}
+
+
+def _llm_gemini(prompt: str, schema: Optional[dict], model: Optional[str], cfg: dict) -> Any:
+    """Gemini via the google-genai SDK (Google AI Studio api-key OR Vertex).
+
+    Structured output asks for a JSON mime-type and then reuses the SAME
+    regex/JSON-extract fallback as the Claude SDK path — this sidesteps Gemini's
+    response_schema dialect quirks (no $ref, restricted keywords) while still
+    returning a parsed dict. Gemini model IDs are plain (no @date translation —
+    that stays Anthropic-Vertex-only)."""
+    from google import genai
+    from google.genai import types
+    m = model or cfg.get("model") or _PROVIDER_DEFAULTS["gemini"]["model"]
+    if cfg["auth"] == "vertex":
+        client = genai.Client(vertexai=True, project=cfg["project"],
+                              location=cfg.get("region") or "global")
+    else:
+        client = genai.Client(api_key=cfg.get("api_key") or None)
+    config = types.GenerateContentConfig(response_mime_type="application/json") if schema is not None else None
+    resp = client.models.generate_content(model=m, contents=prompt, config=config)
+    text = resp.text or ""
     if schema is None:
         return text
     mobj = re.search(r"\{.*\}", text, re.DOTALL)

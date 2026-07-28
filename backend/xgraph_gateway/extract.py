@@ -18,10 +18,12 @@ from typing import Any, Callable, Optional
 LLMFunc = Callable[..., Any]
 
 # Extraction/building is the quality-critical step (entity + relation extraction
-# from prose), so default it to the heavier model. Override with
-# XGRAPH_EXTRACT_MODEL (e.g. a Haiku id) to trade quality for speed/cost.
+# from prose). Unset ⇒ None ⇒ _llm falls through to the resolved provider Build
+# model (cfg["model"]: override > XGRAPH_LLM_MODEL env > provider default), so Build
+# follows the active provider (Claude opus / Gemini pro). An explicit
+# XGRAPH_EXTRACT_MODEL still wins as a cross-provider override.
 # The light interactive ask/explain calls use the fast tier instead (nlcypher).
-EXTRACT_MODEL = os.environ.get("XGRAPH_EXTRACT_MODEL", "claude-opus-4-8")
+EXTRACT_MODEL = os.environ.get("XGRAPH_EXTRACT_MODEL")
 
 _llm_fn: Optional[LLMFunc] = None
 

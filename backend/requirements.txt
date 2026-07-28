@@ -19,3 +19,6 @@ pytest
 # can authenticate to Vertex via ADC. The route is user-selectable at runtime, so
 # this is safe to have installed even when running on the default CLI route.
 anthropic[vertex]
+# Google Gemini provider (AI Studio api-key + Vertex Gemini). Light dep; the
+# Vertex path reuses the google-auth already pulled by anthropic[vertex].
+google-genai

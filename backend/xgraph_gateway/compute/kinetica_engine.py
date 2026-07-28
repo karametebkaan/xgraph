@@ -33,6 +33,22 @@ def _ids_sql_list(ids) -> str:
     return ", ".join(_escape_sql_literal(i) for i in ids)
 
 
+def _norm_graph(graph) -> str:
+    """Normalize a graph identifier to its bare (schema-stripped) name so the
+    metadata ledger keys agree regardless of how the graph is referenced.
+
+    Kinetica surfaces graphs schema-qualified in list_graphs ("ki_home.foo"),
+    but /extract records the ledger under the bare name the user typed as the
+    CREATE GRAPH target ("foo"). Keying every metadata read/write on the last
+    dot-segment reconciles the two, so a graph browsed after a round-trip
+    through the graph List still finds its documents / source text / ontology.
+    A bare name (no dot) is returned unchanged. Graph names themselves cannot
+    contain a dot (safe_ident rejects them), so the only dot is the schema
+    separator.
+    """
+    return str(graph).rsplit(".", 1)[-1]
+
+
 def _validate_source(source: str) -> str:
     # `source` may be schema-qualified (e.g. "expero.vertexes"); safe_ident
     # rejects dots, so validate each dot-separated part individually.
@@ -195,6 +211,7 @@ class KineticaComputeEngine:
 
     def record_document(self, graph, doc_uri, sha256, source_type):
         self._ensure_meta_schema()
+        graph = _norm_graph(graph)
         now = _now_ms()
         now_lit = _ts_literal(now)
         g, u = _escape_sql_literal(graph), _escape_sql_literal(doc_uri)
@@ -228,6 +245,7 @@ class KineticaComputeEngine:
 
     def list_documents(self, graph):
         self._ensure_meta_schema()
+        graph = _norm_graph(graph)
         cols = ["graph", "doc_uri", "sha256", "source_type",
                 "first_ingested_ts", "last_ingested_ts", "status"]
         rows = list(self._src.rows(
@@ -243,6 +261,7 @@ class KineticaComputeEngine:
 
     def get_document(self, graph, doc_uri):
         self._ensure_meta_schema()
+        graph = _norm_graph(graph)
         cols = ["graph", "doc_uri", "sha256", "source_type",
                 "first_ingested_ts", "last_ingested_ts", "status"]
         g, u = _escape_sql_literal(graph), _escape_sql_literal(doc_uri)
@@ -262,6 +281,7 @@ class KineticaComputeEngine:
         DuckDBComputeEngine. Best-effort provenance -- callers wrap this so a
         failure never breaks /extract."""
         self._ensure_meta_schema()
+        graph = _norm_graph(graph)
         text = text or ""
         g, u = _escape_sql_literal(graph), _escape_sql_literal(doc_uri)
         list(self._src.rows(
@@ -273,6 +293,7 @@ class KineticaComputeEngine:
     def has_document_text(self, graph, doc_uri):
         """Cheap existence check for the /extract reuse-path backfill."""
         self._ensure_meta_schema()
+        graph = _norm_graph(graph)
         g, u = _escape_sql_literal(graph), _escape_sql_literal(doc_uri)
         rows = list(self._src.rows(
             f"SELECT 1 FROM {_DOCUMENT_TEXTS_TABLE}"
@@ -283,6 +304,7 @@ class KineticaComputeEngine:
         """Return {doc_uri, text, char_len, truncated} with text sliced to
         `limit` (full text when limit is None or >= length); None if no row."""
         self._ensure_meta_schema()
+        graph = _norm_graph(graph)
         g, u = _escape_sql_literal(graph), _escape_sql_literal(doc_uri)
         rows = list(self._src.rows(
             f"SELECT text, char_len FROM {_DOCUMENT_TEXTS_TABLE}"
@@ -301,12 +323,14 @@ class KineticaComputeEngine:
         from /delete_graph so a deleted-then-re-extracted document isn't
         silently short-circuited as "unchanged"."""
         self._ensure_meta_schema()
+        graph = _norm_graph(graph)
         g = _escape_sql_literal(graph)
         for table in (_DOCUMENTS_TABLE, _ONTOLOGY_TABLE, _DOCUMENT_TEXTS_TABLE):
             list(self._src.rows(f"DELETE FROM {table} WHERE graph = {g}"))
 
     def record_type(self, graph, kind, type_name, canonical_name, axis, source_uri):
         self._ensure_meta_schema()
+        graph = _norm_graph(graph)
         now_lit = _ts_literal(_now_ms())
         # First-seen wins: ON CONFLICT DO NOTHING preserves the original row
         # (Kinetica requires an explicit column list for ON CONFLICT -- see
@@ -321,6 +345,7 @@ class KineticaComputeEngine:
 
     def resolve_canonical(self, graph, kind, type_name):
         self._ensure_meta_schema()
+        graph = _norm_graph(graph)
         g, k = _escape_sql_literal(graph), _escape_sql_literal(kind)
         tn = _escape_sql_literal(type_name)
         # Deterministic tie-break: an exact type_name match always wins over
@@ -336,6 +361,7 @@ class KineticaComputeEngine:
 
     def get_canonicals(self, graph, kind):
         self._ensure_meta_schema()
+        graph = _norm_graph(graph)
         g, k = _escape_sql_literal(graph), _escape_sql_literal(kind)
         rows = list(self._src.rows(
             f"SELECT DISTINCT canonical_name FROM {_ONTOLOGY_TABLE}"
@@ -344,6 +370,7 @@ class KineticaComputeEngine:
 
     def axis_map(self, graph, kind):
         self._ensure_meta_schema()
+        graph = _norm_graph(graph)
         g, k = _escape_sql_literal(graph), _escape_sql_literal(kind)
         rows = list(self._src.rows(
             f"SELECT type_name, axis FROM {_ONTOLOGY_TABLE}"

@@ -44,6 +44,14 @@ const run = async () => {
     return {};
   }));
 
+  // setLlmConfig forwards the cfg object verbatim (provider + fast_model included)
+  await sessionClient.setLlmConfig({ provider: "gemini", mechanism: "sdk", auth: "apikey",
+    api_key: "AIza-k", model: "gemini-2.5-pro", fast_model: "gemini-2.5-flash" });
+  const llmConfigBody = seenBodies[seenBodies.length - 1];
+  assert.equal(llmConfigBody.provider, "gemini");
+  assert.equal(llmConfigBody.fast_model, "gemini-2.5-flash");
+  assert.equal(llmConfigBody.api_key, "AIza-k");
+
   const connectResult = await sessionClient.connect(
     { engine: "falkordb", conn: { host: "h", port: 6379 } },
     { engine: "duckdb", conn: {} }

@@ -266,6 +266,28 @@ def test_kinetica_get_document(kinetica_engine):
     assert doc["graph"] == _KINETICA_TEST_GRAPH
 
 
+def test_kinetica_schema_qualified_name_matches_bare_ledger(kinetica_engine):
+    # Regression for the Storage bug: /extract records the ledger under the
+    # bare CREATE-GRAPH name ("foo"), but after a round-trip through the graph
+    # List the frontend browses the schema-qualified name ("ki_home.foo").
+    # Both must resolve to the same ledger rows.
+    eng = kinetica_engine
+    bare = _KINETICA_TEST_GRAPH
+    qualified = "ki_home." + _KINETICA_TEST_GRAPH
+
+    eng.record_document(bare, "doc:a", "sha-1", "text")
+    eng.record_document_text(bare, "doc:a", "hello world")
+    eng.record_type(bare, "entity", "Company", "Company", "EntityType", "doc:a")
+
+    # Read back using the schema-qualified name the List provides.
+    docs = eng.list_documents(qualified)
+    assert any(d["doc_uri"] == "doc:a" for d in docs)
+    assert eng.get_document(qualified, "doc:a") is not None
+    assert eng.has_document_text(qualified, "doc:a") is True
+    assert eng.get_document_text(qualified, "doc:a")["text"] == "hello world"
+    assert eng.axis_map(qualified, "entity")["Company"] == "EntityType"
+
+
 def test_kinetica_document_text_round_trip(kinetica_engine):
     # Mirrors the DuckDB document-text tests: record -> has -> get (full +
     # sliced) -> upsert -> clear. This is the fix for the live-reported

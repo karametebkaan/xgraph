@@ -8,7 +8,9 @@ from xgraph_gateway import llm
 def _reset(monkeypatch):
     llm._OVERRIDE = {}
     for k in ("CLAUDE_CODE_USE_VERTEX", "ANTHROPIC_API_KEY", "ANTHROPIC_VERTEX_PROJECT_ID",
-              "CLOUD_ML_REGION", "XGRAPH_LLM_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "XGRAPH_LLM"):
+              "CLOUD_ML_REGION", "XGRAPH_LLM_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "XGRAPH_LLM",
+              "XGRAPH_LLM_PROVIDER", "XGRAPH_LLM_FAST_MODEL", "GEMINI_API_KEY", "GOOGLE_API_KEY",
+              "GOOGLE_GENAI_USE_VERTEXAI", "GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_LOCATION"):
         monkeypatch.delenv(k, raising=False)
     monkeypatch.setattr(llm.shutil, "which", lambda _: "/usr/bin/claude")
     yield
@@ -76,3 +78,59 @@ def test_stub_still_raises(monkeypatch):
     monkeypatch.setenv("XGRAPH_LLM", "stub")
     with pytest.raises(RuntimeError):
         llm._llm("x")
+
+
+def _fake_genai(calls, text):
+    """Build a fake `google.genai` module whose Client records init/gen kwargs and
+    returns a fixed text. Mirrors the real `from google import genai` surface."""
+    class FakeModels:
+        def generate_content(self, **kw):
+            calls["gen"] = kw
+            return types.SimpleNamespace(text=text)
+
+    class FakeClient:
+        def __init__(self, **kw):
+            calls["init"] = kw
+            self.models = FakeModels()
+
+    fake_types = types.SimpleNamespace(
+        GenerateContentConfig=lambda **kw: ("gcc", kw))
+    fake_genai = types.SimpleNamespace(Client=FakeClient, types=fake_types)
+    return fake_genai, fake_types
+
+
+def test_gemini_apikey_text_path(monkeypatch):
+    calls = {}
+    fake_genai, fake_types = _fake_genai(calls, "gemini-hi")
+    sys = __import__("sys")
+    monkeypatch.setitem(sys.modules, "google.genai", fake_genai)
+    monkeypatch.setitem(sys.modules, "google.genai.types", fake_types)
+    llm.set_llm_config({"provider": "gemini", "auth": "apikey", "api_key": "AIza-k"})
+    assert llm._llm("hello") == "gemini-hi"
+    assert calls["init"] == {"api_key": "AIza-k"}       # apikey client construction
+    assert calls["gen"]["model"] == "gemini-2.5-pro"    # Build-tier default model
+
+
+def test_gemini_schema_path_extracts_json(monkeypatch):
+    calls = {}
+    # response has prose around the JSON — the regex fallback must still parse it
+    fake_genai, fake_types = _fake_genai(calls, 'here you go: {"answer": 42} done')
+    sys = __import__("sys")
+    monkeypatch.setitem(sys.modules, "google.genai", fake_genai)
+    monkeypatch.setitem(sys.modules, "google.genai.types", fake_types)
+    llm.set_llm_config({"provider": "gemini", "auth": "apikey", "api_key": "AIza-k"})
+    out = llm._llm("q", schema={"type": "object"})
+    assert out == {"answer": 42}
+
+
+def test_gemini_vertex_client_construction(monkeypatch):
+    calls = {}
+    fake_genai, fake_types = _fake_genai(calls, "ok")
+    sys = __import__("sys")
+    monkeypatch.setitem(sys.modules, "google.genai", fake_genai)
+    monkeypatch.setitem(sys.modules, "google.genai.types", fake_types)
+    llm.set_llm_config({"provider": "gemini", "auth": "vertex", "project": "proj-g", "region": "us-central1"})
+    llm._llm("hello")
+    assert calls["init"]["vertexai"] is True
+    assert calls["init"]["project"] == "proj-g"
+    assert calls["init"]["location"] == "us-central1"
