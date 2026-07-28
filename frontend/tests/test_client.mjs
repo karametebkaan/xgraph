@@ -211,6 +211,26 @@ const run = async () => {
   assert.equal(promoteBody.engine, "falkordb", "engine is included in body");
   console.log("ok: promoteColumns client method");
 
+  // --- ask/explain carry the fallback flag (default true) -------------------
+  {
+    let askBody = null, explainBody = null;
+    const fbClient = g.makeClient("http://gw", "falkordb", (url, opts) => {
+      const body = opts && opts.body ? JSON.parse(opts.body) : null;
+      if (url.indexOf("/ask") !== -1) askBody = body;
+      if (url.indexOf("/explain") !== -1) explainBody = body;
+      return { ok: true, json: async () => ({}) };
+    });
+    await fbClient.ask("g", "q");                       // omitted → default true
+    assert(askBody.fallback === true, "ask defaults fallback to true");
+    await fbClient.ask("g", "q", false);               // explicit false
+    assert(askBody.fallback === false, "ask passes explicit fallback=false");
+    await fbClient.explain("focus", ["NODE"], [["p1"]], "MATCH…", "src.parquet", "g");
+    assert(explainBody.fallback === true, "explain defaults fallback to true");
+    await fbClient.explain("focus", ["NODE"], [["p1"]], "MATCH…", "src.parquet", "g", false);
+    assert(explainBody.fallback === false, "explain passes explicit fallback=false");
+    console.log("ok: ask/explain fallback flag");
+  }
+
   console.log("client OK");
 };
 run();

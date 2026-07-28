@@ -311,10 +311,10 @@
         var payload = (typeof arg === "string") ? { path: arg } : (arg || {});
         return postJSONWithAuth("/register_file", payload);
       },
-      ask: function (graph, question) { return postJSONWithAuth("/ask", { graph: graph, question: question }); },
+      ask: function (graph, question, fallback) { return postJSONWithAuth("/ask", { graph: graph, question: question, fallback: fallback !== false }); },
       nl2cypher: function (graph, question) { return postJSONWithAuth("/nl2cypher", { graph: graph, question: question }); },
       synthesize: function (question, columns, rows, cypher) { return postJSONWithAuth("/synthesize", { question: question, columns: columns, rows: rows, cypher: cypher }); },
-      explain: function (question, columns, rows, cypher, source, graph) { return postJSONWithAuth("/explain", { question: question, columns: columns, rows: rows, cypher: cypher, source: source, graph: graph }); },
+      explain: function (question, columns, rows, cypher, source, graph, fallback) { return postJSONWithAuth("/explain", { question: question, columns: columns, rows: rows, cypher: cypher, source: source, graph: graph, fallback: fallback !== false }); },
       extract: function (graph, fileOrText, hint) {
         var formData = new FormData();
         var isFileLike = typeof Blob !== "undefined" && fileOrText instanceof Blob;
