@@ -50,6 +50,10 @@ class FakeAdapter(GraphEngineAdapter):
     def register_file(self, path, table=None, fmt=None, data_source=None):
         return {"name": table or "imported", "type": "table",
                 "columns": ["NODE", "AMOUNT"]}
+    def promote_columns(self, graph, source, key="NODE", columns=None):
+        columns = list(columns or [])
+        return {"promoted": columns, "nodes_matched": len(columns),
+                "properties_set": len(columns), "source": source, "key": key}
     def graph_grammar(self):
         return {
             "NODES": {"configurations": [{"label": "NODE", "required": ["NODE"]}],

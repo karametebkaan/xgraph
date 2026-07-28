@@ -592,6 +592,22 @@ def create_app(adapter_factory=registry.get_adapter, compute=None, store=None) -
         except Exception as e:
             return _err("duckdb", e)
 
+    @app.post("/promote_columns")
+    def promote_columns(payload: dict = Body(...)):
+        session = payload.get("session")
+        engine = payload.get("engine", "")
+        try:
+            graph = payload["graph"]
+            source = payload["source"]
+            key = payload.get("key", "NODE")
+            columns = [c for c in (payload.get("columns") or []) if c]
+            if not columns:
+                raise ValueError("columns must be a non-empty list")
+            adapter = _resolve_adapter(session, engine)
+            return adapter.promote_columns(graph, source, key=key, columns=columns)
+        except Exception as exc:
+            return _err(_resolve_engine(session, engine) or engine, exc)
+
     @app.post("/explain")
     def explain(payload: dict = Body(...)):
         try:

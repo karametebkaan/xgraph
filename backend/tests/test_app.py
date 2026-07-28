@@ -23,6 +23,22 @@ def test_schema_endpoint():
     assert r.status_code == 200
     assert "bank" in r.json()["labels"]
 
+def test_promote_columns_happy_path():
+    r = _client().post("/promote_columns", json={
+        "engine": "fake", "graph": "g1", "source": "vertexes.parquet",
+        "key": "NODE", "columns": ["party:party_name", "amount"]})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["promoted"] == ["party:party_name", "amount"]
+    assert body["source"] == "vertexes.parquet"
+    assert body["key"] == "NODE"
+
+def test_promote_columns_empty_columns_is_400():
+    r = _client().post("/promote_columns", json={
+        "engine": "fake", "graph": "g1", "source": "vertexes.parquet", "columns": []})
+    assert r.status_code == 400
+    assert r.json()["error"]["code"]  # uniform error envelope
+
 def test_bad_query_returns_error_envelope():
     def boom(e):
         class A(FakeAdapter):

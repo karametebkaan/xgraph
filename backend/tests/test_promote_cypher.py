@@ -53,7 +53,7 @@ def test_promote_columns_unsupported_raises_valueerror_kinetica():
     # maps it to 400, not 502/504. Instantiated via __new__ -- no live service.
     import pytest
     from xgraph_gateway.adapters.kinetica_adapter import KineticaAdapter
-    from xgraph_gateway.adapters.fake import FakeAdapter
+    from xgraph_gateway.adapters.base import GraphEngineAdapter
 
     kin = KineticaAdapter.__new__(KineticaAdapter)
     with pytest.raises(ValueError) as ei:
@@ -62,6 +62,17 @@ def test_promote_columns_unsupported_raises_valueerror_kinetica():
     assert "not supported" in msg
     assert not any(w in msg for w in ("timeout", "unreachable", "connection"))
 
-    # Base default (via FakeAdapter, which inherits it) also raises ValueError.
+    # Base default also raises ValueError. (FakeAdapter overrides it with a
+    # canned result for the gateway happy-path test, so exercise the inherited
+    # base default via a minimal concrete subclass that stubs the abstract
+    # methods but does NOT override promote_columns.)
+    class _BareAdapter(GraphEngineAdapter):
+        def list_graphs(self): return []
+        def get_schema(self, graph, options=None): return {}
+        def run_query(self, graph, cypher, timeout=60000): return {}
+        def fetch_entities(self, graph, limit, offset=0): return {}
+        def get_record(self, graph, node_id): return {}
+        def load_graph(self, spec): return {}
+        def graph_sizes(self): return {}
     with pytest.raises(ValueError):
-        FakeAdapter().promote_columns("g", "src.parquet", columns=["a"])
+        _BareAdapter().promote_columns("g", "src.parquet", columns=["a"])
