@@ -134,3 +134,26 @@ def test_gemini_vertex_client_construction(monkeypatch):
     assert calls["init"]["vertexai"] is True
     assert calls["init"]["project"] == "proj-g"
     assert calls["init"]["location"] == "us-central1"
+
+
+def test_extract_json_ignores_trailing_prose():
+    # SDK/API completions often append an explanation after the JSON object.
+    # Greedy `{.*}` over-captures to the last brace -> json.loads "Extra data".
+    text = ('{\n  "cypher": "MATCH (n) RETURN n"\n}\n\n'
+            'This query returns all nodes {see docs}.')
+    assert llm._extract_json(text) == {"cypher": "MATCH (n) RETURN n"}
+
+
+def test_extract_json_handles_markdown_fences():
+    text = '```json\n{"answer": "42"}\n```'
+    assert llm._extract_json(text) == {"answer": "42"}
+
+
+def test_extract_json_skips_leading_prose_brace():
+    # A stray brace before the real object must not abort extraction.
+    text = 'Note: use {curly} braces. {"answer": "ok"}'
+    assert llm._extract_json(text) == {"answer": "ok"}
+
+
+def test_extract_json_empty_when_no_object():
+    assert llm._extract_json("no json here") == {}

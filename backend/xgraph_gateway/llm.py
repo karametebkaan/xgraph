@@ -291,6 +291,27 @@ def _vertex_model_id(model: str) -> str:
     return re.sub(r"-(\d{8})$", r"@\1", model or "")
 
 
+def _extract_json(text: str) -> dict:
+    """Extract the first complete JSON object from an LLM completion.
+
+    SDK/API completions may wrap the JSON in markdown fences or append a trailing
+    explanation after the object. A greedy ``{.*}`` over-captures to the LAST brace,
+    so ``json.loads`` then raises ``Extra data``. Instead, decode the first complete
+    object found at each ``{`` and ignore everything after it. Returns ``{}`` when no
+    JSON object is present."""
+    dec = json.JSONDecoder()
+    idx = text.find("{")
+    while idx != -1:
+        try:
+            obj, _end = dec.raw_decode(text, idx)
+            if isinstance(obj, dict):
+                return obj
+        except json.JSONDecodeError:
+            pass
+        idx = text.find("{", idx + 1)
+    return {}
+
+
 def _llm_claude_sdk(prompt: str, schema: Optional[dict], model: Optional[str], cfg: dict) -> Any:
     import anthropic
     m = model or cfg.get("model") or _DEFAULT_MODEL
@@ -304,8 +325,7 @@ def _llm_claude_sdk(prompt: str, schema: Optional[dict], model: Optional[str], c
     text = "".join(b.text for b in resp.content if b.type == "text")
     if schema is None:
         return text
-    mobj = re.search(r"\{.*\}", text, re.DOTALL)
-    return json.loads(mobj.group(0)) if mobj else {}
+    return _extract_json(text)
 
 
 def _llm_gemini(prompt: str, schema: Optional[dict], model: Optional[str], cfg: dict) -> Any:
@@ -329,5 +349,4 @@ def _llm_gemini(prompt: str, schema: Optional[dict], model: Optional[str], cfg: 
     text = resp.text or ""
     if schema is None:
         return text
-    mobj = re.search(r"\{.*\}", text, re.DOTALL)
-    return json.loads(mobj.group(0)) if mobj else {}
+    return _extract_json(text)
