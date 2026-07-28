@@ -25,8 +25,6 @@ results don't answer the question, a **clearly-separated** answer drawn from the
 
 ## Non-goals (deferred)
 
-- **A user setting to disable the fallback.** Default-on, always available. A Setup toggle can layer
-  on later if a deployment wants strictly-grounded-only answers.
 - **Blending** graph facts and model knowledge into one answer. The two are always separate blocks
   (rejected during brainstorming as too risky for a provenance tool).
 - **Citations / web lookup** for the parametric answer. It is the model's own knowledge, labeled as
@@ -38,6 +36,7 @@ results don't answer the question, a **clearly-separated** answer drawn from the
 | Decision | Choice |
 |---|---|
 | Fallback UX | Automatic, but rendered as a clearly-separated second block |
+| Enable toggle | A Setup switch at the **top of the LLM card**, **default ON**; a frontend preference sent per-request (not gateway-global) |
 | Detection | The grounded LLM call self-reports `answered_from_results: bool` (not text-matching) |
 | Scope | Both Ask and Explain (both call `synthesize`) |
 | Empty results | Treated as "not answered" → triggers the fallback |
@@ -79,10 +78,13 @@ Returns the plain-text answer. Its own JSON schema with a single `answer` field 
 
 Both `/explain` and `/ask` (in `app.py`):
 
-1. Call `synthesize(..., return_meta=True)` to get `{answer, answered_from_results}`.
-2. If `answered_from_results` is false, call `general_knowledge_answer(question)` → `fallback_answer`.
-   Otherwise `fallback_answer = None`.
-3. Add two fields to the JSON response, keeping all existing fields:
+1. Read the enable flag: `fallback_enabled = payload.get("fallback", True)` — **default True** when the
+   field is absent, so any API caller (and older frontends) get the fallback unless it is explicitly
+   turned off.
+2. Call `synthesize(..., return_meta=True)` to get `{answer, answered_from_results}`.
+3. If `fallback_enabled` **and** `answered_from_results` is false, call
+   `general_knowledge_answer(question)` → `fallback_answer`. Otherwise `fallback_answer = None`.
+4. Add two fields to the JSON response, keeping all existing fields:
    - `answered_from_results: bool`
    - `fallback_answer: str | null`
 
@@ -95,30 +97,40 @@ The parametric call is wrapped so a failure never breaks the grounded answer (be
 
 ### Frontend
 
-`gateway.js`: `ask()` and `explain()` already return the raw JSON, so the new fields pass through
-unchanged — no client-method signature change; add coverage in the Node test that the fields survive.
+`gateway.js`: `ask()` and `explain()` gain a trailing optional `fallback` boolean that is added to the
+request body (defaulting to `true` when the caller omits it, matching the backend default). The
+response JSON already passes through raw, so the new response fields need no client change; add Node
+coverage that the request body carries `fallback` and that the response fields survive.
 
 `XGraph.html`:
 
+- **Setup toggle:** an App-level state `answerFallback` (boolean, **default `true`**). `SetupPanel`
+  renders it as a labeled on/off switch (checkbox) at the **top of the LLM card**, above the Mechanism
+  picker — e.g. "Answer from model knowledge when the graph can't (💡 fallback)". Passed to `SetupPanel`
+  via props (`answerFallback` + `setAnswerFallback`) and down to `QueryPanel` (`answerFallback`).
 - **Explain panel:** after the grounded answer, if `explainResp.fallback_answer` is truthy, render a
   visually-distinct block (tinted background, its own border) labeled **"💡 General knowledge:"**
-  followed by the fallback text.
+  followed by the fallback text. The Explain call passes `props.answerFallback` as the `fallback` arg.
 - **Ask bubble:** the Ask answer state (`askAnswer`) is currently a string. Extend the Ask handler to
-  keep the fallback too (e.g. store `{answer, fallback}` or a parallel `askFallback` state) and render
-  the same distinct block beneath the grounded bubble.
+  keep the fallback too (a parallel `askFallback` state) and render the same distinct block beneath the
+  grounded bubble. The Ask call passes `props.answerFallback` as the `fallback` arg.
 - Bump `EXPLORER_VERSION`.
 
 The block styling matches the file's existing inline-style conventions; the label is plain text with
-the 💡 emoji — no new dependency.
+the 💡 emoji — no new dependency. When `answerFallback` is off, the client sends `fallback:false`, the
+backend skips the parametric call, and no block renders.
 
 ### Data flow
 
 ```
+Setup: [💡 Answer from model knowledge] switch (default ON) → answerFallback (App state)
+        └─ sent as `fallback` in each /ask and /explain request
+
 Ask:  question → nl2cypher → run → synthesize(return_meta=True)
                                      │
-                       answered_from_results?
-                        ├─ true  → grounded bubble only
-                        └─ false → grounded bubble + general_knowledge_answer() block
+                       fallback && !answered_from_results?
+                        ├─ no  → grounded bubble only
+                        └─ yes → grounded bubble + general_knowledge_answer() block
 
 Explain: focus + results (+post-join hydrate) → synthesize(return_meta=True)
                                      │  (same branch as above)
@@ -126,7 +138,15 @@ Explain: focus + results (+post-join hydrate) → synthesize(return_meta=True)
 
 ## Endpoint contract (additions only)
 
-`POST /explain` and `POST /ask` responses each gain:
+`POST /explain` and `POST /ask` **requests** each gain an optional field:
+
+```json
+{ "fallback": true }
+```
+
+- `fallback` — enable the model-knowledge fallback. **Absent ⇒ true** (default on).
+
+Their **responses** each gain:
 
 ```json
 {
@@ -136,8 +156,8 @@ Explain: focus + results (+post-join hydrate) → synthesize(return_meta=True)
 ```
 
 - `answered_from_results` — did the grounded answer come from the result rows?
-- `fallback_answer` — the model-knowledge answer, present (non-null) only when
-  `answered_from_results` is false and the parametric call succeeded; otherwise `null`.
+- `fallback_answer` — the model-knowledge answer, present (non-null) only when `fallback` is on,
+  `answered_from_results` is false, and the parametric call succeeded; otherwise `null`.
 
 ## Testing
 
@@ -146,9 +166,13 @@ Explain: focus + results (+post-join hydrate) → synthesize(return_meta=True)
   `general_knowledge_answer()` returns the fake LLM's `answer` string.
 - **Gateway (Fake adapter + fake LLM):** with a fake LLM whose grounded call reports
   `answered_from_results=false`, `/explain` and `/ask` return a non-null `fallback_answer`; with
-  `true`, `fallback_answer` is null and no second call is made.
-- **Frontend:** `gateway.js` Node test asserts the new fields pass through `ask`/`explain`. The React
-  render is validated by transpile + curl 200; the block behavior is browser-verified by the user.
+  `true`, `fallback_answer` is null and no second call is made. With `fallback:false` in the request
+  body and a grounded flag of false, `fallback_answer` is still null and the parametric call is
+  skipped (toggle honored).
+- **Frontend:** `gateway.js` Node test asserts `ask`/`explain` put `fallback` in the request body
+  (and default it to `true` when omitted) and that the new response fields pass through. The React
+  render + Setup toggle are validated by transpile + curl 200; the block behavior is browser-verified
+  by the user.
 
 ## Alternatives considered
 
