@@ -291,6 +291,7 @@
       fetchEntities: function (graph, limit, offset) { return getJSON(q("/entities?graph=" + encodeURIComponent(graph) + "&limit=" + (limit || 1000) + "&offset=" + (offset || 0))); },
       getRecord: function (graph, id) { return getJSON(q("/record?graph=" + encodeURIComponent(graph) + "&id=" + encodeURIComponent(id))); },
       hydrate: function (rows, source, key, columns) { return postJSONWithAuth("/hydrate", { rows: rows, source: source, key: key || "NODE", columns: columns || "*" }); },
+      promoteColumns: function (graph, source, key, columns) { return postJSONWithAuth("/promote_columns", { graph: graph, source: source, key: key, columns: columns }); },
       create: function (spec) { return postJSONWithAuth("/create", { spec: spec }); },
       deleteGraph: function (graph) { return postJSONWithAuth("/delete_graph", { graph: graph }); },
       storage: function (graph) { return getJSON(q("/storage?graph=" + encodeURIComponent(graph))); },

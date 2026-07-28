@@ -191,6 +191,26 @@ const run = async () => {
   assert.ok(dtUrl.includes("doc_uri=text%3Aabc"), "doc_uri is URL-encoded");
   assert.ok(dtUrl.includes("limit=4"), "limit is included when provided");
 
+  // promoteColumns: POST /promote_columns with {graph, source, key, columns}
+  let promoteUrl, promoteBody;
+  const promoteClient = g.makeClient("http://gw", "falkordb", async (url, opts) => {
+    promoteUrl = url;
+    promoteBody = JSON.parse(opts.body);
+    return { ok: true, json: async () => ({
+      promoted: ["party:party_name"], nodes_matched: 2, properties_set: 2,
+      source: "vertexes.parquet", key: "NODE" }) };
+  });
+  const res = await promoteClient.promoteColumns(
+    "g1", "vertexes.parquet", "NODE", ["party:party_name"]);
+  assert.equal(promoteUrl, "http://gw/promote_columns", "hits /promote_columns");
+  assert.equal(promoteBody.graph, "g1", "sends graph");
+  assert.equal(promoteBody.source, "vertexes.parquet", "sends source");
+  assert.equal(promoteBody.key, "NODE", "sends key");
+  assert.deepEqual(promoteBody.columns, ["party:party_name"], "sends columns");
+  assert.equal(res.nodes_matched, 2, "returns response");
+  assert.equal(promoteBody.engine, "falkordb", "engine is included in body");
+  console.log("ok: promoteColumns client method");
+
   console.log("client OK");
 };
 run();
