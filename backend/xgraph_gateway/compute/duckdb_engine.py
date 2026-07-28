@@ -270,6 +270,33 @@ class DuckDBComputeEngine:
     def hydrate(self, rows, source, key="NODE", columns="*"):
         return _falkor_hydrate(rows, resolve_data_path(source), key=key, columns=columns)
 
+    def read_columns(self, source, key="NODE", columns=None):
+        """Read (key + columns) for EVERY row of a wide source, so those
+        columns can be PROMOTED onto graph nodes. Unlike `hydrate`, there is
+        no `WHERE key IN (...)` id filter -- the whole column is read
+        (projection pushdown keeps unused columns off the read). Returns a
+        list of dicts (key + each requested column); Decimals are coerced to
+        float via coerce_row. `columns` is a list of source column names; the
+        key is always included and de-duplicated. Column identifiers may
+        contain non-identifier characters (e.g. 'party:party_name'), so each
+        is double-quoted; the resolved path is single-quoted with an
+        injection guard (mirroring describe_source)."""
+        cols = [c for c in (columns or []) if c and c != key]
+        if not cols:
+            raise ValueError("columns must be a non-empty list")
+        path = resolve_data_path(source)
+        if "'" in str(path):
+            raise ValueError(f"unsafe source path: {path!r}")
+        select = ", ".join('"' + c.replace('"', '""') + '"'
+                           for c in [key] + cols)
+        con = duckdb.connect()
+        try:
+            cur = con.execute(f"SELECT {select} FROM '{path}'")
+            out_cols = [d[0] for d in cur.description]
+            return [coerce_row(out_cols, r) for r in cur.fetchall()]
+        finally:
+            con.close()
+
     def run_sql(self, sql):
         con = duckdb.connect()
         try:
