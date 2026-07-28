@@ -311,6 +311,47 @@ def build_ingest_cypher(nodes: list[dict], edges: list[dict]) -> list[tuple[str,
 
     return statements
 
+def build_promote_cypher(rows, key="NODE", columns=None, batch_size=5000):
+    """Build MATCH-only SET statements that promote whole wide-source columns
+    onto EXISTING graph nodes, making them mid-traversal filterable.
+
+    Additive sibling to `build_ingest_cypher` -- it shares no code with the
+    extraction upsert path and never MERGEs, so it creates no nodes. Each
+    statement is:
+
+        UNWIND $rows AS r
+        MATCH (n {<key>: r.id})       -- label-agnostic; NEVER :Entity
+        SET n += r.attrs
+        RETURN count(n) AS matched
+
+    `key` is validated with safe_ident and interpolated into the MATCH pattern
+    (identifier-only, injection-safe). Property keys are the VERBATIM source
+    column names -- they travel inside the r.attrs parameter map, never in the
+    query text, so a colon (e.g. 'party:party_name') is safe with no escaping.
+    Null cells are dropped from attrs; a row whose key is null or whose every
+    requested cell is null contributes no write. Returns a list of
+    (cypher, params) tuples, one per <=batch_size batch (empty if nothing to
+    write)."""
+    columns = [c for c in (columns or []) if c]
+    key = safe_ident(key)
+    payload = []
+    for r in rows:
+        rid = r.get(key)
+        if rid is None:
+            continue
+        attrs = {c: r[c] for c in columns if r.get(c) is not None}
+        if not attrs:
+            continue
+        payload.append({"id": rid, "attrs": attrs})
+    cypher = (
+        "UNWIND $rows AS r\n"
+        f"MATCH (n {{{key}: r.id}})\n"
+        "SET n += r.attrs\n"
+        "RETURN count(n) AS matched"
+    )
+    return [(cypher, {"rows": payload[i:i + batch_size]})
+            for i in range(0, len(payload), batch_size)]
+
 class FalkorDBAdapter(GraphEngineAdapter):
     def __init__(self, settings=None, conn=None):
         if conn is not None:
