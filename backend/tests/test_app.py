@@ -39,6 +39,23 @@ def test_promote_columns_empty_columns_is_400():
     assert r.status_code == 400
     assert r.json()["error"]["code"]  # uniform error envelope
 
+def test_ask_fallback_when_not_answered(monkeypatch):
+    from xgraph_gateway import nlcypher
+    monkeypatch.setattr(nlcypher, "generate_cypher", lambda *a, **k: "MATCH (n) RETURN n LIMIT 1")
+    monkeypatch.setattr(nlcypher, "validate_cypher", lambda *a, **k: (True, ""))
+    def fake_synthesize(question, cols, rows_, llm=None, cypher=None, return_meta=False):
+        if return_meta:
+            return {"answer": "no age here", "answered_from_results": False}
+        return "no age here"
+    monkeypatch.setattr(nlcypher, "synthesize", fake_synthesize)
+    monkeypatch.setattr(nlcypher, "general_knowledge_answer", lambda q, llm=None: "70 years old.")
+    c = _client()  # FakeAdapter.run_query returns rows
+    r = c.post("/ask", json={"engine": "fake", "graph": "g", "question": "how old is X?"})
+    body = r.json()
+    assert body["answered_from_results"] is False
+    assert body["fallback_answer"] == "70 years old."
+
+
 def test_bad_query_returns_error_envelope():
     def boom(e):
         class A(FakeAdapter):

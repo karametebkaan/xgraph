@@ -67,10 +67,13 @@ def test_explain_endpoint_hydrated(tmp_path, monkeypatch):
         assert result_columns == columns
         return _JOIN_SQL
 
-    def fake_synthesize(question, cols, rows_, llm=None, cypher=None):
+    def fake_synthesize(question, cols, rows_, llm=None, cypher=None, return_meta=False):
         assert cols == ["party_name", "sar_paths"]
         assert rows_[0] == ["Acme", 2]
-        return "Acme has the most SAR activity with 2 paths."
+        ans = "Acme has the most SAR activity with 2 paths."
+        if return_meta:
+            return {"answer": ans, "answered_from_results": True}
+        return ans
 
     monkeypatch.setattr(nlcypher, "generate_join_sql", fake_generate_join_sql)
     monkeypatch.setattr(nlcypher, "synthesize", fake_synthesize)
@@ -98,10 +101,12 @@ def test_explain_endpoint_no_wide_column_needed(tmp_path, monkeypatch):
         return ""
 
     calls = {}
-    def fake_synthesize(question, cols, rows_, llm=None, cypher=None):
+    def fake_synthesize(question, cols, rows_, llm=None, cypher=None, return_meta=False):
         calls["called"] = True
         assert cols == columns
         assert rows_ == rows
+        if return_meta:
+            return {"answer": "plain answer", "answered_from_results": True}
         return "plain answer"
 
     monkeypatch.setattr(nlcypher, "generate_join_sql", fake_generate_join_sql)
@@ -129,10 +134,12 @@ def test_explain_endpoint_no_focus_falls_back_to_plain_synthesize(monkeypatch):
     def boom_generate_join_sql(*a, **k):
         raise AssertionError("generate_join_sql must not be called when focus is empty")
 
-    def fake_synthesize(question, cols, rows_, llm=None, cypher=None):
+    def fake_synthesize(question, cols, rows_, llm=None, cypher=None, return_meta=False):
         assert question == "Explain these results"
         assert cols == columns
         assert rows_ == rows
+        if return_meta:
+            return {"answer": "plain fallback answer", "answered_from_results": True}
         return "plain fallback answer"
 
     monkeypatch.setattr(nlcypher, "generate_join_sql", boom_generate_join_sql)
@@ -196,7 +203,8 @@ def test_explain_uses_duckdb_even_when_session_olap_is_kinetica(tmp_path, monkey
     monkeypatch.setattr(nlcypher, "generate_join_sql",
                         lambda focus, cyp, rc, wc, llm=None: _JOIN_SQL)
     monkeypatch.setattr(nlcypher, "synthesize",
-                        lambda q, cols, rws, llm=None, cypher=None: "ok")
+                        lambda q, cols, rws, llm=None, cypher=None, return_meta=False:
+                        ({"answer": "ok", "answered_from_results": True} if return_meta else "ok"))
 
     app = create_app(adapter_factory=lambda e: FakeAdapter(),
                      store=_FakeStore(_KineticaLikeCompute()))
@@ -220,7 +228,9 @@ def test_explain_hydrates_from_graph_when_nodes_have_attrs(monkeypatch):
         lambda focus, cypher, cols, wide_cols:
             "SELECT wide.bank_name AS bank, COUNT(*) AS n FROM cypher "
             "JOIN wide ON cypher.NODE = wide.NODE GROUP BY wide.bank_name")
-    monkeypatch.setattr(nlcypher, "synthesize", lambda *a, **k: "ok")
+    monkeypatch.setattr(nlcypher, "synthesize",
+        lambda *a, **k: ({"answer": "ok", "answered_from_results": True}
+                         if k.get("return_meta") else "ok"))
     r = client.post("/explain", json={
         "question": "which banks", "columns": ["NODE"], "rows": [["b1"]],
         "cypher": "MATCH (n) RETURN n.NODE", "graph": "g", "engine": "fake",
@@ -228,3 +238,80 @@ def test_explain_hydrates_from_graph_when_nodes_have_attrs(monkeypatch):
     body = r.json()
     assert body["hydrate_from"] == "graph"
     assert any("Acme" in str(v) for row in body["rows"] for v in row)
+
+
+def test_explain_falls_back_when_not_answered(monkeypatch):
+    from xgraph_gateway import nlcypher
+    def fake_synthesize(question, cols, rows_, llm=None, cypher=None, return_meta=False):
+        if return_meta:
+            return {"answer": "cannot be determined", "answered_from_results": False}
+        return "cannot be determined"
+    def fake_general(question, llm=None):
+        return "Lindsey Graham is 70."
+    monkeypatch.setattr(nlcypher, "generate_join_sql", lambda *a, **k: None)
+    monkeypatch.setattr(nlcypher, "synthesize", fake_synthesize)
+    monkeypatch.setattr(nlcypher, "general_knowledge_answer", fake_general)
+    c = _client()
+    r = c.post("/explain", json={"question": "How old is Lindsay Graham",
+                                 "columns": ["NODE"], "rows": [["p1"]], "graph": "g"})
+    body = r.json()
+    assert body["answered_from_results"] is False
+    assert body["fallback_answer"] == "Lindsey Graham is 70."
+
+
+def test_explain_no_fallback_when_answered(monkeypatch):
+    from xgraph_gateway import nlcypher
+    def fake_synthesize(question, cols, rows_, llm=None, cypher=None, return_meta=False):
+        if return_meta:
+            return {"answer": "Two parties are linked.", "answered_from_results": True}
+        return "Two parties are linked."
+    def boom_general(question, llm=None):
+        raise AssertionError("general_knowledge_answer must not be called when answered")
+    monkeypatch.setattr(nlcypher, "generate_join_sql", lambda *a, **k: None)
+    monkeypatch.setattr(nlcypher, "synthesize", fake_synthesize)
+    monkeypatch.setattr(nlcypher, "general_knowledge_answer", boom_general)
+    c = _client()
+    r = c.post("/explain", json={"question": "who is linked", "columns": ["NODE"],
+                                 "rows": [["p1"]], "graph": "g"})
+    body = r.json()
+    assert body["answered_from_results"] is True
+    assert body["fallback_answer"] is None
+
+
+def test_explain_toggle_off_skips_fallback(monkeypatch):
+    from xgraph_gateway import nlcypher
+    def fake_synthesize(question, cols, rows_, llm=None, cypher=None, return_meta=False):
+        if return_meta:
+            return {"answer": "cannot be determined", "answered_from_results": False}
+        return "cannot be determined"
+    def boom_general(question, llm=None):
+        raise AssertionError("fallback disabled — general_knowledge_answer must not run")
+    monkeypatch.setattr(nlcypher, "generate_join_sql", lambda *a, **k: None)
+    monkeypatch.setattr(nlcypher, "synthesize", fake_synthesize)
+    monkeypatch.setattr(nlcypher, "general_knowledge_answer", boom_general)
+    c = _client()
+    r = c.post("/explain", json={"question": "How old is X", "columns": ["NODE"],
+                                 "rows": [["p1"]], "graph": "g", "fallback": False})
+    body = r.json()
+    assert body["answered_from_results"] is False
+    assert body["fallback_answer"] is None
+
+
+def test_explain_fallback_best_effort_on_error(monkeypatch):
+    from xgraph_gateway import nlcypher
+    def fake_synthesize(question, cols, rows_, llm=None, cypher=None, return_meta=False):
+        if return_meta:
+            return {"answer": "cannot be determined", "answered_from_results": False}
+        return "cannot be determined"
+    def boom_general(question, llm=None):
+        raise RuntimeError("LLM down")
+    monkeypatch.setattr(nlcypher, "generate_join_sql", lambda *a, **k: None)
+    monkeypatch.setattr(nlcypher, "synthesize", fake_synthesize)
+    monkeypatch.setattr(nlcypher, "general_knowledge_answer", boom_general)
+    c = _client()
+    r = c.post("/explain", json={"question": "How old is X", "columns": ["NODE"],
+                                 "rows": [["p1"]], "graph": "g"})
+    body = r.json()
+    # grounded answer survives; fallback silently null
+    assert body["answer"] == "cannot be determined"
+    assert body["fallback_answer"] is None

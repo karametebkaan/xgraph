@@ -103,9 +103,12 @@ def test_explain_endpoint_banking_sar_party_name(monkeypatch):
         return BANKING_JOIN_SQL
 
     captured = {}
-    def fake_synthesize(question, cols, rows_, llm=None, cypher=None):
+    def fake_synthesize(question, cols, rows_, llm=None, cypher=None, return_meta=False):
         captured["cols"], captured["rows"] = cols, rows_
-        return f"{rows_[0][0]} has the most SAR activity with {rows_[0][1]} paths."
+        ans = f"{rows_[0][0]} has the most SAR activity with {rows_[0][1]} paths."
+        if return_meta:
+            return {"answer": ans, "answered_from_results": True}
+        return ans
 
     monkeypatch.setattr(nlcypher, "generate_join_sql", fake_generate_join_sql)
     monkeypatch.setattr(nlcypher, "synthesize", fake_synthesize)

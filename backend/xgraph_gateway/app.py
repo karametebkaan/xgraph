@@ -518,6 +518,17 @@ def create_app(adapter_factory=registry.get_adapter, compute=None, store=None) -
         except Exception as e:
             return _err(engine, e)
 
+    def _maybe_fallback(question: str, answered_from_results: bool, fallback_enabled: bool):
+        """Best-effort general-knowledge answer when the graph didn't answer.
+        Returns a string, or None (disabled, answered, or the parametric call failed)."""
+        if not fallback_enabled or answered_from_results:
+            return None
+        try:
+            ans = nlcypher.general_knowledge_answer(question)
+            return ans or None
+        except Exception:
+            return None
+
     @app.post("/ask")
     def ask(payload: dict = Body(...)):
         session = payload.get("session")
@@ -533,9 +544,15 @@ def create_app(adapter_factory=registry.get_adapter, compute=None, store=None) -
             if not ok:
                 return _err(engine, ValueError(reason))
             res = adapter.run_query(graph, cypher)
-            answer = nlcypher.synthesize(question, res["columns"], res["rows"], cypher=cypher)
+            fallback_enabled = payload.get("fallback", True)
+            meta = nlcypher.synthesize(question, res["columns"], res["rows"],
+                                       cypher=cypher, return_meta=True)
+            answer = meta["answer"]
+            answered = meta["answered_from_results"]
+            fallback_answer = _maybe_fallback(question, answered, fallback_enabled)
             return {"question": question, "cypher": cypher, "columns": res["columns"],
-                    "rows": res["rows"], "graph": res.get("graph", {}), "answer": answer}
+                    "rows": res["rows"], "graph": res.get("graph", {}), "answer": answer,
+                    "answered_from_results": answered, "fallback_answer": fallback_answer}
         except Exception as e:
             return _err(engine, e)
 
@@ -662,10 +679,16 @@ def create_app(adapter_factory=registry.get_adapter, compute=None, store=None) -
                     hydrate_from = "source"
 
             q = focus or "Explain these results"
-            answer = nlcypher.synthesize(q, out_cols, out_rows,
-                                          cypher=(join_sql if hydrated else cypher))
+            fallback_enabled = payload.get("fallback", True)
+            meta = nlcypher.synthesize(q, out_cols, out_rows,
+                                       cypher=(join_sql if hydrated else cypher),
+                                       return_meta=True)
+            answer = meta["answer"]
+            answered = meta["answered_from_results"]
+            fallback_answer = _maybe_fallback(q, answered, fallback_enabled)
             return {"answer": answer, "join_sql": join_sql, "columns": out_cols,
-                    "rows": out_rows, "hydrated": hydrated, "hydrate_from": hydrate_from}
+                    "rows": out_rows, "hydrated": hydrated, "hydrate_from": hydrate_from,
+                    "answered_from_results": answered, "fallback_answer": fallback_answer}
         except Exception as e:
             return _err(payload.get("engine", ""), e)
 
