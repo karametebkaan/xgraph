@@ -47,7 +47,7 @@
 const { useState, useEffect, useRef, useCallback, useMemo } = React;
 
 /* ═══════════════════════ CONSTANTS ════════════════════════ */
-const EXPLORER_VERSION = "0.22.2";  // xGraph version — bump on frontend changes so a stale browser cache is visible
+const EXPLORER_VERSION = "0.22.3";  // xGraph version — bump on frontend changes so a stale browser cache is visible
 const SAFETY_TIMEOUT_MS = 10 * 60 * 1000;
 const PALETTE = [
     { solid: '#0984e3', light: '#e1f0fb' }, { solid: '#00cec9', light: '#e0f9f8' },
@@ -1756,6 +1756,9 @@ function QueryPanel(props) {
     // call (gwClient.columns resolves to an array of column-name strings).
     // Best-effort: empty list on error, never crash.
     useEffect(function() {
+        // Source changed — drop any stale selection so it can't be submitted
+        // against a different source (would fail server-side).
+        setPromoteCols([]);
         if (engine !== 'falkordb' || !promoteSource) { setPromoteColOptions([]); return; }
         if (!props.gwClient) { setPromoteColOptions([]); return; }
         var live = true;
