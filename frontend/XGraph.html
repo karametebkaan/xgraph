@@ -47,7 +47,7 @@
 const { useState, useEffect, useRef, useCallback, useMemo } = React;
 
 /* ═══════════════════════ CONSTANTS ════════════════════════ */
-const EXPLORER_VERSION = "0.22.3";  // xGraph version — bump on frontend changes so a stale browser cache is visible
+const EXPLORER_VERSION = "0.23.0";  // xGraph version — bump on frontend changes so a stale browser cache is visible
 const SAFETY_TIMEOUT_MS = 10 * 60 * 1000;
 const PALETTE = [
     { solid: '#0984e3', light: '#e1f0fb' }, { solid: '#00cec9', light: '#e0f9f8' },
@@ -1695,13 +1695,14 @@ function QueryPanel(props) {
     const [askQuestion, setAskQuestion] = useState('');
     const [askBusy, setAskBusy] = useState(false);
     const [askAnswer, setAskAnswer] = useState(null);
+    const [askFallback, setAskFallback] = useState(null);
     const [askError, setAskError] = useState(null);
     var handleAsk = async function() {
         var q = askQuestion.trim();
         if (!q || !props.gwClient || !props.graphName) return;
-        setAskBusy(true); setAskError(null); setAskAnswer(null);
+        setAskBusy(true); setAskError(null); setAskAnswer(null); setAskFallback(null);
         try {
-            var res = await props.gwClient.ask(props.graphName, q);
+            var res = await props.gwClient.ask(props.graphName, q, props.answerFallback);
             if (res && res.cypher) setSqlAndNotify(res.cypher);
             if (res && (res.columns || res.rows || res.graph)) {
                 setResult(res);
@@ -1709,6 +1710,7 @@ function QueryPanel(props) {
                 setActiveTab('results');
             }
             setAskAnswer((res && res.answer) || '(no answer returned)');
+            setAskFallback((res && res.fallback_answer) || null);
         } catch (err) { setAskError(err.message); }
         finally { setAskBusy(false); }
     };
@@ -1737,7 +1739,7 @@ function QueryPanel(props) {
         try {
             var r = await props.gwClient.explain(
                 explainFocus.trim(),
-                cols, rws, sql, hydrateSource, props.graphName);
+                cols, rws, sql, hydrateSource, props.graphName, props.answerFallback);
             setExplainResp(r);
         } catch (err) { setExplainError(err.message); }
         finally { setExplainBusy(false); }
@@ -3664,6 +3666,12 @@ function QueryPanel(props) {
                                 {askAnswer}
                             </div>
                         )}
+                        {askFallback && (
+                            <div style={{ padding:'8px 12px', background:'#fffbea', border:'1px solid #f5e6a8', borderRadius:6, fontSize:12, color:'#2d3436', position:'relative' }}>
+                                <div style={{ fontWeight:700, color:'#a67c00', marginBottom:2 }}>{'💡 General knowledge:'}</div>
+                                {askFallback}
+                            </div>
+                        )}
                     </div>
                 )}
                 {/* Promote-columns avenue (FalkorDB only) — snapshot wide source columns
@@ -3997,6 +4005,12 @@ function QueryPanel(props) {
                     })()}
                     {explainResp && explainResp.answer && (
                         <div style={{ padding:'8px 12px', background:'#f3f0ff', border:'1px solid #e0d8ff', borderRadius:6, fontSize:12, color:'#2d3436' }}>{explainResp.answer}</div>
+                    )}
+                    {explainResp && explainResp.fallback_answer && (
+                        <div style={{ padding:'8px 12px', background:'#fffbea', border:'1px solid #f5e6a8', borderRadius:6, fontSize:12, color:'#2d3436', marginTop:8 }}>
+                            <div style={{ fontWeight:700, color:'#a67c00', marginBottom:2 }}>{'💡 General knowledge:'}</div>
+                            {explainResp.fallback_answer}
+                        </div>
                     )}
                 </div>
             )}
@@ -6828,6 +6842,12 @@ function SetupPanel(props) {
                 Opus); Ask/Explain use the fast tier (Haiku), shown below. */}
             <div style={col}>
                 <div style={colTitle}>LLM</div>
+                <label style={{ display:'flex', alignItems:'flex-start', gap:8, cursor:'pointer', margin:'0 0 14px', fontSize:12, color:'#2d3436' }}>
+                    <input type="checkbox" checked={props.answerFallback !== false}
+                           onChange={function(e){ props.setAnswerFallback(e.target.checked); }}
+                           style={{ marginTop:2 }} />
+                    <span>Answer from model knowledge when the graph can't <span title="Ask/Explain will add a separate 💡 General knowledge block when the query results don't answer the question">💡</span></span>
+                </label>
                 <Label>Provider</Label>
                 <select style={inp} value={llmConn.provider || 'anthropic'} onChange={function(e){ selectLlmProvider(e.target.value); }}>
                     <option value="anthropic">Claude (Anthropic)</option>
@@ -8328,6 +8348,10 @@ function App() {
     const [olapConn, setOlapConn]       = useState({ url:'http://127.0.0.1:9191', user:'admin', password:'' });
     const [llmEngine, setLlmEngine]     = useState('claude'); // single option today; kept for the later LLM slice
     const [llmConn, setLlmConn]         = useState(Object.assign({ provider:'anthropic', apiKey:'', fastModel:'', extractMode:'sequential' }, loadLlmRoute()));
+    // Answer-fallback toggle (Setup › LLM). When ON, /ask and /explain answer
+    // from the model's own knowledge if the graph results don't — rendered as a
+    // separate "💡 General knowledge" block. Sent per-request as `fallback`.
+    const [answerFallback, setAnswerFallback] = useState(true);
     // LLM route (gateway-global, in-memory — not per-session): applied as part
     // of Connect (see handleConnectAxes), so Setup has one commit button.
     // llmStatus mirrors /llm_status — both the Build tier `model` and the
@@ -8938,12 +8962,18 @@ function App() {
             // QueryPanel/CanvasGraph/DeckMapView all read labelData.node_labels /
             // .edge_labels, where each item carries a `labels` array (label combo,
             // possibly multi-label) + a `count` for PALETTE-index sort ordering.
-            // The gateway schema only gives flat label/rel-type name lists (no
-            // combos, no counts), so wrap each name as a single-label combo with
-            // count 0 — enough for the pulldowns and color maps to populate.
+            // The gateway schema gives flat label/rel-type name lists PLUS
+            // whole-graph per-label counts (`label_counts`/`rel_counts`, computed
+            // server-side by the adapter via MATCH…count(*)). Wrap each name as a
+            // single-label combo and carry its true count, so the Nodes/Edges-by-
+            // Label donuts reflect the ENTIRE graph — not just the capped set of
+            // records pulled into the canvas. Falls back to 0 when a count is
+            // absent (e.g. a multi-label node's non-structural label).
+            var nodeCounts = sch.label_counts || {};
+            var relCounts = sch.rel_counts || {};
             setLabelData({
-                node_labels: (sch.labels || []).map(function(l){ return { labels: [l], count: 0 }; }),
-                edge_labels: (sch.rel_types || []).map(function(t){ return { labels: [t], count: 0 }; }),
+                node_labels: (sch.labels || []).map(function(l){ return { labels: [l], count: nodeCounts[l] || 0 }; }),
+                edge_labels: (sch.rel_types || []).map(function(t){ return { labels: [t], count: relCounts[t] || 0 }; }),
             });
             setGraphCounts(sch.counts || { nodes:0, edges:0 });
             if (sch.dot) setShowOntology(true);
@@ -9965,6 +9995,7 @@ function App() {
                         olapConn={olapConn} setOlapConn={setOlapConn}
                         llmConn={llmConn} setLlmConn={setLlmConn}
                         llmStatus={llmStatus}
+                        answerFallback={answerFallback} setAnswerFallback={setAnswerFallback}
                         gatewayBase={gatewayBase} setGatewayBase={setGatewayBase}
                         onConnect={handleConnectAxes} connectStatus={connectStatus}
                     />
@@ -10077,6 +10108,7 @@ function App() {
                                             tableColumnsCache={tableColumnsCache} onFetchTableColumns={fetchTableColumns}
                                             panelIndex={0} onClose={function(){}} embedded={true}
                                             engine={engine}
+                                            answerFallback={answerFallback}
                                             initialSql={queryTabSql[id] || ''}
                                             initialHelper={queryTabHelper[id] || null}
                                             stateRef={queryTabStateRefs.current[id]}
