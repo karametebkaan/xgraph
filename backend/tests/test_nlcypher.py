@@ -153,6 +153,20 @@ def test_general_knowledge_answer_uses_injected_llm():
     assert out == "Lindsey Graham is 70."
 
 
+def test_general_knowledge_answer_parses_json_string():
+    def fake(prompt, *, schema=None):
+        return '{"answer": "Lindsey Graham is 70."}'
+    out = nlcypher.general_knowledge_answer("How old is Lindsey Graham?", llm=fake)
+    assert out == "Lindsey Graham is 70."
+
+
+def test_general_knowledge_answer_returns_plain_text():
+    def fake(prompt, *, schema=None):
+        return "  Lindsey Graham is 70.  "
+    out = nlcypher.general_knowledge_answer("How old is Lindsey Graham?", llm=fake)
+    assert out == "Lindsey Graham is 70."
+
+
 def _client():
     return TestClient(create_app(adapter_factory=lambda e: FakeAdapter()))
 
