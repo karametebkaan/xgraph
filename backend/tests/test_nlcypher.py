@@ -106,6 +106,53 @@ def test_synthesize_prompt_omits_cypher_block_when_not_provided():
     assert "Query (Cypher)" not in captured["prompt"]
 
 
+def test_synthesize_default_returns_string():
+    # return_meta defaults False → grounded string, exactly as before.
+    def fake(prompt, *, schema=None):
+        return {"answer": "Two banks are involved.", "answered_from_results": True}
+    out = nlcypher.synthesize("how many banks?", ["NODE"], [["b1"]], llm=fake)
+    assert isinstance(out, str)
+    assert out == "Two banks are involved."
+
+
+def test_synthesize_return_meta_exposes_flag_true():
+    def fake(prompt, *, schema=None):
+        return {"answer": "grounded", "answered_from_results": True}
+    out = nlcypher.synthesize("q", ["NODE"], [["b1"]], llm=fake, return_meta=True)
+    assert out == {"answer": "grounded", "answered_from_results": True}
+
+
+def test_synthesize_return_meta_flag_false_when_model_says_so():
+    def fake(prompt, *, schema=None):
+        return {"answer": "cannot be determined", "answered_from_results": False}
+    out = nlcypher.synthesize("how old is X?", ["NODE"], [["b1"]], llm=fake, return_meta=True)
+    assert out["answered_from_results"] is False
+
+
+def test_synthesize_return_meta_empty_rows_forces_not_answered():
+    # Robustness: empty results are always "not answered" regardless of the model flag.
+    def fake(prompt, *, schema=None):
+        return {"answer": "no rows", "answered_from_results": True}
+    out = nlcypher.synthesize("q", ["NODE"], [], llm=fake, return_meta=True)
+    assert out["answered_from_results"] is False
+
+
+def test_synthesize_return_meta_defaults_flag_true_when_absent():
+    # A model that omits the flag on non-empty rows is treated as answered.
+    def fake(prompt, *, schema=None):
+        return {"answer": "grounded"}
+    out = nlcypher.synthesize("q", ["NODE"], [["b1"]], llm=fake, return_meta=True)
+    assert out["answered_from_results"] is True
+
+
+def test_general_knowledge_answer_uses_injected_llm():
+    def fake(prompt, *, schema=None):
+        assert "general knowledge" in prompt.lower()
+        return {"answer": "Lindsey Graham is 70."}
+    out = nlcypher.general_knowledge_answer("How old is Lindsey Graham?", llm=fake)
+    assert out == "Lindsey Graham is 70."
+
+
 def _client():
     return TestClient(create_app(adapter_factory=lambda e: FakeAdapter()))
 

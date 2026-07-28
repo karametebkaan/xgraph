@@ -59,6 +59,23 @@ _ANSWER_SCHEMA = {
     "type": "object",
     "properties": {
         "answer": {"type": "string", "description": "Plain-English answer to the question."},
+        "answered_from_results": {
+            "type": "boolean",
+            "description": (
+                "true only if the answer genuinely comes from the result rows. "
+                "false when the rows do not contain what the question asked "
+                "(including when the results are empty)."
+            ),
+        },
+    },
+    "required": ["answer", "answered_from_results"],
+    "additionalProperties": False,
+}
+
+_GENERAL_ANSWER_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "answer": {"type": "string", "description": "Plain-English answer from general knowledge."},
     },
     "required": ["answer"],
     "additionalProperties": False,
@@ -333,8 +350,14 @@ def _compact_rows(columns: list, rows: list, limit: int = 30) -> list:
 
 
 def synthesize(question: str, columns: list, rows: list, llm: Optional[LLMFunc] = None,
-               cypher: Optional[str] = None) -> str:
-    """Turn query results into a domain-relevant, plain-English explanation."""
+               cypher: Optional[str] = None, return_meta: bool = False):
+    """Turn query results into a domain-relevant, plain-English explanation.
+
+    Returns the grounded answer string by default. With ``return_meta=True`` returns
+    ``{"answer": str, "answered_from_results": bool}`` — the flag is the model's
+    self-report of whether the result rows actually answered the question (forced
+    False when there are no rows).
+    """
     call = llm or _get_llm()
     sample = _compact_rows(columns, rows)
     cypher_block = f"Query (Cypher) that produced these results:\n{cypher}\n\n" if cypher else ""
@@ -359,9 +382,42 @@ def synthesize(question: str, columns: list, rows: list, llm: Optional[LLMFunc] 
         f"Columns: {columns}\n"
         f"Results ({len(rows)} row(s), showing up to {len(sample)}):\n"
         f"{json.dumps(sample, default=str, indent=2)}\n\n"
-        "Return JSON with a single field `answer` containing the plain-English explanation."
+        "Return JSON with `answer` (the plain-English explanation) and "
+        "`answered_from_results`: set it to true only if `answer` genuinely comes from "
+        "the result rows; set it to false when the rows do not contain what the question "
+        "asked (including when the results are empty)."
     )
     out = call(prompt, schema=_ANSWER_SCHEMA)
+    if isinstance(out, str):
+        try:
+            out = json.loads(out)
+        except json.JSONDecodeError:
+            answer, flag = out.strip(), True
+            return {"answer": answer, "answered_from_results": bool(rows) and flag} if return_meta else answer
+    answer = str(out.get("answer", "")).strip()
+    if not return_meta:
+        return answer
+    flag = bool(rows) and bool(out.get("answered_from_results", True))
+    return {"answer": answer, "answered_from_results": flag}
+
+
+def general_knowledge_answer(question: str, llm: Optional[LLMFunc] = None) -> str:
+    """Answer a question from the model's own general (parametric) knowledge.
+
+    Used as a fallback when the graph query results did not answer the question.
+    Fast-tier call; the answer is labeled as general knowledge by the caller and is
+    never presented as graph-derived.
+    """
+    call = llm or _get_llm()
+    prompt = (
+        "The user asked a question that their graph query results did not answer. "
+        "Using your own general knowledge, answer the question directly and concisely. "
+        "If you do not know, say so plainly. Do NOT claim this information came from "
+        "their data or graph.\n\n"
+        f"Question: {question}\n\n"
+        "Return JSON with a single field `answer` containing the plain-English answer."
+    )
+    out = call(prompt, schema=_GENERAL_ANSWER_SCHEMA)
     if isinstance(out, str):
         try:
             out = json.loads(out)
