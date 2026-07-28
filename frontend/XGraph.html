@@ -47,7 +47,7 @@
 const { useState, useEffect, useRef, useCallback, useMemo } = React;
 
 /* ═══════════════════════ CONSTANTS ════════════════════════ */
-const EXPLORER_VERSION = "0.22.1";  // xGraph version — bump on frontend changes so a stale browser cache is visible
+const EXPLORER_VERSION = "0.22.2";  // xGraph version — bump on frontend changes so a stale browser cache is visible
 const SAFETY_TIMEOUT_MS = 10 * 60 * 1000;
 const PALETTE = [
     { solid: '#0984e3', light: '#e1f0fb' }, { solid: '#00cec9', light: '#e0f9f8' },
@@ -1741,6 +1741,39 @@ function QueryPanel(props) {
             setExplainResp(r);
         } catch (err) { setExplainError(err.message); }
         finally { setExplainBusy(false); }
+    };
+    // ── Promote-columns avenue (FalkorDB only) — materialize wide source columns
+    // as node properties so they become mid-traversal filterable. Backend
+    // /promote_columns snapshots the source (via gwClient.promoteColumns). ──
+    const [promoteOpen, setPromoteOpen] = useState(false);
+    const [promoteSource, setPromoteSource] = useState(HYDRATE_SOURCE);
+    const [promoteKey, setPromoteKey] = useState('NODE');
+    const [promoteCols, setPromoteCols] = useState([]);
+    const [promoteColOptions, setPromoteColOptions] = useState([]);
+    const [promoteBusy, setPromoteBusy] = useState(false);
+    const [promoteResult, setPromoteResult] = useState(null);
+    // Load column options when the source changes — reuse the gateway /columns
+    // call (gwClient.columns resolves to an array of column-name strings).
+    // Best-effort: empty list on error, never crash.
+    useEffect(function() {
+        if (engine !== 'falkordb' || !promoteSource) { setPromoteColOptions([]); return; }
+        if (!props.gwClient) { setPromoteColOptions([]); return; }
+        var live = true;
+        props.gwClient.columns(promoteSource)
+            .then(function(cols) { if (live) setPromoteColOptions(Array.isArray(cols) ? cols : []); })
+            .catch(function() { if (live) setPromoteColOptions([]); });
+        return function() { live = false; };
+    }, [engine, promoteSource]);
+    var runPromote = async function() {
+        if (!props.gwClient || !props.graphName || !promoteCols.length) return;
+        setPromoteBusy(true); setPromoteResult(null);
+        try {
+            var res = await props.gwClient.promoteColumns(props.graphName, promoteSource, promoteKey, promoteCols);
+            setPromoteResult(res);
+        } catch (e) {
+            setPromoteResult({ nodes_matched: 0, properties_set: 0, promoted: [], source: promoteSource, error: String((e && e.message) || e) });
+        }
+        finally { setPromoteBusy(false); }
     };
     const [loading, setLoading] = useState(false);
     const [pos, setPos] = useState({ x: 120 + panelIndex * 30, y: 60 + panelIndex * 30 });
@@ -3626,6 +3659,49 @@ function QueryPanel(props) {
                             <div style={{ padding:'8px 12px', background:'#eef7ff', border:'1px solid #d0e6ff', borderRadius:6, fontSize:12, color:'#2d3436', position:'relative' }}>
                                 <span style={{ position:'absolute', top:4, right:8, cursor:'pointer', color:'#b2bec3', fontSize:13 }} title="Dismiss" onClick={function(){ setAskAnswer(null); }}>{'✕'}</span>
                                 {askAnswer}
+                            </div>
+                        )}
+                    </div>
+                )}
+                {/* Promote-columns avenue (FalkorDB only) — snapshot wide source columns
+                    onto graph nodes so they become mid-traversal filterable. */}
+                {engine === 'falkordb' && (
+                    <div style={{ display:'flex', flexDirection:'column', gap:6, padding:'0 0 8px', borderBottom:'1px solid #f1f2f6', marginBottom:8 }}>
+                        <div onClick={function(){ setPromoteOpen(function(o){ return !o; }); }} title="Promote columns: copy wide source columns onto FalkorDB nodes as properties" style={{ display:'flex', alignItems:'center', gap:6, cursor:'pointer', userSelect:'none', padding:'2px 0' }}>
+                            <span style={{ fontSize:12, fontWeight:700, color: promoteOpen ? '#0984e3' : '#2d3436', transition:'0.15s' }}>{promoteOpen ? '▼' : '▶'} Promote columns into FalkorDB</span>
+                        </div>
+                        {promoteOpen && (
+                            <div style={{ border:'1px solid #dfe6e9', borderRadius:6, padding:8, background:'#f5fbff' }}>
+                                <div style={{ display:'flex', gap:6, marginBottom:6, flexWrap:'wrap' }}>
+                                    <div style={{ flex:1, minWidth:140 }}>
+                                        <div style={{ fontSize:9, fontWeight:700, color:'#636e72', marginBottom:2 }}>Source</div>
+                                        <input value={promoteSource} onChange={function(e){ setPromoteSource(e.target.value); }} placeholder="source (e.g. vertexes.parquet)" style={{ width:'100%', padding:'4px 6px', fontSize:11, border:'1px solid #dfe6e9', borderRadius:4, fontFamily:'inherit', boxSizing:'border-box' }} />
+                                    </div>
+                                    <div style={{ width:120 }}>
+                                        <div style={{ fontSize:9, fontWeight:700, color:'#636e72', marginBottom:2 }}>Key column</div>
+                                        <input value={promoteKey} onChange={function(e){ setPromoteKey(e.target.value); }} placeholder="key (NODE)" style={{ width:'100%', padding:'4px 6px', fontSize:11, border:'1px solid #dfe6e9', borderRadius:4, fontFamily:'inherit', boxSizing:'border-box' }} />
+                                    </div>
+                                </div>
+                                <div style={{ marginBottom:6 }}>
+                                    <div style={{ fontSize:9, fontWeight:700, color:'#636e72', marginBottom:2 }}>Columns to promote <span style={{ fontWeight:400, color:'#b2bec3' }}>(Ctrl/Cmd-click for multiple)</span></div>
+                                    <select multiple value={promoteCols} onChange={function(e){ setPromoteCols(Array.from(e.target.selectedOptions, function(o){ return o.value; })); }} style={{ width:'100%', minHeight:80, padding:'4px 6px', fontSize:11, border:'1px solid #dfe6e9', borderRadius:4, fontFamily:'inherit', boxSizing:'border-box' }}>
+                                        {promoteColOptions.map(function(c){ return <option key={c} value={c}>{c}</option>; })}
+                                    </select>
+                                    {!promoteColOptions.length && <div style={{ fontSize:10, color:'#b2bec3', marginTop:2 }}>No columns found for this source.</div>}
+                                </div>
+                                <button onClick={runPromote} disabled={promoteBusy || !promoteCols.length || !props.graphName} style={{ padding:'6px 14px', border:'none', borderRadius:6, cursor:(promoteBusy||!promoteCols.length||!props.graphName)?'not-allowed':'pointer', fontWeight:700, color:'#fff', background:(promoteBusy||!promoteCols.length||!props.graphName)?'#b2bec3':'#0984e3', fontSize:12, fontFamily:'inherit' }}>{promoteBusy ? 'Promoting…' : 'Promote'}</button>
+                                {!props.graphName && <span style={{ fontSize:10, color:'#b2bec3', marginLeft:8 }}>Load a graph first.</span>}
+                                {promoteResult && (
+                                    promoteResult.error ? (
+                                        <div style={{ marginTop:6, fontSize:11, color:'#d63031' }}>{promoteResult.error}</div>
+                                    ) : (
+                                        <div style={{ marginTop:6, padding:'8px 12px', background:'#eef7ff', border:'1px solid #d0e6ff', borderRadius:6, fontSize:12, color:'#2d3436' }}>
+                                            <div>Matched {promoteResult.nodes_matched} nodes, set {promoteResult.properties_set} properties.</div>
+                                            {(promoteResult.promoted || []).map(function(c){ return <div key={c} style={{ marginTop:2 }}>Filter with: <code style={{ background:'#fff', padding:'1px 4px', borderRadius:3, border:'1px solid #d0e6ff' }}>{'WHERE n.`' + c + "` = '…'"}</code></div>; })}
+                                            <div style={{ marginTop:4, fontSize:10, color:'#636e72' }}>snapshot of {promoteResult.source}</div>
+                                        </div>
+                                    )
+                                )}
                             </div>
                         )}
                     </div>
