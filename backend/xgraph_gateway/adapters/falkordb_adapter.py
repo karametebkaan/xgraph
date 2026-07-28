@@ -572,6 +572,29 @@ class FalkorDBAdapter(GraphEngineAdapter):
                 "nodes_created": created_nodes, "edges_created": created_edges,
                 "labels": {"node_labels": node_labels, "edge_labels": edge_labels}}
 
+    def promote_columns(self, graph, source, key="NODE", columns=None):
+        """Promote whole wide-source columns onto existing nodes so they
+        become mid-traversal filterable. MATCH-only (never creates nodes);
+        null cells skipped. ADDITIVE -- shares no code with the extraction
+        upsert path (_upsert_statements/build_ingest_cypher/ingest_elements)."""
+        from xgraph_gateway.compute.duckdb_engine import DuckDBComputeEngine
+        columns = [c for c in (columns or []) if c]
+        if not columns:
+            raise ValueError("columns must be a non-empty list")
+        key = safe_ident(key)
+        rows = DuckDBComputeEngine().read_columns(source, key=key, columns=columns)
+        stmts = build_promote_cypher(rows, key=key, columns=columns)
+        g = self._graph(graph)
+        nodes_matched = 0
+        properties_set = 0
+        for query, params in stmts:
+            qr = g.query(query, params, timeout=60000)
+            if qr.result_set:
+                nodes_matched += qr.result_set[0][0] or 0
+            properties_set += getattr(qr, "properties_set", 0) or 0
+        return {"promoted": columns, "nodes_matched": nodes_matched,
+                "properties_set": properties_set, "source": source, "key": key}
+
     def delete_graph(self, graph):
         # Best-effort on a missing graph (delete is idempotent from the
         # caller's point of view) -- but a real connection/timeout error

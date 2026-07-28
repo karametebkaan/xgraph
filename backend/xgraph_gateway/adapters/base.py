@@ -39,6 +39,17 @@ class GraphEngineAdapter(ABC):
         """
         raise NotImplementedError
 
+    def promote_columns(self, graph, source, key="NODE", columns=None):
+        """Promote whole wide-source columns onto existing nodes as properties
+        (making them mid-traversal filterable). FalkorDB-only; the default is
+        unsupported.
+
+        Raises a ValueError whose message avoids "timeout"/"unreachable"/
+        "connection" so the gateway maps it to 400 (bad request), not 502/504.
+        """
+        raise ValueError(
+            f"promotion not supported for {getattr(self, 'engine', 'this engine')}")
+
     def delete_graph(self, graph: str) -> dict:
         """Delete/drop the named graph. Returns {'deleted': <graph>}.
 

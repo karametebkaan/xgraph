@@ -45,3 +45,23 @@ def test_empty_payload_yields_no_statements():
     stmts = build_promote_cypher(
         [{"NODE": None, "a": None}], key="NODE", columns=["a"])
     assert stmts == []
+
+
+def test_promote_columns_unsupported_raises_valueerror_kinetica():
+    # Kinetica (and the base default) must reject promotion with a ValueError
+    # whose message avoids "timeout"/"unreachable"/"connection" so the gateway
+    # maps it to 400, not 502/504. Instantiated via __new__ -- no live service.
+    import pytest
+    from xgraph_gateway.adapters.kinetica_adapter import KineticaAdapter
+    from xgraph_gateway.adapters.fake import FakeAdapter
+
+    kin = KineticaAdapter.__new__(KineticaAdapter)
+    with pytest.raises(ValueError) as ei:
+        kin.promote_columns("g", "src.parquet", columns=["a"])
+    msg = str(ei.value).lower()
+    assert "not supported" in msg
+    assert not any(w in msg for w in ("timeout", "unreachable", "connection"))
+
+    # Base default (via FakeAdapter, which inherits it) also raises ValueError.
+    with pytest.raises(ValueError):
+        FakeAdapter().promote_columns("g", "src.parquet", columns=["a"])

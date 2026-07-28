@@ -1257,6 +1257,15 @@ class KineticaAdapter(GraphEngineAdapter):
         except Exception:
             return None
 
+    def promote_columns(self, graph, source, key="NODE", columns=None):
+        """Kinetica materializes real typed columns at extract time
+        (ALTER TABLE ADD COLUMN), so the skinny/wide promote gap is a FalkorDB
+        concern only."""
+        raise ValueError(
+            "promotion not supported for kinetica: Kinetica materializes real "
+            "typed columns at extract time (no schemaless property maps to "
+            "promote into)")
+
     def ingest_elements(self, graph, nodes, edges):
         n_rows = node_rows(nodes)
         e_rows = edge_rows(edges)
