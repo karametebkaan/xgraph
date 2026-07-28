@@ -9944,7 +9944,7 @@ function App() {
                 becomes active (see the loadSchema effect above). Thin/muted,
                 spans the full width, sits below the header row. */}
             {(connected || activeGraph) && (
-                <div style={{ flexShrink:0, padding:'4px 16px', fontSize:11, color:'#636e72', background:'#fafbfc', borderBottom:'1px solid #eee', whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>
+                <div style={{ flexShrink:0, padding:'6px 16px', fontSize:14, color:'#636e72', background:'#fafbfc', borderBottom:'1px solid #eee', whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>
                     {/* Connection info (folded in from the old Connect tab) */}
                     <span title={connected ? 'Connected' : 'Not connected'} style={{ color: connected ? '#00b894' : '#b2bec3', fontWeight:700 }}>{'●'}</span>
                     <span style={{ marginLeft:5, color:'#2d3436', fontWeight:700 }} title="Graph engine">{graphEngine}</span>
