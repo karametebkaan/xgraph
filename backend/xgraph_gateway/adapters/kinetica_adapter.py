@@ -818,7 +818,12 @@ class KineticaAdapter(GraphEngineAdapter):
         except Exception:
             return {}
 
-    def fetch_entities(self, graph, limit, offset=0):
+    def fetch_entities(self, graph, limit, after=None):
+        # Kinetica pages by NUMERIC offset (its /get/graph/entities is offset-based),
+        # not by the FalkorDB keyset cursor. The engine-neutral /entities endpoint now
+        # passes an `after` cursor; map it back to an integer offset here so a None/""
+        # first page becomes offset 0 (prior default) and a numeric cursor still works.
+        offset = int(after) if after not in (None, "") else 0
         # Primary: Kinetica's native /get/graph/entities (what the Kinetica Graph
         # Explorer uses) — the engine's own view of the graph, works for ANY graph
         # (banking, extract, computed) regardless of backing-table shape. Fall back

@@ -16,8 +16,19 @@ class FakeAdapter(GraphEngineAdapter):
     def run_query(self, graph, cypher, timeout=60000):
         return {"columns": ["NODE"], "rows": [[n["id"]] for n in _NODES],
                 "graph": {"nodes": list(_NODES), "edges": list(_EDGES)}}
-    def fetch_entities(self, graph, limit, offset=0):
-        return {"nodes": _NODES[offset:offset + limit], "edges": _EDGES[offset:offset + limit]}
+    def fetch_entities(self, graph, limit, after=None):
+        ordered = sorted(_NODES, key=lambda n: n["id"])
+        rest = [n for n in ordered if after is None or n["id"] > after]
+        page = rest[:limit]
+        slim = [{"id": n["id"], "label": n["label"]} for n in page]
+        ids = {n["id"] for n in page}
+        edges = [e for e in _EDGES if e["source"] in ids]
+        next_cursor = page[-1]["id"] if len(page) == limit and page else None
+        return {"nodes": slim, "edges": edges, "next_cursor": next_cursor}
+    def _subgraph_totals(self, graph, pulled_nodes, pulled_edges):
+        # True counts so fetch_subgraph's `capped` flag is exercised meaningfully
+        # (mirrors how FalkorDBAdapter overrides this from _counts).
+        return len(_NODES), len(_EDGES)
     def get_record(self, graph, node_id):
         for n in _NODES:
             if n["id"] == node_id:

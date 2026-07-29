@@ -483,15 +483,150 @@ class FalkorDBAdapter(GraphEngineAdapter):
                 # from the metadata store.
                 "axes": {"EntityType": labels}}
 
-    def fetch_entities(self, graph, limit, offset=0):
+    def fetch_entities(self, graph, limit, after=None):
+        # Keyset (cursor) pagination on the indexed :Entity(NODE) key -- each
+        # page is O(log n + pageSize) instead of SKIP's O(offset). Edges are
+        # pulled per page by their SOURCE node id: every edge has exactly one
+        # source and every node lands in exactly one page, so across a full
+        # pull each edge is returned exactly once (complete, dup-free). No
+        # properties(n): the viz transform ignores node props and node-detail
+        # fetches them separately via get_record.
         g = self._graph(graph)
-        nodes = [{"id": r[0], "label": r[1], "props": r[2]} for r in g.query(
-            "MATCH (n) RETURN n.NODE, n.LABEL, properties(n) SKIP $off LIMIT $l",
-            {"l": limit, "off": offset}, timeout=60000).result_set]
-        edges = [{"id": r[0], "source": r[1], "target": r[2], "type": r[3]} for r in g.query(
-            "MATCH (a)-[r]->(b) RETURN r.ID, a.NODE, b.NODE, type(r) SKIP $off LIMIT $l",
-            {"l": limit, "off": offset}, timeout=60000).result_set]
-        return {"nodes": nodes, "edges": edges}
+        if after is None:
+            nq = ("MATCH (n:Entity) RETURN n.NODE, n.LABEL "
+                  "ORDER BY n.NODE LIMIT $l")
+            params = {"l": limit}
+        else:
+            nq = ("MATCH (n:Entity) WHERE n.NODE > $after "
+                  "RETURN n.NODE, n.LABEL ORDER BY n.NODE LIMIT $l")
+            params = {"l": limit, "after": after}
+        nodes = [{"id": r[0], "label": r[1]} for r in
+                 g.query(nq, params, timeout=60000).result_set]
+        ids = [n["id"] for n in nodes]
+        edges = []
+        if ids:
+            eq = ("MATCH (a:Entity)-[r]->(b) WHERE a.NODE IN $ids "
+                  "RETURN r.ID, a.NODE, b.NODE, type(r)")
+            edges = [{"id": r[0], "source": r[1], "target": r[2], "type": r[3]}
+                     for r in g.query(eq, {"ids": ids}, timeout=60000).result_set]
+        next_cursor = nodes[-1]["id"] if len(nodes) == limit and nodes else None
+        return {"nodes": nodes, "edges": edges, "next_cursor": next_cursor}
+
+    def fetch_subgraph(self, graph, limit):
+        # A+B fast Visualize: whole capped subgraph in ONE gateway call, concise
+        # (index-pair edges, induced -- an edge is kept only when BOTH endpoints
+        # are in the pulled node set). Fast path raises FalkorDB's silent
+        # RESULTSET_SIZE cap and pulls nodes + edges in one bulk query each
+        # (~14s for the 620k-node / 846k-edge banking graph vs ~100s paged); if
+        # the cap can't be raised (read-only config) it falls back to keyset +
+        # SKIP paging -- correct but slower. A full pull (limit >= node count)
+        # drops no edge.
+        g = self._graph(graph)
+        unbounded = self._ensure_unbounded_results()
+        total_nodes, total_edges = self._subgraph_totals(graph, 0, 0)
+        full = limit >= total_nodes
+        ids, labels, index = [], [], {}
+        for nid, lbl in self._pull_nodes(g, limit, full, unbounded):
+            if nid not in index:
+                index[nid] = len(ids)
+                ids.append(nid)
+                labels.append(lbl)
+        edge_rows = (self._pull_edges_all(g) if (full and unbounded)
+                     else self._pull_edges(g, ids, unbounded))
+        src, dst, etype = [], [], []
+        for s, d, t in edge_rows:
+            si = index.get(s)
+            di = index.get(d)
+            if si is None or di is None:
+                continue
+            src.append(si)
+            dst.append(di)
+            etype.append(t)
+        return {"ids": ids, "labels": labels, "src": src, "dst": dst,
+                "etype": etype, "total_nodes": total_nodes,
+                "total_edges": total_edges, "capped": len(ids) < total_nodes}
+
+    def _ensure_unbounded_results(self):
+        """Raise FalkorDB's RESULTSET_SIZE cap (default 10000 rows/query, which
+        SILENTLY truncates every result set -- losing rows with no error) to
+        unlimited, so bulk node/edge pulls come back whole. Best-effort and
+        cached per adapter: returns False when the deployment makes config
+        read-only, so callers fall back to row paging."""
+        if getattr(self, "_unbounded", None) is None:
+            try:
+                self._db.config_set("RESULTSET_SIZE", -1)
+                self._unbounded = True
+            except Exception:
+                self._unbounded = False
+        return self._unbounded
+
+    def _pull_nodes(self, g, limit, full, unbounded):
+        """Node (NODE, LABEL) rows: all of them for a full pull, else the first
+        `limit` in keyset order. One bulk query when the result cap is
+        unbounded, else keyset (cursor) pages of 10000."""
+        base = "MATCH (n:Entity) RETURN n.NODE, n.LABEL"
+        if unbounded:
+            if full:
+                return g.query(base, timeout=300000).result_set
+            return g.query(base + " ORDER BY n.NODE LIMIT $l",
+                           {"l": limit}, timeout=300000).result_set
+        PAGE = 10000
+        out, after = [], None
+        while len(out) < limit:
+            take = min(PAGE, limit - len(out))
+            if after is None:
+                q, params = base + " ORDER BY n.NODE LIMIT $l", {"l": take}
+            else:
+                q = ("MATCH (n:Entity) WHERE n.NODE > $after "
+                     "RETURN n.NODE, n.LABEL ORDER BY n.NODE LIMIT $l")
+                params = {"l": take, "after": after}
+            page = g.query(q, params, timeout=60000).result_set
+            if not page:
+                break
+            out.extend(page)
+            after = page[-1][0] if len(page) == take else None
+            if not after:
+                break
+        return out
+
+    def _pull_edges_all(self, g):
+        """Every edge as (source, target, type) in one bulk query -- valid only
+        when the result cap is unbounded (see _ensure_unbounded_results)."""
+        eq = "MATCH (a:Entity)-[r]->(b) RETURN a.NODE, b.NODE, type(r)"
+        return [(r[0], r[1], r[2])
+                for r in g.query(eq, timeout=300000).result_set]
+
+    def _pull_edges(self, g, node_ids, unbounded):
+        """(source, target, type) rows whose SOURCE is in node_ids. One bulk IN
+        query when unbounded; else SKIP/LIMIT paged with a deterministic ORDER
+        BY (ending in the unique r.ID) so paging past the RESULTSET_SIZE cap
+        stays drop-free and dup-free -- FalkorDB otherwise silently truncates
+        every result set to the cap, losing edges on dense pages (single-node
+        engine, unlike the Kinetica offset-paging hazard noted in CLAUDE.md)."""
+        if not node_ids:
+            return []
+        if unbounded:
+            eq = ("MATCH (a:Entity)-[r]->(b) WHERE a.NODE IN $ids "
+                  "RETURN a.NODE, b.NODE, type(r)")
+            return [(r[0], r[1], r[2]) for r in
+                    g.query(eq, {"ids": node_ids}, timeout=300000).result_set]
+        PAGE = 10000
+        out, off = [], 0
+        while True:
+            eq = ("MATCH (a:Entity)-[r]->(b) WHERE a.NODE IN $ids "
+                  "RETURN a.NODE, b.NODE, type(r), r.ID "
+                  "ORDER BY a.NODE, b.NODE, type(r), r.ID SKIP $off LIMIT $lim")
+            chunk = g.query(eq, {"ids": node_ids, "off": off, "lim": PAGE},
+                            timeout=60000).result_set
+            out.extend((r[0], r[1], r[2]) for r in chunk)
+            if len(chunk) < PAGE:
+                break
+            off += PAGE
+        return out
+
+    def _subgraph_totals(self, graph, pulled_nodes, pulled_edges):
+        c = self._counts(self._graph(graph))
+        return c["nodes"], c["edges"]
 
     def fetch_node_attrs(self, graph, ids):
         """Wide attribute rows `{NODE, <props>}` for the given NODE ids -- the

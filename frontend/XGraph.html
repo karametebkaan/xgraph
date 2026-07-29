@@ -29,6 +29,9 @@
         @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
         @keyframes fadeIn { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
         @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
+        /* Indeterminate progress: a sliver sweeps left→right for blocking pulls
+           (e.g. the FalkorDB single-call Visualize) that can't report % done. */
+        @keyframes indeterminate { 0% { left: -40%; } 100% { left: 100%; } }
 
         * { scrollbar-width: thin; scrollbar-color: #dfe6e9 transparent; }
         *::-webkit-scrollbar { width: 6px; }
@@ -47,7 +50,7 @@
 const { useState, useEffect, useRef, useCallback, useMemo } = React;
 
 /* ═══════════════════════ CONSTANTS ════════════════════════ */
-const EXPLORER_VERSION = "0.23.0";  // xGraph version — bump on frontend changes so a stale browser cache is visible
+const EXPLORER_VERSION = "0.24.3";  // xGraph version — bump on frontend changes so a stale browser cache is visible
 const SAFETY_TIMEOUT_MS = 10 * 60 * 1000;
 const PALETTE = [
     { solid: '#0984e3', light: '#e1f0fb' }, { solid: '#00cec9', light: '#e0f9f8' },
@@ -6570,20 +6573,41 @@ function CanvasGraph(props) {
                     {graphData.nodes.length.toLocaleString()}n/{graphData.links.length.toLocaleString()}e
                     {(graphData.totalAvailableEdges > graphData.links.length || graphData.totalAvailableNodes > graphData.nodes.length) && <span style={{ color:"#fd9644" }}> of {graphData.totalAvailableNodes.toLocaleString()}/{graphData.totalAvailableEdges.toLocaleString()}</span>}
                 </span>
-                {(vizProgress.loading || vizProgress.total > 0) && (
+                {(vizProgress.loading || vizProgress.total > 0) && (() => {
+                    // A blocking single-call pull (FalkorDB /visualize) can't report %
+                    // as it runs, so a determinate bar would sit at 0% then jump,
+                    // reading as broken — that pull flags `indeterminate` and we show
+                    // a sweeping sliver. Kinetica reports real per-node progress via
+                    // onProgress, so it never sets the flag and keeps the % bar.
+                    var indeterminate = vizProgress.loading && vizProgress.indeterminate;
+                    return (
                     <React.Fragment>
-                        <div style={{ height:4, width:70, flexShrink:0, background:"#eee", borderRadius:2, overflow:"hidden" }}>
+                        <div style={{ position:"relative", height:4, width:70, flexShrink:0, background:"#eee", borderRadius:2, overflow:"hidden" }}>
+                            {indeterminate ? (
+                                <div style={{ position:"absolute", top:0, height:"100%", width:"40%", background:"#00cec9", borderRadius:2, animation:"indeterminate 1.1s ease-in-out infinite" }} />
+                            ) : (
                             <div style={{
                                 height:"100%",
                                 width: (vizProgress.total > 0 ? Math.min(100, (vizProgress.loaded / vizProgress.total) * 100) : 0) + "%",
                                 background: vizProgress.loading ? "#00cec9" : "#00b894",
                                 transition:"width 0.2s",
                             }} />
+                            )}
                         </div>
-                        <span style={{ fontSize:10, color:"#636e72", whiteSpace:"nowrap", flexShrink:0 }}>{vizProgress.loaded.toLocaleString()} / {vizProgress.total.toLocaleString()}</span>
+                        <span style={{ fontSize:10, color:"#636e72", whiteSpace:"nowrap", flexShrink:0 }}>
+                            {indeterminate
+                                ? "Loading " + vizProgress.total.toLocaleString() + "…"
+                                : vizProgress.loaded.toLocaleString() + " / " + vizProgress.total.toLocaleString()}
+                        </span>
                     </React.Fragment>
-                )}
+                    );
+                })()}
                 {vizLoadError && <span style={{ fontSize:10, color:"#d63031", fontWeight:600, whiteSpace:"nowrap", flexShrink:0 }}>{vizLoadError}</span>}
+                {vizProgress.capped && !vizProgress.loading && vizProgress.graphTotal > 0 && (
+                    <span style={{ fontSize:10, color:"#e17055", fontWeight:600, whiteSpace:"nowrap", flexShrink:0 }} title="Increase the Viz limit dropdown to pull more">
+                        Showing first {vizProgress.total.toLocaleString()} of {vizProgress.graphTotal.toLocaleString()} nodes — raise Viz limit
+                    </span>
+                )}
                 {(selectedNodeLabels.length > 0 || selectedEdgeLabels.length > 0) && <span style={{ fontSize:10, color:"#6c5ce7", whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis', flexShrink:1, minWidth:0 }}>{selectedNodeLabels.map(function(l){ return "\u25CF " + l; }).concat(selectedEdgeLabels.map(function(l){ return "\u2194 " + l; })).join(", ")}</span>}
                 {focusNode && <span style={{ fontSize:10, whiteSpace:'nowrap', flexShrink:0 }}><strong>{focusNode}</strong> <span onClick={function(){ setFocusNode(null); if(graphRef.current) graphRef.current.zoomToFit(400, 40); }} style={{ cursor:"pointer", color:"#d63031" }}>[reset]</span></span>}
                 <label style={Object.assign({}, ctrlStyle, { display:'flex', alignItems:'center', gap:3, flex:'1 1 100px', minWidth:80 })}>N:{nodeLimit.toLocaleString()} <input type="range" min="50" max="1000000" step="50" value={nodeLimit} onChange={function(e){ setNodeLimit(parseInt(e.target.value)); }} style={sliderStyle}/></label>
@@ -9725,6 +9749,10 @@ function App() {
                     } }
                 );
                 setGraphTableData(kdata);
+                // Raise render sliders, capped at the Viz limit (see FalkorDB branch).
+                var vizCapK = bigGraphThreshold > 0 ? bigGraphThreshold : Infinity;
+                if (kdata && kdata.nodes) setCanvasNodeLimit(Math.min(vizCapK, kdata.nodes.records.length));
+                if (kdata && kdata.edges) setCanvasEdgeLimit(Math.min(vizCapK, kdata.edges.records.length));
                 var kld = await window.xgraphGateway.kineticaLabelData(
                     credentials.url, activeGraph, { user: credentials.user, pass: credentials.pass });
                 if (kld) setLabelData(kld);
@@ -9735,39 +9763,38 @@ function App() {
             }
             return;
         }
-        var allNodes = [];
-        var allEdges = [];
-        var target = loadAll === true ? (graphCounts.nodes || bigGraphThreshold) : Math.min(graphCounts.nodes || bigGraphThreshold, bigGraphThreshold);
-        setVizProgress({ loaded: 0, total: target, loading: true });
+        var graphTotal = graphCounts.nodes || 0;
+        var target = loadAll === true ? (graphTotal || bigGraphThreshold) : Math.min(graphTotal || bigGraphThreshold, bigGraphThreshold);
+        var capped = graphTotal > 0 && target < graphTotal;
+        // indeterminate: the FalkorDB pull is one blocking call with no mid-flight
+        // progress, so drive a sweeping sliver instead of a stuck 0% bar. (Kinetica
+        // reports real per-node progress and never sets this.)
+        setVizProgress({ loaded: 0, total: target, loading: true, capped: capped, graphTotal: graphTotal, indeterminate: true });
         try {
-            var offset = 0;
-            while (offset < target) {
-                var page = await gwClient.fetchEntities(activeGraph, VISUALIZE_PAGE_SIZE, offset);
-                var pageNodes = (page && page.nodes) || [];
-                var pageEdges = (page && page.edges) || [];
-                if (pageNodes.length === 0 && pageEdges.length === 0) break;   // end of data
-                allNodes = allNodes.concat(pageNodes);
-                allEdges = allEdges.concat(pageEdges);
-                // Do NOT redraw the canvas per batch: a force-directed layout
-                // re-solves on every data change, so streaming batches into it
-                // makes social (non-geo) graphs flash/jitter during the load.
-                // Only advance the progress bar here; the canvas is drawn ONCE
-                // after the full load completes (below), so the layout solves once.
-                setVizProgress({ loaded: allNodes.length, total: target, loading: true });
-                // Yield a macrotask so the progress bar repaints between fetches.
-                await new Promise(function(r){ setTimeout(r, 0); });
-                offset += VISUALIZE_PAGE_SIZE;
-            }
-            // Feed CanvasGraph the REAL total node/edge counts (not the
-            // accumulated page length) so its big-graph-threshold comparison
-            // and "N of TOTAL" indicator are accurate.
-            var gt = window.xgraphGateway.graphTableFromGateway({ nodes: allNodes, edges: allEdges });
-            if (typeof graphCounts.nodes === 'number') gt.nodes.total = graphCounts.nodes;
-            if (typeof graphCounts.edges === 'number') gt.edges.total = graphCounts.edges;
+            // A+B fast path: ONE gateway call returns the whole capped subgraph
+            // concise (index-pair edges, server-side induced filter); no per-page
+            // browser round trips. The gateway raises FalkorDB's silent 10k
+            // RESULTSET_SIZE cap and bulk-pulls, so the whole graph comes back in
+            // one shot (single indeterminate spinner, no per-batch redraw).
+            var concise = await gwClient.visualize(activeGraph, target);
+            var gt = window.xgraphGateway.graphTableFromConcise(concise);
             setGraphTableData(gt);
+            // Raise the render sliders so the pull renders — but never above the
+            // Viz limit (bigGraphThreshold). Setting them to the raw pulled size
+            // would try to render a full pull (e.g. 845k edges) and hang the
+            // canvas; setting them to the defaults (2000n/4000e) clips a small
+            // pull. Cap each at min(vizLimit, pulled). A Viz limit of 0 means ∞
+            // (the user opted out of the cap), so fall back to the pulled size.
+            var vizCap = bigGraphThreshold > 0 ? bigGraphThreshold : Infinity;
+            setCanvasNodeLimit(Math.min(vizCap, gt.nodes.records.length));
+            setCanvasEdgeLimit(Math.min(vizCap, gt.edges.records.length));
+            setVizProgress({
+                loaded: gt.nodes.records.length, total: target, loading: false,
+                capped: !!concise.capped,
+                graphTotal: (typeof concise.total_nodes === 'number' ? concise.total_nodes : graphTotal),
+            });
         } catch (err) {
             setVizLoadError(err.message);
-        } finally {
             setVizProgress(function(p) { return Object.assign({}, p, { loading: false }); });
         }
     }, [activeGraph, gwClient, graphCounts, bigGraphThreshold, graphEngine, credentials]);

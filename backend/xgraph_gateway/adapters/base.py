@@ -9,7 +9,71 @@ class GraphEngineAdapter(ABC):
     @abstractmethod
     def run_query(self, graph: str, cypher: str, timeout: int = 60000) -> dict: ...
     @abstractmethod
-    def fetch_entities(self, graph: str, limit: int, offset: int = 0) -> dict: ...
+    def fetch_entities(self, graph: str, limit: int, after: str | None = None) -> dict: ...
+
+    def fetch_subgraph(self, graph: str, limit: int) -> dict:
+        """Whole capped subgraph in ONE call, concise/columnar -- the fast
+        Visualize path (A+B). Returns:
+
+            {"ids": [str], "labels": [str|list], "src": [int], "dst": [int],
+             "etype": [str], "total_nodes": int, "total_edges": int,
+             "capped": bool}
+
+        `src`/`dst` are 0-based INDICES into `ids` (the Kinetica concise-edge
+        analog -- repeating node-id strings collapse to small ints). An edge is
+        kept ONLY when BOTH endpoints are in the pulled node set (induced
+        subgraph), so every index is valid; a full pull (`limit >= total_nodes`)
+        drops nothing. `total_*` are the TRUE graph counts (may exceed the pulled
+        N/E when capped).
+
+        Default: page this adapter's own `fetch_entities` until `limit` nodes or
+        exhaustion. Not `@abstractmethod` (mirrors `ingest_elements`/`storage`):
+        adapters with a cheaper bulk path (FalkorDB) override it."""
+        PAGE = 10000
+        ids: list = []
+        labels: list = []
+        index: dict = {}
+        edge_rows: list = []  # (source_id, target_id, type)
+        after = None
+        while len(ids) < limit:
+            page = self.fetch_entities(graph, min(PAGE, limit - len(ids)), after)
+            page_nodes = page.get("nodes") or []
+            if not page_nodes:
+                break
+            for nd in page_nodes:
+                nid = nd.get("id")
+                if nid in index:
+                    continue
+                index[nid] = len(ids)
+                ids.append(nid)
+                labels.append(nd.get("label"))
+            for ed in (page.get("edges") or []):
+                edge_rows.append((ed.get("source"), ed.get("target"), ed.get("type")))
+            after = page.get("next_cursor")
+            if not after:
+                break
+        src: list = []
+        dst: list = []
+        etype: list = []
+        for s, d, t in edge_rows:
+            si = index.get(s)
+            di = index.get(d)
+            if si is None or di is None:
+                continue  # induced subgraph: edge to a node beyond the cap
+            src.append(si)
+            dst.append(di)
+            etype.append(t)
+        total_nodes, total_edges = self._subgraph_totals(graph, len(ids), len(src))
+        return {"ids": ids, "labels": labels, "src": src, "dst": dst,
+                "etype": etype, "total_nodes": total_nodes,
+                "total_edges": total_edges, "capped": len(ids) < total_nodes}
+
+    def _subgraph_totals(self, graph: str, pulled_nodes: int, pulled_edges: int):
+        """True (graph-wide) node/edge counts for `fetch_subgraph`. Default: no
+        cheap count source, so report the pulled counts (so `capped` is never a
+        false positive). Adapters with a count query override this."""
+        return pulled_nodes, pulled_edges
+
     @abstractmethod
     def get_record(self, graph: str, node_id: str) -> dict: ...
 

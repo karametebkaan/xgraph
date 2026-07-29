@@ -183,6 +183,29 @@
     };
   }
 
+  // Concise/columnar subgraph (from GET /visualize) -> the graphTableData shape.
+  // Edges arrive as INDEX PAIRS (src[i]/dst[i] index into ids[]) — the Kinetica
+  // concise-connectivity analog — so reconstruct endpoint ids here. `total` uses
+  // the TRUE graph counts from the response, not the pulled length.
+  function graphTableFromConcise(c) {
+    c = c || {};
+    var ids = c.ids || [], labels = c.labels || [];
+    var src = c.src || [], dst = c.dst || [], etype = c.etype || [];
+    return {
+      nodes: {
+        records: ids.map(function (id, i) { return { NODE_NAME: id, NODE_LABEL: labelToString(labels[i]) }; }),
+        headers: ["NODE_NAME", "NODE_LABEL"],
+        total: (typeof c.total_nodes === "number" ? c.total_nodes : ids.length),
+      },
+      edges: {
+        records: src.map(function (s, i) { return { NODE1_NAME: ids[s], NODE2_NAME: ids[dst[i]], EDGE_LABEL: labelToString(etype[i]) }; }),
+        headers: ["NODE1_NAME", "NODE2_NAME", "EDGE_LABEL"],
+        total: (typeof c.total_edges === "number" ? c.total_edges : src.length),
+      },
+      edgeTable: "gateway (entities)", nodeTable: "gateway (entities/nodes)",
+    };
+  }
+
   // Detail record for a picked node. MIRROR the backing node-table columns —
   // do NOT invent NODE/LABEL when the row already carries its identity/type.
   // The gateway's get_record reads the backing node table with `SELECT *`, so
@@ -288,7 +311,14 @@
         return getJSON(q(url));
       },
       runQuery: function (graph, cypher) { return postJSONWithAuth("/query", { graph: graph, cypher: cypher }); },
-      fetchEntities: function (graph, limit, offset) { return getJSON(q("/entities?graph=" + encodeURIComponent(graph) + "&limit=" + (limit || 1000) + "&offset=" + (offset || 0))); },
+      fetchEntities: function (graph, limit, after) {
+        var url = "/entities?graph=" + encodeURIComponent(graph) + "&limit=" + (limit || 1000);
+        if (after != null && after !== "") url += "&after=" + encodeURIComponent(after);
+        return getJSON(q(url));
+      },
+      visualize: function (graph, limit) {
+        return getJSON(q("/visualize?graph=" + encodeURIComponent(graph) + "&limit=" + encodeURIComponent(limit)));
+      },
       getRecord: function (graph, id) { return getJSON(q("/record?graph=" + encodeURIComponent(graph) + "&id=" + encodeURIComponent(id))); },
       hydrate: function (rows, source, key, columns) { return postJSONWithAuth("/hydrate", { rows: rows, source: source, key: key || "NODE", columns: columns || "*" }); },
       promoteColumns: function (graph, source, key, columns) { return postJSONWithAuth("/promote_columns", { graph: graph, source: source, key: key, columns: columns }); },
@@ -334,6 +364,7 @@
     GATEWAY_DEFAULT: GATEWAY_DEFAULT,
     tableFromGateway: tableFromGateway,
     graphTableFromGateway: graphTableFromGateway,
+    graphTableFromConcise: graphTableFromConcise,
     recordFromGateway: recordFromGateway,
     kbtoa: kbtoa,
     safeParse: safeParse,

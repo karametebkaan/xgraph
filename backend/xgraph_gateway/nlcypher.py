@@ -17,6 +17,25 @@ LLMFunc = Callable[..., Any]
 
 _llm_fn: Optional[LLMFunc] = None
 
+_PLAIN_IDENT = re.compile(r"^[A-Za-z0-9_]+$")
+
+
+def _graph_ref(graph: str) -> str:
+    """Kinetica `GRAPH` reference for a (possibly schema-qualified) graph name.
+
+    Quotes each dotted part INDIVIDUALLY and ONLY when it is not a plain
+    `[A-Za-z0-9_]` identifier — a normal name needs no quotes at all
+    (``ki_home.extracted_graph89``), and a part with special characters is
+    quoted on its own (``"odd-schema".tbl``). Never wraps the whole dotted
+    string in one pair of quotes (``"ki_home.extracted_graph89"`` — a single
+    token containing a dot — which does not resolve to schema.table).
+    """
+    parts = str(graph or "").split(".")
+    out = []
+    for p in parts:
+        out.append(p if _PLAIN_IDENT.fullmatch(p) else '"' + p.replace('"', '""') + '"')
+    return ".".join(out)
+
 
 def _get_llm() -> LLMFunc:
     """Lazily bind the local `_llm` (on the FAST model) the first time a real
@@ -131,7 +150,7 @@ Target dialect: Kinetica GQL, wrapped as a SQL SELECT over graph_table(). Rules 
   aggregate / GROUP BY / ORDER BY / LIMIT goes in the OUTER SELECT:
     SELECT <columns and/or aggregates>
     FROM graph_table (
-      GRAPH "{graph}"
+      GRAPH {graph}
       MATCH <pattern>
       RETURN [DISTINCT] <inner scalar columns, each with an AS alias>
     )
@@ -139,31 +158,48 @@ Target dialect: Kinetica GQL, wrapped as a SQL SELECT over graph_table(). Rules 
     [GROUP BY <alias(es)>]
     [ORDER BY <alias> DESC]
     [LIMIT <n>]
-  NEVER emit a bare `GRAPH "..." MATCH ... RETURN ...` without the `SELECT ... FROM graph_table( ... )`
+  NEVER emit a bare `GRAPH ... MATCH ... RETURN ...` without the `SELECT ... FROM graph_table( ... )`
   wrapper — a bare GQL statement does not honor ORDER BY / GROUP BY / aggregation.
-- Inside graph_table() put ONLY `GRAPH "{graph}" MATCH ... RETURN ...` (the graph name IS quoted).
-  Do NOT put GROUP BY, ORDER BY, LIMIT, or aggregate functions (SUM/COUNT/MIN/MAX/AVG) inside
-  graph_table(); those belong ONLY in the OUTER SELECT.
+- Inside graph_table() put ONLY `GRAPH {graph} MATCH ... RETURN ...`. Write the graph reference
+  EXACTLY as `{graph}` above — do NOT add or remove quotes around it (a schema-qualified name is
+  already quoted per-part where needed; wrapping the whole `schema.table` in one pair of quotes does
+  NOT resolve). Do NOT put GROUP BY, ORDER BY, LIMIT, or aggregate functions
+  (SUM/COUNT/MIN/MAX/AVG) inside graph_table(); those belong ONLY in the OUTER SELECT.
+- CRITICAL: the OUTER SELECT / WHERE / GROUP BY / ORDER BY see ONLY the flat relation that
+  graph_table() produces, whose columns ARE the inner RETURN aliases. Reference those ALIASES by
+  their bare names — a graph pattern variable (e.g. `entity`, `lindsey`) and its properties
+  (e.g. `entity.NODE`) DO NOT EXIST outside graph_table(). So once the inner RETURN says
+  `RETURN entity.NODE AS entity_name, entity.LABEL AS entity_type`, the outer SELECT is
+  `SELECT DISTINCT entity_name, entity_type` — NOT `SELECT DISTINCT entity.NODE AS entity_name,
+  entity.LABEL AS entity_type` (re-projecting `x.NODE` / a variable in the outer scope returns
+  NOTHING). Full worked example — "who is related to Lindsey":
+    SELECT DISTINCT entity_name, entity_type
+    FROM graph_table ( GRAPH {graph} MATCH (lindsey:Person WHERE LOWER(lindsey.NODE) LIKE '%lindsey%')-[r]-(entity)
+      RETURN entity.NODE AS entity_name, entity.LABEL AS entity_type )
+    LIMIT 100
 - The inner RETURN must project (with an `AS` alias) EVERY column the outer SELECT references —
   including any column used only for ORDER BY, GROUP BY, or an aggregate. Example (order organizations
   by a person's age — age MUST be returned by the inner RETURN so the outer ORDER BY can use it):
     SELECT name, type
-    FROM graph_table ( GRAPH "{graph}" MATCH (p:Person)-[:WORKS_AT]->(o:Organization)
-      RETURN o.entity_name AS name, o.LABEL AS type, p.age AS age )
+    FROM graph_table ( GRAPH {graph} MATCH (p:Person)-[:WORKS_AT]->(o:Organization)
+      RETURN o.NODE AS name, o.LABEL AS type, p.age AS age )
     ORDER BY age DESC
     LIMIT 1
 - Put aggregates in the OUTER SELECT over the inner aliases, e.g. total/max over transactions:
     SELECT bank, ROUND(SUM(amount),2) AS total_transaction, MAX(risk) AS max_risk
-    FROM graph_table ( GRAPH "{graph}" MATCH (a:bank)-[:performed]->(w:wire_message)-[:is_for_transaction]->(t:banking_transaction)
+    FROM graph_table ( GRAPH {graph} MATCH (a:bank)-[:performed]->(w:wire_message)-[:is_for_transaction]->(t:banking_transaction)
       RETURN a.bank_name AS bank, t.banking_transaction_amount AS amount, w.wire_message_risk_score AS risk )
     GROUP BY bank
     ORDER BY total_transaction DESC
 - Predicates may be written inline in the node pattern, e.g. (a:bank WHERE a.NODE = '...'),
   or as a trailing WHERE inside graph_table after the MATCH — either is fine.
 - ALWAYS project the human-readable identity of every entity the question is about as inner scalar
-  columns and surface them in the outer SELECT — its name property AND its label, e.g.
-  `RETURN b.entity_name AS name, b.LABEL AS type`. Do NOT return a bare node object; the English
-  answer is built from the scalar columns.
+  columns and surface them in the outer SELECT BY THEIR INNER ALIAS — its readable-name property AND
+  its label. Extracted
+  graphs store the readable name AS the `NODE` identity property, so PREFER `b.NODE`:
+  `RETURN b.NODE AS name, b.LABEL AS type`. Use a dedicated name property (e.g. `bank_name`) INSTEAD
+  of NODE only when the label's property list clearly shows one that holds the display name. Do NOT
+  return a bare node object; the English answer is built from the scalar columns.
 - For "who/what is related to / connected to / neighbours of X" questions that do NOT name a specific
   relationship, use an UNTYPED relationship `(a)-[r]-(b)` (both directions) so ALL relationship types
   are captured — do not pick a single named type.
@@ -180,13 +216,17 @@ Target dialect: Kinetica GQL, wrapped as a SQL SELECT over graph_table(). Rules 
 - Kinetica GQL does NOT support `EXISTS {{ ... }}` subquery blocks or negated path patterns
   (`WHERE NOT (a)-[...]->(...)`). For a "NOT related to X" question, match the relationship and
   negate a SCALAR predicate instead, e.g.:
-    SELECT person FROM graph_table ( GRAPH "{graph}" MATCH (p:Person)-[:WORKS_AT]->(o:Organization)
-      WHERE o.entity_name <> 'Kinetica' RETURN p.entity_name AS person )
+    SELECT person FROM graph_table ( GRAPH {graph} MATCH (p:Person)-[:WORKS_AT]->(o:Organization)
+      WHERE o.NODE <> 'Kinetica' RETURN p.NODE AS person )
   (this returns nodes linked to a DIFFERENT value; it cannot express "linked to nothing").
 - Match names/free-text LOOSELY and case-INSENSITIVELY with `LOWER(...) LIKE` and a lowercased
-  wildcard pattern, NOT exact `=` (Kinetica LIKE is case-sensitive):
-  `WHERE LOWER(x.entity_name) LIKE '%mullin%'`. Extracted nodes often store a fuller/differently-
-  cased value (node 'Markwayne Mullin' vs a question saying 'Mullin'), so `=` misses them.
+  wildcard pattern, NOT exact `=` (Kinetica LIKE is case-sensitive). Match on the SAME readable-name
+  property you would return — `x.NODE` for extracted graphs (which store the readable name AS NODE),
+  or a dedicated name property when the label has one: `WHERE LOWER(x.NODE) LIKE '%mullin%'`.
+  Extracted nodes often store a fuller/differently-cased value (node 'Markwayne Mullin' vs a question
+  saying 'Mullin'), so `=` misses them. Keep the wildcard pattern to ONE distinctive token
+  (`'%mullin%'`); do NOT chain several words into one pattern (`'%lindsey%funeral%'`) — that
+  over-constrains and usually matches zero rows. Prefer matching the single most distinctive word.
 - To filter or match by a human-readable value (a person/organization/place NAME, a
   title), use the appropriate property from the per-label property list (commonly
   `name`); use the `NODE` identity property in a filter ONLY when the question provides
@@ -226,7 +266,8 @@ def generate_cypher(schema: dict, engine: str, question: str, graph: str = "",
     `_llm` — pass a fake in tests to avoid shelling out to the `claude` CLI.
     """
     call = llm or _get_llm()
-    dialect = _DIALECT_KINETICA.format(graph=graph or "<graph>") if engine == "kinetica" else _DIALECT_FALKORDB
+    dialect = (_DIALECT_KINETICA.format(graph=_graph_ref(graph) if graph else "<graph>")
+               if engine == "kinetica" else _DIALECT_FALKORDB)
     prompt = (
         "You translate a natural-language question into ONE read-only graph query.\n\n"
         + dialect + "\n"

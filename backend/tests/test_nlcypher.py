@@ -53,11 +53,65 @@ def test_generate_cypher_kinetica_dialect_prompt_mentions_graph_clause():
     captured = {}
     def capturing_llm(prompt, *, schema=None):
         captured["prompt"] = prompt
-        return {"cypher": "GRAPH \"demo_graph\" MATCH (a) RETURN a"}
+        return {"cypher": "GRAPH demo_graph MATCH (a) RETURN a"}
     cypher = nlcypher.generate_cypher(_SCHEMA, "kinetica", "who?", graph="demo_graph", llm=capturing_llm)
-    assert cypher == 'GRAPH "demo_graph" MATCH (a) RETURN a'
-    assert 'GRAPH "demo_graph"' in captured["prompt"]
+    assert cypher == 'GRAPH demo_graph MATCH (a) RETURN a'
+    # A plain (non-special-char) graph name is NOT quoted in the GRAPH clause.
+    assert 'GRAPH demo_graph' in captured["prompt"]
+    assert 'GRAPH "demo_graph"' not in captured["prompt"]
     assert "Kinetica GQL" in captured["prompt"]
+
+
+def test_graph_ref_plain_schema_table_is_unquoted():
+    # schema.table with plain identifiers -> no quotes at all (each part is safe).
+    assert nlcypher._graph_ref("ki_home.extracted_graph89") == "ki_home.extracted_graph89"
+    assert nlcypher._graph_ref("banking_graph") == "banking_graph"
+
+
+def test_graph_ref_quotes_only_special_char_parts_individually():
+    # Only the part with a special char is quoted, and per-part (never the whole dotted string).
+    assert nlcypher._graph_ref("odd-schema.tbl") == '"odd-schema".tbl'
+    assert nlcypher._graph_ref("sch.weird-table") == 'sch."weird-table"'
+    # embedded double-quote is doubled inside the quoted part
+    assert nlcypher._graph_ref('a."b') == 'a."""b"'
+
+
+def test_kinetica_prompt_quotes_schema_table_per_part_not_whole():
+    # Regression: a schema-qualified graph must render as GRAPH schema.table (each
+    # part quoted only if needed), NEVER as one quoted token "schema.table".
+    captured = {}
+    def capturing_llm(prompt, *, schema=None):
+        captured["prompt"] = prompt
+        return {"cypher": "GRAPH ki_home.extracted_graph89 MATCH (a) RETURN a"}
+    nlcypher.generate_cypher(_SCHEMA, "kinetica", "who?",
+                             graph="ki_home.extracted_graph89", llm=capturing_llm)
+    p = captured["prompt"]
+    assert "GRAPH ki_home.extracted_graph89" in p
+    assert '"ki_home.extracted_graph89"' not in p
+
+
+def test_kinetica_prompt_prefers_node_identity_for_extracted_graphs():
+    # The dialect must steer identity/matching to `.NODE` (extracted graphs store the
+    # readable name AS NODE), not default to entity_name.
+    kp = _capture_prompt("kinetica")
+    assert "b.NODE AS name, b.LABEL AS type" in kp
+    assert "LOWER(x.NODE) LIKE '%mullin%'" in kp
+    # And it must warn against over-constrained multi-word LIKE patterns.
+    assert "%lindsey%funeral%" in kp
+
+
+def test_kinetica_prompt_outer_select_references_inner_aliases_not_graph_vars():
+    # Regression: the outer SELECT must reference the inner RETURN aliases (bare
+    # names), NOT a graph pattern variable or its property (entity.NODE) again —
+    # graph vars don't exist outside graph_table(), so re-projecting them there
+    # returns zero rows. The dialect must teach the corrected shape.
+    kp = _capture_prompt("kinetica")
+    assert "DO NOT EXIST outside graph_table()" in kp
+    # the worked "who is related to X" example uses bare aliases in the outer SELECT
+    assert "SELECT DISTINCT entity_name, entity_type" in kp
+    # and carries the full worked example (untyped rel, inner alias projection)
+    assert "-[r]-(entity)" in kp
+    assert "RETURN entity.NODE AS entity_name, entity.LABEL AS entity_type" in kp
 
 
 def test_validate_cypher_rejects_delete():
@@ -301,7 +355,7 @@ def test_prompts_require_scalar_identity_return_and_untyped_related():
     kp = _capture_prompt("kinetica")
     # scalar name/type return (not bare node objects)
     assert "b.name AS name, b.LABEL AS type" in fp
-    assert "b.entity_name AS name, b.LABEL AS type" in kp
+    assert "b.NODE AS name, b.LABEL AS type" in kp
     assert "NEVER return a bare node" in fp
     # untyped relationship for "related to" questions
     assert "(a)-[r]-(b)" in fp

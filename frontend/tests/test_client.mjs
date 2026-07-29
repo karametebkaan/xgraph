@@ -231,6 +231,37 @@ const run = async () => {
     console.log("ok: ask/explain fallback flag");
   }
 
+  // fetchEntities keyset: sends after when given, omits it when null
+  {
+    const captured = [];
+    const fakeFetchImpl = async (url) => {
+      captured.push(url);
+      return { ok: true, json: async () => ({ nodes: [], edges: [], next_cursor: null }) };
+    };
+    const keysetClient = g.makeClient("http://gw", "falkordb", fakeFetchImpl);
+    await keysetClient.fetchEntities("g", 10, "abc");
+    await keysetClient.fetchEntities("g", 10, null);
+    assert(captured[0].includes("after=abc"), "after sent when provided");
+    assert(!captured[1].includes("after="), "after omitted when null");
+    console.log("ok: fetchEntities after param");
+  }
+
+  // visualize(): GET /visualize with graph+limit, parses concise dict
+  {
+    let calledUrl = null;
+    const fakeFetchImpl = async (url) => {
+      calledUrl = url;
+      return { ok: true, json: async () => ({ ids: ["a"], labels: ["P"], src: [], dst: [], etype: [], total_nodes: 1, total_edges: 0, capped: false }) };
+    };
+    const vizClient = g.makeClient("http://gw", "falkordb", fakeFetchImpl);
+    const out = await vizClient.visualize("g1", 500);
+    assert(calledUrl.includes("/visualize"), "hits /visualize");
+    assert(calledUrl.includes("graph=g1"), "carries graph");
+    assert(calledUrl.includes("limit=500"), "carries limit");
+    assert.equal(out.ids[0], "a");
+    console.log("ok: visualize client");
+  }
+
   console.log("client OK");
 };
 run();

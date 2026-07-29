@@ -277,10 +277,21 @@ def create_app(adapter_factory=registry.get_adapter, compute=None, store=None) -
             return _err(engine, e)
 
     @app.get("/entities")
-    def entities(graph: str, engine: str = "", limit: int = 1000, offset: int = 0,
-                 session: str | None = None):
+    def entities(graph: str, engine: str = "", limit: int = 1000,
+                 after: str | None = None, session: str | None = None):
         try:
-            return _resolve_adapter(session, engine).fetch_entities(graph, limit, offset)
+            return _resolve_adapter(session, engine).fetch_entities(graph, limit, after)
+        except Exception as e:
+            return _err(engine, e)
+
+    @app.get("/visualize")
+    def visualize(graph: str, engine: str = "", limit: int = 100000,
+                  session: str | None = None):
+        # A+B fast Visualize: whole capped subgraph in ONE call, concise/columnar
+        # (index-pair edges). See GraphEngineAdapter.fetch_subgraph. FalkorDB-first
+        # (Kinetica's Visualize is browser-direct and does not use this).
+        try:
+            return _resolve_adapter(session, engine).fetch_subgraph(graph, limit)
         except Exception as e:
             return _err(engine, e)
 

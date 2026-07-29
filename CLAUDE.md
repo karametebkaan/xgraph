@@ -185,6 +185,17 @@ browser-driven (the user drives it).
 - **Never put `ORDER BY` in paged Kinetica SQL** — `graph_loader.kinetica_source` offset-paging over
   an `ORDER BY` result duplicates and drops rows while the count still looks right (documented in
   `falkor`'s CLAUDE.md). Read unsorted; sort downstream in DuckDB if needed.
+- **FalkorDB silently truncates every result set to `RESULTSET_SIZE` (default 10000 rows)** — a query
+  matching >10000 rows returns only 10000 with NO error, so a large `/query`, `/entities`, hydrate, or
+  viz pull silently loses data (`count(r)` reports the true total; returning the rows caps at 10000).
+  `FalkorDBAdapter.fetch_subgraph` raises it via `_ensure_unbounded_results()` (`config.set
+  RESULTSET_SIZE -1`, best-effort/cached) then bulk-pulls (~14s for the 620k-node/846k-edge banking
+  graph); the paged fallback (`_pull_edges` / `_pull_nodes`) uses a deterministic `ORDER BY` ending in
+  the unique `r.ID` so SKIP/LIMIT paging past the cap is drop-free (safe on FalkorDB's single-node
+  engine, unlike the Kinetica offset hazard above). Note: raising the cap is global to the FalkorDB
+  module, so it also un-truncates subsequent `/query` and `/entities` calls — but `fetch_entities`
+  itself is not yet cap-aware, so a single >10000-edge node page still truncates until some
+  `fetch_subgraph` call has raised the cap.
 - **`requirements.txt` is standalone** — a clean `python3 -m venv .venv && ./.venv/bin/pip install -r
   requirements.txt` gives a working backend (fastapi, uvicorn, httpx, duckdb, falkordb, gpudb,
   typeguard, pyyaml, python-dotenv, pytest). `gpudb` is a hard import (adapters load at app import),

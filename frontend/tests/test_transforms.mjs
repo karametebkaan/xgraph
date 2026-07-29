@@ -67,4 +67,28 @@ const g = require("../gateway.js");
   const r = g.recordFromGateway({ id: "x1", label: "thing", props: { weight: 3 } });
   assert.deepEqual(r, { weight: 3, NODE: "x1", LABEL: "thing" });
 }
+// graphTableFromConcise: index-pair edges -> graphTableData shape, true totals
+{
+  const concise = {
+    ids: ["a", "b", "c"], labels: ["Person", "Bank", ["X", "Y"]],
+    src: [0, 1], dst: [1, 2], etype: ["MEMBER_OF", "OWNS"],
+    total_nodes: 100, total_edges: 250, capped: true,
+  };
+  const gt = g.graphTableFromConcise(concise);
+  assert.equal(gt.nodes.records.length, 3);
+  assert.equal(gt.nodes.records[0].NODE_NAME, "a");
+  assert.equal(gt.nodes.records[0].NODE_LABEL, "Person");
+  // array label coerced to JSON-array-string via labelToString (same as graphTableFromGateway)
+  assert.equal(gt.nodes.records[2].NODE_LABEL,
+    g.graphTableFromGateway({ nodes: [{ id: "c", label: ["X", "Y"] }], edges: [] }).nodes.records[0].NODE_LABEL);
+  // index pairs reconstruct endpoint ids
+  assert.equal(gt.edges.records[0].NODE1_NAME, "a");
+  assert.equal(gt.edges.records[0].NODE2_NAME, "b");
+  assert.equal(gt.edges.records[0].EDGE_LABEL, "MEMBER_OF");
+  assert.equal(gt.edges.records[1].NODE1_NAME, "b");
+  assert.equal(gt.edges.records[1].NODE2_NAME, "c");
+  // true totals carried, not the pulled length
+  assert.equal(gt.nodes.total, 100);
+  assert.equal(gt.edges.total, 250);
+}
 console.log("transforms OK");
