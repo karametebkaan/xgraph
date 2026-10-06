@@ -468,3 +468,7 @@ docs/                      design specs, plans, images
   a trusted network; add TLS or a firewall rule if reachable more broadly.
 
 See `CLAUDE.md` for developer-facing detail (dialect translation, gotchas, per-engine notes).
+
+## License
+
+MIT, Copyright (c) 2026 Graph AI LLC. See [LICENSE](LICENSE).
